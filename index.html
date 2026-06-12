@@ -324,7 +324,7 @@
     document.getElementById("aiSummary").innerHTML  = `<div style="color:var(--text);font-size:13px;padding-top:20px"><span class="spinner"></span>Waiting for data…</div>`;
 
     try {
-      const res  = await fetch("http://localhost:3000/analyze", {
+      const res  = await fetch("/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticker })
@@ -390,7 +390,7 @@
     scrollChat();
 
     try {
-      const res = await fetch("http://localhost:3000/chat", {
+      const res = await fetch(" /chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
