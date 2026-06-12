@@ -3,6 +3,7 @@ import requests
 import json
 import re
 import sys
+import os
 import math
 import pandas as pd
 import numpy as np
@@ -104,8 +105,10 @@ def get_recent_filings(cik, limit=50):
                          headers={"User-Agent": USER_AGENT}, timeout=10)
         r.raise_for_status()
         recent = r.json().get('filings', {}).get('recent', {})
+        primary_docs = recent.get('primaryDocument', [])
         return [{'form': recent['form'][i], 'filing_date': recent['filingDate'][i],
-                 'accession_number': recent['accessionNumber'][i]}
+                 'accession_number': recent['accessionNumber'][i],
+                 'primary_document': primary_docs[i] if i < len(primary_docs) else None}
                 for i in range(min(limit, len(recent.get('accessionNumber', []))))]
     except: return []
 
@@ -158,6 +161,49 @@ def safe_extract_sec(facts, namespace, concept):
         if not annual: return None, []
         return annual[0].get('val'), [x.get('val') for x in annual[:5]]
     except: return None, []
+
+def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs"):
+    """
+    Downloads the primary document of the most recent 10-K on file.
+    If no 10-K is present, falls back to the single most recent filing of any type.
+    A single lightweight GET request is made — gentle on SEC's servers.
+    """
+    if not filings:
+        return None
+
+    target = next((f for f in filings if f['form'] == '10-K'), None)
+    if not target:
+        target = filings[0]
+
+    if not target.get('primary_document'):
+        return {'form': target['form'], 'filing_date': target['filing_date'], 'error': 'No primary document listed.'}
+
+    try:
+        acc_nodash = target['accession_number'].replace('-', '')
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_nodash}/{target['primary_document']}"
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        r.raise_for_status()
+
+        ext = target['primary_document'].split('.')[-1] if '.' in target['primary_document'] else 'htm'
+        safe_form = target['form'].replace(' ', '').replace('/', '-')
+        filename = f"{ticker}_{safe_form}_{target['filing_date']}.{ext}"
+
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, filename)
+        with open(out_path, 'wb') as fh:
+            fh.write(r.content)
+
+        return {
+            'form': target['form'],
+            'filing_date': target['filing_date'],
+            'accession_number': target['accession_number'],
+            'source_url': url,
+            'local_path': out_path,
+            'filename': filename,
+            'size_bytes': len(r.content)
+        }
+    except Exception as e:
+        return {'form': target['form'], 'filing_date': target['filing_date'], 'error': str(e)}
 
 # ==========================================
 # 3. OPTIONS CHAIN (Live — Future Dates Only)
@@ -248,6 +294,72 @@ def fetch_options_chain(stock, current_price):
         pass
 
     return result
+
+# ==========================================
+# 3b. REAL-TIME / INTRADAY DATA
+# ==========================================
+def fetch_intraday_data(stock):
+    """
+    Fetches recent intraday bars — enough resolution and lookback for
+    pattern detection across a typical multi-day trading window.
+    Tries 5-minute bars over the last 5 trading days first (yfinance's
+    practical limit for that interval), falling back to coarser bars
+    if the ticker has limited intraday history.
+    """
+    for period, interval in [("5d", "5m"), ("1mo", "15m"), ("1mo", "30m")]:
+        try:
+            intraday = stock.history(period=period, interval=interval)
+            if not intraday.empty and len(intraday) >= 50:
+                intraday.attrs['interval'] = interval
+                intraday.attrs['period'] = period
+                return intraday
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+def get_live_quote(stock, info):
+    """Best-effort real-time quote snapshot (delayed per Yahoo's feed, but the freshest available)."""
+    quote = {"fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    try:
+        fi = stock.fast_info
+        quote.update({
+            "last_price":     safe_float(fi.get('lastPrice')),
+            "previous_close": safe_float(fi.get('previousClose')),
+            "open":           safe_float(fi.get('open')),
+            "day_high":       safe_float(fi.get('dayHigh')),
+            "day_low":        safe_float(fi.get('dayLow')),
+            "last_volume":    safe_float(fi.get('lastVolume')),
+            "market_cap":     safe_float(fi.get('marketCap')),
+            "year_high":      safe_float(fi.get('yearHigh')),
+            "year_low":       safe_float(fi.get('yearLow')),
+            "currency":       fi.get('currency'),
+            "exchange":       fi.get('exchange'),
+        })
+    except Exception:
+        pass
+    quote["bid"]            = safe_float(info.get('bid'))
+    quote["ask"]            = safe_float(info.get('ask'))
+    quote["bid_size"]       = info.get('bidSize')
+    quote["ask_size"]       = info.get('askSize')
+    quote["market_state"]   = info.get('marketState')
+    return quote
+
+def get_price_history_series(hist, days=252):
+    """Returns the trailing `days` of daily OHLCV (oldest first) for charting downstream."""
+    if hist is None or hist.empty:
+        return []
+    recent = hist.tail(days)
+    series = []
+    for idx, row in recent.iterrows():
+        series.append({
+            "date":   idx.strftime('%Y-%m-%d'),
+            "open":   safe_float(row.get('Open')),
+            "high":   safe_float(row.get('High')),
+            "low":    safe_float(row.get('Low')),
+            "close":  safe_float(row.get('Close')),
+            "volume": int(row.get('Volume', 0) or 0)
+        })
+    return series
 
 # ==========================================
 # 4. CHART PATTERN DETECTION
@@ -487,8 +599,14 @@ def generate_analysis_payload(ticker):
             except: continue
         filing_signals['8k_events'] = list(set(filing_signals['8k_events']))
 
+    # ── SEC FILING ATTACHMENT ────────────────────────────────────────────────
+    sec_filing_attachment = None
+    if sec_available and filings:
+        print(f"[2/8] Downloading latest 10-K filing for attachment...", file=sys.stderr)
+        sec_filing_attachment = download_latest_filing(cik, filings, ticker)
+
     # ── YAHOO FINANCE ─────────────────────────────────────────────────────────
-    print(f"[2/5] Fetching Yahoo Finance data...", file=sys.stderr)
+    print(f"[3/8] Fetching Yahoo Finance data...", file=sys.stderr)
     try:
         stock = yf.Ticker(ticker)
         info  = stock.info or {}
@@ -519,6 +637,14 @@ def generate_analysis_payload(ticker):
         current_price = stock.fast_info['lastPrice']
     except:
         current_price = hist['Close'].iloc[-1] if not hist.empty else None
+
+    # ── REAL-TIME QUOTE & INTRADAY DATA ───────────────────────────────────────
+    print(f"[4/8] Fetching live quote and intraday bars...", file=sys.stderr)
+    live_quote   = get_live_quote(stock, info) if stock else {"fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    intraday_hist = fetch_intraday_data(stock) if stock else pd.DataFrame()
+
+    # ── 1-YEAR DAILY PRICE HISTORY (for charting) ─────────────────────────────
+    price_history_1y = get_price_history_series(hist, days=252)
 
     # ── VALUATION ─────────────────────────────────────────────────────────────
     pe_trail  = info.get('trailingPE')
