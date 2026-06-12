@@ -863,6 +863,7 @@ You are an expert quantitative financial analyst. Analyze **{company_name} ({tic
 - **Earnings Quality (OCF/NI)**: {fmt(earnings_quality,'ratio')}
 
 ### 6. PRICE, RISK & MOMENTUM (as of {TODAY_STR})
+- **Live Quote (fetched {live_quote.get('fetched_at','N/A')})**: Last {fmt(live_quote.get('last_price'),'usd')} | Open {fmt(live_quote.get('open'),'usd')} | Day Range {fmt(live_quote.get('day_low'),'usd')} — {fmt(live_quote.get('day_high'),'usd')} | Prev Close {fmt(live_quote.get('previous_close'),'usd')} | Bid/Ask {fmt(live_quote.get('bid'),'usd')}/{fmt(live_quote.get('ask'),'usd')} | Market: {live_quote.get('market_state') or 'N/A'}
 - **Current Price**: {fmt(latest,'usd')} ({fmt(daily_change,'pct')} today)
 - **52-Week Range**: {fmt(low_52w,'usd')} — {fmt(high_52w,'usd')} ({fmt(pct_from_52_high,'pct')} from 52W high)
 - **5-Year Range**: {fmt(low_5y,'usd')} — {fmt(high_5y,'usd')} ({fmt(pct_from_5y_high,'pct')} from 5Y high)
@@ -998,6 +999,9 @@ Today is {TODAY_STR}. Use this throughout your response.
         "filing_activity":   filing_signals,
         "options_data":      options_data,
         "mda_excerpt":       mda_text,
+        "live_quote":        live_quote,
+        "price_history_1y":  price_history_1y,
+        "sec_filing":        sec_filing_attachment,
         "algorithmic_signals": flags,
         "ai_prompt":         ai_prompt
     }

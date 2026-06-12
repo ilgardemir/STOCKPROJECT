@@ -133,13 +133,10 @@ http.createServer(async (req, res) => {
             const aiSummary = aiData.choices[0].message.content;
 
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({
-              ticker: payload.ticker,
-              company_name: payload.company_name,
-              raw_data: payload.raw_data,
-              algorithmic_signals: payload.algorithmic_signals,
-              aiSummary
-            }));
+            // Forward the COMPLETE scraper payload (raw data, chart patterns,
+            // options chains, SEC filing activity, MD&A, live quote, 1Y price
+            // history, and the exact prompt the AI received) plus the AI summary.
+            res.end(JSON.stringify({ ...payload, aiSummary }));
 
           } catch (aiErr) {
             res.writeHead(500, { "Content-Type": "application/json" });
