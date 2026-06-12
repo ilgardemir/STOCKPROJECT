@@ -73,7 +73,7 @@ http.createServer(async (req, res) => {
         const cleanTicker = ticker.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
 
         // Run Python script with ticker as a command-line argument
-        exec(`python3 "${SCRAPER_PATH}" ${cleanTicker}`, { timeout: 90000 }, async (err, stdout, stderr) => {
+        exec(`python3 "${SCRAPER_PATH}" ${cleanTicker}`, { timeout: 150000, maxBuffer: 1024 * 1024 * 10 }, async (err, stdout, stderr) => {
 
           if (!stdout || !stdout.trim()) {
             res.writeHead(500, { "Content-Type": "application/json" });
@@ -113,7 +113,7 @@ http.createServer(async (req, res) => {
               body: JSON.stringify({
                 model: "anthropic/claude-sonnet-4-5",
                 temperature: 0.3,
-                max_tokens: 1200,
+                max_tokens: 4096,
                 messages: [
                   {
                     role: "system",
@@ -199,9 +199,7 @@ http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end("Not found");
   }
-console.log("process.env.PORT =", process.env.PORT);
-console.log("PORT =", PORT);
-  
+
 }).listen(PORT, "0.0.0.0", () => {
   console.log(`\n✅ Stock Analyzer server running at http://0.0.0.0:${PORT}`);
   console.log(`   Python script: ${path.resolve(SCRAPER_PATH)}\n`);
