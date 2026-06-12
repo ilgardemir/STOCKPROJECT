@@ -440,7 +440,6 @@ def detect_chart_patterns(hist, current_price):
 # 5. MAIN ENGINE
 # ==========================================
 def generate_analysis_payload(ticker):
-    print(f"[1/5] Today is {TODAY_STR}. Querying SEC EDGAR for {ticker}...", file=sys.stderr)
 
     # ── SEC DATA ──────────────────────────────────────────────────────────────
     cik           = get_cik_from_ticker(ticker)
@@ -488,7 +487,6 @@ def generate_analysis_payload(ticker):
         filing_signals['8k_events'] = list(set(filing_signals['8k_events']))
 
     # ── YAHOO FINANCE ─────────────────────────────────────────────────────────
-    print(f"[2/5] Fetching Yahoo Finance data...", file=sys.stderr)
     try:
         stock = yf.Ticker(ticker)
         info  = stock.info or {}
@@ -638,15 +636,12 @@ def generate_analysis_payload(ticker):
                 elif rep < est: misses += 1
 
     # ── OPTIONS CHAIN ─────────────────────────────────────────────────────────
-    print(f"[3/5] Fetching live options chain...", file=sys.stderr)
     options_data = fetch_options_chain(stock, latest or 0) if stock and latest else {'available_expirations': [], 'chains': [], 'iv_summary': {}}
 
     # ── CHART PATTERNS ────────────────────────────────────────────────────────
-    print(f"[4/5] Detecting chart patterns...", file=sys.stderr)
     chart_patterns, key_levels = detect_chart_patterns(hist, latest or 0)
 
     # ── ALGORITHMIC FLAGS ─────────────────────────────────────────────────────
-    print(f"[5/5] Generating signals...", file=sys.stderr)
     flags         = []
     data_warnings = []
 
