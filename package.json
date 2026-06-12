@@ -1,0 +1,10 @@
+{
+  "name": "stock-analyzer",
+  "version": "1.0.0",
+  "description": "Quant + AI stock analysis tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
