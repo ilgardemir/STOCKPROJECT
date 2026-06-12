@@ -199,7 +199,9 @@ http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end("Not found");
   }
-
+console.log("process.env.PORT =", process.env.PORT);
+console.log("PORT =", PORT);
+  
 }).listen(PORT, "0.0.0.0", () => {
   console.log(`\n✅ Stock Analyzer server running at http://0.0.0.0:${PORT}`);
   console.log(`   Python script: ${path.resolve(SCRAPER_PATH)}\n`);
