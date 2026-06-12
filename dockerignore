@@ -1,0 +1,6 @@
+node_modules
+npm-debug.log
+.git
+.env
+__pycache__
+*.pyc

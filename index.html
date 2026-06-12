@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Analyzer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #080d14;
+    --surface:  #0f1724;
+    --surface2: #162032;
+    --border:   #1e2d40;
+    --text:     #94a3b8;
+    --bright:   #e2e8f0;
+    --gold:     #f59e0b;
+    --gold-dim: #78500a;
+    --green:    #34d399;
+    --red:      #f87171;
+    --yellow:   #fbbf24;
+    --mono:     'JetBrains Mono', 'Courier New', monospace;
+    --sans:     'Inter', system-ui, sans-serif;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.6; }
+
+  /* Header */
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .logo { width: 30px; height: 30px; background: var(--gold); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: #000; }
+  header h1 { font-size: 15px; font-weight: 600; color: var(--bright); }
+  header span { color: var(--text); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); margin-left: auto; animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* Input */
+  .input-panel {
+    display: flex; align-items: flex-end; gap: 12px;
+    padding: 18px 28px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--gold); }
+  input {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--bright); font-family: var(--mono); font-size: 14px;
+    padding: 9px 14px; outline: none; transition: border-color .15s; width: 160px;
+  }
+  input:focus { border-color: var(--gold); }
+  button {
+    background: var(--gold); border: none; border-radius: 6px;
+    color: #000; cursor: pointer; font-family: var(--sans); font-size: 13px;
+    font-weight: 700; letter-spacing: .04em; padding: 9px 22px;
+    transition: opacity .15s, transform .1s;
+  }
+  button:hover { opacity: .88; }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* Status */
+  #status { padding: 7px 28px; font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--bg); border-bottom: 1px solid var(--border); min-height: 32px; }
+  #status.running { color: var(--gold); }
+  #status.error   { color: var(--red); }
+  #status.done    { color: var(--green); }
+
+  /* Layout */
+  main { display: grid; grid-template-columns: 1fr 1fr; height: calc(100vh - 158px - 180px); overflow: hidden; }
+
+  .panel { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+  .panel:last-child { border-right: none; }
+
+  .panel-header {
+    padding: 9px 20px; background: var(--surface2); border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--text); display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  .tag { background: var(--gold-dim); color: var(--gold); border-radius: 4px; padding: 1px 7px; font-size: 10px; }
+
+  .panel-body { flex: 1; overflow-y: auto; padding: 16px 20px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+  /* Left panel — signals + data */
+  .section-title { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--gold); margin: 16px 0 8px; }
+  .section-title:first-child { margin-top: 0; }
+
+  .signal {
+    font-family: var(--mono); font-size: 12px; padding: 5px 10px;
+    border-radius: 4px; margin-bottom: 5px; border-left: 3px solid;
+  }
+  .signal.green  { color: var(--green);  background: rgba(52,211,153,.07); border-color: var(--green); }
+  .signal.red    { color: var(--red);    background: rgba(248,113,113,.07); border-color: var(--red); }
+  .signal.yellow { color: var(--yellow); background: rgba(251,191,36,.07);  border-color: var(--yellow); }
+  .signal.neutral{ color: var(--text);   background: rgba(148,163,184,.07); border-color: var(--border); }
+
+  .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 4px; }
+  .metric { background: var(--surface2); border-radius: 5px; padding: 8px 10px; }
+  .metric .k { font-size: 10px; color: var(--text); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+  .metric .v { font-family: var(--mono); font-size: 13px; color: var(--bright); font-weight: 500; }
+  .metric .v.green { color: var(--green); }
+  .metric .v.red   { color: var(--red); }
+
+  /* Right panel — AI */
+  #aiSummary { color: var(--bright); font-size: 13.5px; line-height: 1.8; }
+  #aiSummary h2 { font-size: 12px; font-weight: 700; color: var(--gold); letter-spacing: .05em; margin: 18px 0 6px; text-transform: uppercase; }
+  #aiSummary h2:first-child { margin-top: 0; }
+  #aiSummary h3 { font-size: 12px; font-weight: 700; color: var(--gold); letter-spacing: .05em; margin: 14px 0 5px; }
+  #aiSummary p  { margin-bottom: 10px; color: var(--text); }
+  #aiSummary ul { padding-left: 18px; margin-bottom: 10px; }
+  #aiSummary li { margin-bottom: 4px; color: var(--text); }
+  #aiSummary strong { color: var(--bright); font-weight: 600; }
+  #aiSummary hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+  .placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 10px; color: var(--border); font-size: 13px; text-align: center; }
+
+  .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--gold); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; vertical-align: middle; margin-right: 7px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 700px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    .panel { height: 50vh; border-right: none; border-bottom: 1px solid var(--border); }
+  }
+
+  /* Chat section */
+  #chatSection { display: none; border-top: 1px solid var(--border); background: var(--surface); height: 180px; flex-direction: column; }
+  #chatSection.visible { display: flex; }
+  #chatMessages { flex: 1; overflow-y: auto; padding: 10px 20px; display: flex; flex-direction: column; gap: 8px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .chat-msg { max-width: 75%; padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+  .chat-msg.user { align-self: flex-end; background: var(--gold); color: #000; font-weight: 500; border-bottom-right-radius: 2px; }
+  .chat-msg.ai   { align-self: flex-start; background: var(--surface2); color: var(--bright); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .chat-msg.ai strong { color: var(--gold); }
+  #chatInputRow { display: flex; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  #chatInput { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--bright); font-family: var(--sans); font-size: 13px; padding: 8px 12px; outline: none; resize: none; height: 36px; transition: border-color .15s; }
+  #chatInput:focus { border-color: var(--gold); }
+  #chatSendBtn { background: var(--gold); border: none; border-radius: 6px; color: #000; cursor: pointer; font-size: 13px; font-weight: 700; padding: 8px 16px; transition: opacity .15s; white-space: nowrap; }
+  #chatSendBtn:hover { opacity: .85; }
+  #chatSendBtn:disabled { opacity: .4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">S</div>
+  <h1>Stock Analyzer <span>// Quant + AI</span></h1>
+  <div class="dot"></div>
+</header>
+
+<div class="input-panel">
+  <div class="field">
+    <label for="ticker">Ticker Symbol</label>
+    <input id="ticker" type="text" placeholder="e.g. AAPL" maxlength="10" />
+  </div>
+  <button id="analyzeBtn" onclick="runAnalysis()">▶ Run Analysis</button>
+</div>
+
+<div id="status">Ready. Enter a ticker symbol to begin.</div>
+
+<main>
+  <!-- Left: Signals + Key Metrics -->
+  <div class="panel">
+    <div class="panel-header">Signals &amp; Metrics <span class="tag">Python</span></div>
+    <div class="panel-body" id="leftPanel">
+      <div class="placeholder">
+        <svg width="38" height="38" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 17v-2m3 2v-4m3 4v-6M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
+        </svg>
+        <span>Signals and key metrics will appear here</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: AI Analysis -->
+  <div class="panel">
+    <div class="panel-header">AI Analysis <span class="tag">Claude</span></div>
+    <div class="panel-body">
+      <div id="aiSummary">
+        <div class="placeholder">
+          <svg width="38" height="38" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+          </svg>
+          <span>Claude's analysis will appear here</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="chatSection">
+  <div id="chatMessages"></div>
+  <div id="chatInputRow">
+    <input id="chatInput" type="text" placeholder="Ask a follow-up about this stock… (e.g. What are the main risks? How does this compare to industry peers?)" />
+    <button id="chatSendBtn" onclick="sendChat()">Send</button>
+  </div>
+</div>
+
+
+<script>
+  function signalClass(text) {
+    const t = text.toUpperCase();
+    if (t.includes("BULLISH") || t.includes("FUNDAMENTAL VALUE") || t.includes("BEAT"))  return "green";
+    if (t.includes("RED FLAG") || t.includes("BEARISH") || t.includes("EXTREME") || t.includes("MISSED")) return "red";
+    if (t.includes("WARNING") || t.includes("WEAK") || t.includes("FAKE") || t.includes("EXPENSIVE") || t.includes("RECOVERY") || t.includes("STRETCH") || t.includes("SHORT") || t.includes("CYCLE") || t.includes("OVERSOLD") || t.includes("OVERBOUGHT")) return "yellow";
+    return "neutral";
+  }
+
+  function fmt(val, type) {
+    if (val === null || val === undefined || isNaN(val)) return "N/A";
+    if (type === "pct")   return (val * 100).toFixed(2) + "%";
+    if (type === "usd")   return "$" + parseFloat(val).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    if (type === "ratio") return parseFloat(val).toFixed(2);
+    return String(val);
+  }
+
+  function colorVal(val, inverse = false) {
+    if (val === null || val === undefined || isNaN(val)) return "";
+    const positive = inverse ? val < 0 : val > 0;
+    return positive ? "green" : "red";
+  }
+
+  function renderLeft(data) {
+    const r = data.raw_data;
+    const signals = data.algorithmic_signals;
+
+    let html = "";
+
+    // Signals
+    html += `<div class="section-title">Algorithmic Signals</div>`;
+    if (signals && signals.length > 0) {
+      signals.forEach(s => {
+        html += `<div class="signal ${signalClass(s)}">${s}</div>`;
+      });
+    } else {
+      html += `<div class="signal neutral">NEUTRAL — No strong signals triggered.</div>`;
+    }
+
+    // Valuation
+    html += `<div class="section-title">Valuation</div><div class="metric-grid">`;
+    html += metric("P/E Trailing",  fmt(r.valuation.pe_trailing, "ratio"));
+    html += metric("P/E Forward",   fmt(r.valuation.pe_forward,  "ratio"));
+    html += metric("PEG Ratio",     fmt(r.valuation.peg_ratio,   "ratio"));
+    html += metric("Price/Book",    fmt(r.valuation.price_to_book,"ratio"));
+    html += `</div>`;
+
+    // Profitability
+    html += `<div class="section-title">Profitability</div><div class="metric-grid">`;
+    html += metric("Gross Margin",  fmt(r.profitability.gross_margin,     "pct"));
+    html += metric("Net Margin",    fmt(r.profitability.net_margin,       "pct"));
+    html += metric("ROE",           fmt(r.profitability.roe,              "pct"));
+    html += metric("ROA",           fmt(r.profitability.roa,              "pct"));
+    html += `</div>`;
+
+    // Health
+    html += `<div class="section-title">Financial Health</div><div class="metric-grid">`;
+    html += metric("Current Ratio", fmt(r.financial_health.current_ratio, "ratio"));
+    html += metric("Debt/Equity",   fmt(r.financial_health.debt_to_equity,"ratio"));
+    html += metric("Earnings Quality", fmt(r.financial_health.earnings_quality,"ratio"));
+    html += `</div>`;
+
+    // Risk & Momentum
+    html += `<div class="section-title">Risk & Momentum</div><div class="metric-grid">`;
+    html += metric("Price",         fmt(r.technicals.current_price, "usd"));
+    html += metric("RSI (14)",      fmt(r.technicals.rsi_14,        "ratio"));
+    html += metric("Beta",          fmt(r.technicals.beta,          "ratio"));
+    html += metric("5Y CAGR",       fmt(r.risk_return.cagr,         "pct"), colorVal(r.risk_return.cagr));
+    html += metric("Sharpe Ratio",  fmt(r.risk_return.sharpe,       "ratio"), colorVal(r.risk_return.sharpe));
+    html += metric("Max Drawdown",  fmt(r.risk_return.max_drawdown, "pct"),  colorVal(r.risk_return.max_drawdown, true));
+    html += `</div>`;
+
+    // Sentiment
+    html += `<div class="section-title">Sentiment</div><div class="metric-grid">`;
+    html += metric("Analyst Target",fmt(r.sentiment.target_mean,   "usd"));
+    html += metric("Short Interest",r.sentiment.short_percent !== null ? (r.sentiment.short_percent * 100).toFixed(1) + "%" : "N/A");
+    html += metric("Insider Tx (90D)", r.sentiment.insider_tx_90d ?? "N/A");
+    html += `</div>`;
+
+    // Earnings
+    if (data.raw_data.earnings_surprises && data.raw_data.earnings_surprises.length > 0) {
+      html += `<div class="section-title">Recent Earnings</div>`;
+      data.raw_data.earnings_surprises.forEach(e => {
+        const cl = e.surprise_pct >= 0 ? "green" : "red";
+        html += `<div class="signal ${cl}">${e.date} — Est $${e.estimate.toFixed(2)} | Rep $${e.reported.toFixed(2)} | <strong>${(e.surprise_pct*100).toFixed(1)}% surprise</strong></div>`;
+      });
+    }
+
+    document.getElementById("leftPanel").innerHTML = html;
+  }
+
+  function metric(label, value, colorClass = "") {
+    return `<div class="metric"><div class="k">${label}</div><div class="v ${colorClass}">${value}</div></div>`;
+  }
+
+  function renderMarkdown(text) {
+    return text
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/^#{3} (.+)$/gm, "<h3>$1</h3>")
+      .replace(/^#{1,2} (.+)$/gm, "<h2>$1</h2>")
+      .replace(/^[-•*]\s+(.+)$/gm, "<li>$1</li>")
+      .replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>")
+      .replace(/^---$/gm, "<hr>")
+      .replace(/\n\n+/g, "</p><p>")
+      .replace(/^(?!<[hpuol])(.+)$/gm, "<p>$1</p>")
+      .replace(/<p><\/p>/g, "");
+  }
+
+  async function runAnalysis() {
+    const ticker = document.getElementById("ticker").value.trim();
+    const btn    = document.getElementById("analyzeBtn");
+    const status = document.getElementById("status");
+
+    if (!ticker) { setStatus("Please enter a ticker symbol.", "error"); return; }
+
+    btn.disabled = true;
+    setStatus(`<span class="spinner"></span>Fetching data for ${ticker.toUpperCase()}… this may take 20–40 seconds.`, "running");
+
+    document.getElementById("leftPanel").innerHTML  = `<div style="color:var(--text);font-size:13px;padding-top:20px"><span class="spinner"></span>Running quantitative analysis…</div>`;
+    document.getElementById("aiSummary").innerHTML  = `<div style="color:var(--text);font-size:13px;padding-top:20px"><span class="spinner"></span>Waiting for data…</div>`;
+
+    try {
+      const res  = await fetch("/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker })
+      });
+
+      const data = await res.json();
+
+      if (data.error) {
+        setStatus(`Error: ${data.error}`, "error");
+        document.getElementById("leftPanel").innerHTML  = `<div style="color:var(--red);font-family:var(--mono);font-size:12px">${data.error}</div>`;
+        document.getElementById("aiSummary").innerHTML  = `<div class="placeholder"><span>Analysis unavailable</span></div>`;
+      } else {
+        renderLeft(data);
+        document.getElementById("aiSummary").innerHTML = renderMarkdown(data.aiSummary);
+        setStatus(`✓ Analysis complete — ${data.company_name} (${data.ticker})`, "done");
+        // Store context for follow-up chat
+        window._chatContext  = data.aiSummary;
+        window._chatHistory  = [];
+        window._chatMessages = [];
+        document.getElementById("chatMessages").innerHTML = "";
+        document.getElementById("chatSection").classList.add("visible");
+        document.getElementById("chatInput").focus();
+      }
+
+    } catch (e) {
+      setStatus(`Connection failed. Is the server running? (${e.message})`, "error");
+      document.getElementById("leftPanel").innerHTML  = `<div style="color:var(--red);font-family:var(--mono);font-size:12px">Could not reach server at localhost:3000.\nMake sure you ran: node server.js</div>`;
+      document.getElementById("aiSummary").innerHTML  = `<div class="placeholder"><span>Analysis unavailable</span></div>`;
+    }
+
+    btn.disabled = false;
+  }
+
+  function setStatus(msg, type = "") {
+    const el = document.getElementById("status");
+    el.innerHTML = msg;
+    el.className = type;
+  }
+
+  document.addEventListener("keydown", e => {
+    if (e.key === "Enter" && document.activeElement.id === "chatInput") { sendChat(); return; }
+    if (e.key === "Enter" && document.activeElement.id !== "chatInput") runAnalysis();
+  });
+
+  // ── Chat follow-up ──────────────────────────────────────────────────────────
+  async function sendChat() {
+    const input = document.getElementById("chatInput");
+    const sendBtn = document.getElementById("chatSendBtn");
+    const msg = input.value.trim();
+    if (!msg || !window._chatContext) return;
+
+    input.value = "";
+    sendBtn.disabled = true;
+
+    // Add user message
+    appendChatMsg(msg, "user");
+    window._chatHistory.push({ role: "user", content: msg });
+
+    // Typing indicator
+    const typingId = "typing_" + Date.now();
+    document.getElementById("chatMessages").insertAdjacentHTML("beforeend",
+      `<div class="chat-msg ai" id="${typingId}"><span class="spinner"></span> Thinking…</div>`);
+    scrollChat();
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: window._chatHistory,
+          context:  window._chatContext
+        })
+      });
+
+      const data = await res.json();
+      document.getElementById(typingId)?.remove();
+
+      if (data.error) {
+        appendChatMsg("Error: " + data.error, "ai");
+      } else {
+        appendChatMsg(data.reply, "ai");
+        window._chatHistory.push({ role: "assistant", content: data.reply });
+      }
+    } catch (e) {
+      document.getElementById(typingId)?.remove();
+      appendChatMsg("Connection error: " + e.message, "ai");
+    }
+
+    sendBtn.disabled = false;
+    input.focus();
+  }
+
+  function appendChatMsg(text, role) {
+    const msgs = document.getElementById("chatMessages");
+    const div = document.createElement("div");
+    div.className = "chat-msg " + role;
+    div.innerHTML = role === "ai" ? renderMarkdown(text) : escapeHtml(text);
+    msgs.appendChild(div);
+    scrollChat();
+  }
+
+  function scrollChat() {
+    const msgs = document.getElementById("chatMessages");
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function escapeHtml(t) {
+    return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+</script>
+
+</body>
+</html>
