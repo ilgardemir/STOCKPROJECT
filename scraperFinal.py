@@ -11,6 +11,15 @@ from datetime import datetime, timedelta
 
 warnings.filterwarnings('ignore')
 
+import logging
+logging.disable(logging.CRITICAL)
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+logging.getLogger('peewee').setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+logging.getLogger('requests').setLevel(logging.CRITICAL)
+import os, sys
+sys.stderr = open(os.devnull, 'w')
+
 TODAY      = datetime.now()
 TODAY_STR  = TODAY.strftime('%B %d, %Y')
 TODAY_ISO  = TODAY.strftime('%Y-%m-%d')
