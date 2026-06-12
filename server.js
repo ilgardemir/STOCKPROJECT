@@ -158,7 +158,7 @@ http.createServer(async (req, res) => {
     res.end("Not found");
   }
 
-}).listen(PORT, () => {
-  console.log(`\n✅ Stock Analyzer server running at http://localhost:${PORT}`);
+}).listen(PORT, '0.0.0.0', () => {
+  console.log(`\n✅ Stock Analyzer server running on 0.0.0.0:${PORT}`);
   console.log(`   Python script: ${path.resolve(SCRAPER_PATH)}\n`);
 });
