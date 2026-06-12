@@ -9,11 +9,47 @@ const SCRAPER_PATH = "./scraperFinal.py";          // ← path to your Python sc
 const PORT = process.env.PORT || 3000;
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Serve the frontend (index.html and any other static files placed alongside it)
+const PUBLIC_DIR = __dirname;
+const MIME_TYPES = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon"
+};
+
+function serveStatic(req, res) {
+  let reqPath = req.url === "/" ? "/index.html" : req.url;
+  // Strip query strings and prevent directory traversal
+  reqPath = reqPath.split("?")[0].replace(/\.\./g, "");
+  const filePath = path.join(PUBLIC_DIR, reqPath);
+
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+      return;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, { "Content-Type": MIME_TYPES[ext] || "application/octet-stream" });
+    res.end(data);
+  });
+}
+
 http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") { res.end(); return; }
+
+  if (req.method === "GET") {
+    serveStatic(req, res);
+    return;
+  }
 
   if (req.method === "POST" && req.url === "/analyze") {
     let body = "";
@@ -31,7 +67,7 @@ http.createServer(async (req, res) => {
         const cleanTicker = ticker.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
 
         // Run Python script with ticker as a command-line argument
-        exec(`python "${SCRAPER_PATH}" ${cleanTicker}`, { timeout: 90000 }, async (err, stdout, stderr) => {
+        exec(`python3 "${SCRAPER_PATH}" ${cleanTicker}`, { timeout: 90000 }, async (err, stdout, stderr) => {
 
           if (!stdout || !stdout.trim()) {
             res.writeHead(500, { "Content-Type": "application/json" });
@@ -158,7 +194,7 @@ http.createServer(async (req, res) => {
     res.end("Not found");
   }
 
-}).listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✅ Stock Analyzer server running on 0.0.0.0:${PORT}`);
+}).listen(PORT, "0.0.0.0", () => {
+  console.log(`\n✅ Stock Analyzer server running at http://0.0.0.0:${PORT}`);
   console.log(`   Python script: ${path.resolve(SCRAPER_PATH)}\n`);
 });
