@@ -1,24 +1,24 @@
+import os
+import sys
+import logging
+import warnings
+
+# ── Silence ALL output before any other imports ──
+sys.stderr = open(os.devnull, 'w')
+warnings.filterwarnings('ignore')
+logging.disable(logging.CRITICAL)
+
 import yfinance as yf
 import requests
 import json
 import re
-import sys
 import math
 import pandas as pd
 import numpy as np
-import warnings
 from datetime import datetime, timedelta
 
-warnings.filterwarnings('ignore')
-
-import logging
-logging.disable(logging.CRITICAL)
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-logging.getLogger('peewee').setLevel(logging.CRITICAL)
-logging.getLogger('urllib3').setLevel(logging.CRITICAL)
-logging.getLogger('requests').setLevel(logging.CRITICAL)
-import os, sys
-sys.stderr = open(os.devnull, 'w')
+for logger_name in ['yfinance','peewee','urllib3','requests','charset_normalizer']:
+    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
 TODAY      = datetime.now()
 TODAY_STR  = TODAY.strftime('%B %d, %Y')
@@ -887,6 +887,6 @@ if __name__ == "__main__":
     target_ticker = sys.argv[1].upper() if len(sys.argv) > 1 else "AAPL"
     try:
         result = generate_analysis_payload(target_ticker)
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result))
     except Exception as e:
         print(json.dumps({"error": str(e), "ticker": target_ticker}))
