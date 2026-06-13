@@ -549,10 +549,171 @@ def detect_chart_patterns(hist, current_price):
     return patterns, key_levels
 
 # ==========================================
+# 4b. PRICE ACTION / MARKET STRUCTURE / INSTITUTIONAL
+# ==========================================
+def find_swings(series, left=5, right=5):
+    """Return swing highs and lows as (index, price) using a fractal pivot of width left/right."""
+    highs, lows = [], []
+    n = len(series)
+    for i in range(left, n - right):
+        win = series[i - left:i + right + 1]
+        if series[i] == max(win) and list(win).count(series[i]) == 1:
+            highs.append((i, float(series[i])))
+        if series[i] == min(win) and list(win).count(series[i]) == 1:
+            lows.append((i, float(series[i])))
+    return highs, lows
+
+
+def analyze_price_action(hist, current_price):
+    """
+    Defines trend by market structure (higher highs/higher lows vs lower highs/lower lows),
+    detects break-of-structure / change-of-character, and returns the most recent swing levels.
+    This is the 'read the chart like price action' layer used to infer institutional intent.
+    """
+    out = {
+        "trend": "INSUFFICIENT DATA", "trend_basis": "",
+        "structure": [], "recent_swing_high": None, "recent_swing_low": None,
+        "events": [], "fib": {}
+    }
+    if hist is None or hist.empty or len(hist) < 60:
+        return out
+
+    highs_s = hist["High"]
+    lows_s = hist["Low"]
+    sh = find_swings(highs_s.values, 8, 8)[0]
+    sl_lows = find_swings(lows_s.values, 8, 8)[1]
+
+    # Keep the last few swing highs / lows
+    last_highs = [p for _, p in sh[-4:]]
+    last_lows = [p for _, p in sl_lows[-4:]]
+    out["recent_swing_high"] = safe_float(last_highs[-1]) if last_highs else None
+    out["recent_swing_low"] = safe_float(last_lows[-1]) if last_lows else None
+
+    # ── TREND DEFINITION (structural, noise-robust) ───────────────────────
+    # Compare the average of the most-recent swings to the average of the
+    # earlier swings, so a single noisy pivot can't flip the trend.
+    def rising(seq):
+        if len(seq) < 2: return None
+        half = max(1, len(seq) // 2)
+        early, late = seq[:half], seq[half:]
+        return (sum(late) / len(late)) > (sum(early) / len(early)) * 1.005
+    def falling(seq):
+        if len(seq) < 2: return None
+        half = max(1, len(seq) // 2)
+        early, late = seq[:half], seq[half:]
+        return (sum(late) / len(late)) < (sum(early) / len(early)) * 0.995
+
+    hh, hl = rising(last_highs), rising(last_lows)
+    lh, ll = falling(last_highs), falling(last_lows)
+
+    if hh and hl:
+        out["trend"] = "UPTREND"
+        out["trend_basis"] = "Higher highs AND higher lows — bullish market structure intact."
+    elif lh and ll:
+        out["trend"] = "DOWNTREND"
+        out["trend_basis"] = "Lower highs AND lower lows — bearish market structure intact."
+    elif (hh and ll) or (lh and hl):
+        out["trend"] = "RANGE / TRANSITION"
+        out["trend_basis"] = "Mixed structure (a high and low disagree) — consolidation or a turning point."
+    else:
+        out["trend"] = "RANGE"
+        out["trend_basis"] = "No clean sequence of higher or lower swings — sideways."
+
+    out["structure"] = [
+        {"type": "swing_high", "price": safe_float(p)} for p in last_highs[-3:]
+    ] + [
+        {"type": "swing_low", "price": safe_float(p)} for p in last_lows[-3:]
+    ]
+
+    # ── BREAK OF STRUCTURE / CHANGE OF CHARACTER ──────────────────────────
+    if last_highs and current_price > last_highs[-1] * 1.001:
+        out["events"].append(f"BREAK OF STRUCTURE (bullish): price cleared the prior swing high at {fmt(last_highs[-1],'usd')}.")
+    if last_lows and current_price < last_lows[-1] * 0.999:
+        out["events"].append(f"BREAK OF STRUCTURE (bearish): price broke the prior swing low at {fmt(last_lows[-1],'usd')}.")
+    if out["trend"] == "DOWNTREND" and last_highs and current_price > last_highs[-1]:
+        out["events"].append("CHANGE OF CHARACTER: first break above a swing high inside a downtrend — possible reversal.")
+    if out["trend"] == "UPTREND" and last_lows and current_price < last_lows[-1]:
+        out["events"].append("CHANGE OF CHARACTER: first break below a swing low inside an uptrend — possible reversal.")
+
+    # ── FIBONACCI RETRACEMENT (last major swing leg) ──────────────────────
+    if out["recent_swing_high"] and out["recent_swing_low"]:
+        hi, lo = out["recent_swing_high"], out["recent_swing_low"]
+        if hi > lo:
+            diff = hi - lo
+            out["fib"] = {lvl: safe_float(hi - diff * r) for lvl, r in
+                          {"0.0": 0.0, "0.236": 0.236, "0.382": 0.382, "0.5": 0.5,
+                           "0.618": 0.618, "0.786": 0.786, "1.0": 1.0}.items()}
+            out["fib_high"], out["fib_low"] = safe_float(hi), safe_float(lo)
+    return out
+
+
+def analyze_institutional(hist):
+    """
+    Proxies for institutional accumulation/distribution from price+volume:
+    On-Balance Volume trend, up-day vs down-day volume, and large-range closes near highs.
+    These are footprints, not confirmation — the AI is told to treat them as such.
+    """
+    out = {"signals": [], "obv_trend": None, "up_vol_ratio": None,
+           "accumulation_days": 0, "distribution_days": 0, "net_bias": "NEUTRAL"}
+    if hist is None or hist.empty or len(hist) < 40:
+        return out
+
+    close = hist["Close"]
+    vol = hist["Volume"]
+    ret = close.diff()
+
+    # On-Balance Volume slope over last 30 sessions
+    obv = (np.sign(ret).fillna(0) * vol).cumsum()
+    recent_obv = obv.tail(30)
+    if len(recent_obv) > 5:
+        x = np.arange(len(recent_obv))
+        slope = np.polyfit(x, recent_obv.values, 1)[0]
+        out["obv_trend"] = "RISING" if slope > 0 else "FALLING"
+
+    # Up-day vs down-day volume over last 20 sessions
+    last20 = hist.tail(20)
+    up_vol = last20.loc[last20["Close"] >= last20["Open"], "Volume"].sum()
+    dn_vol = last20.loc[last20["Close"] < last20["Open"], "Volume"].sum()
+    if (up_vol + dn_vol) > 0:
+        out["up_vol_ratio"] = safe_float(up_vol / (up_vol + dn_vol))
+
+    # Accumulation / distribution days (>1.4x avg volume, strong directional close)
+    avg_vol = vol.tail(50).mean()
+    rng = (hist["High"] - hist["Low"]).replace(0, np.nan)
+    close_pos = (close - hist["Low"]) / rng  # 1 = closed at high, 0 = at low
+    for i in range(max(0, len(hist) - 25), len(hist)):
+        if vol.iloc[i] > 1.4 * avg_vol:
+            if close_pos.iloc[i] > 0.66 and ret.iloc[i] > 0:
+                out["accumulation_days"] += 1
+            elif close_pos.iloc[i] < 0.34 and ret.iloc[i] < 0:
+                out["distribution_days"] += 1
+
+    if out["obv_trend"] == "RISING":
+        out["signals"].append("OBV RISING: cumulative volume flow is positive — buyers in control.")
+    elif out["obv_trend"] == "FALLING":
+        out["signals"].append("OBV FALLING: cumulative volume flow is negative — sellers in control.")
+    if is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] > 0.62:
+        out["signals"].append(f"UP-VOLUME DOMINANCE: {out['up_vol_ratio']:.0%} of 20-day volume came on up days — accumulation.")
+    elif is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] < 0.40:
+        out["signals"].append(f"DOWN-VOLUME DOMINANCE: only {out['up_vol_ratio']:.0%} of 20-day volume on up days — distribution.")
+    if out["accumulation_days"] >= 3:
+        out["signals"].append(f"ACCUMULATION: {out['accumulation_days']} high-volume up-closes in 25 sessions — institutional buying footprint.")
+    if out["distribution_days"] >= 3:
+        out["signals"].append(f"DISTRIBUTION: {out['distribution_days']} high-volume down-closes in 25 sessions — institutional selling footprint.")
+
+    acc, dist = out["accumulation_days"], out["distribution_days"]
+    if (out["obv_trend"] == "RISING") and acc >= dist:
+        out["net_bias"] = "ACCUMULATION"
+    elif (out["obv_trend"] == "FALLING") and dist >= acc:
+        out["net_bias"] = "DISTRIBUTION"
+    return out
+
+# ==========================================
 # 5. MAIN ENGINE
 # ==========================================
 def generate_analysis_payload(ticker):
-    print(f"[1/5] Today is {TODAY_STR}. Querying SEC EDGAR for {ticker}...", file=sys.stderr)
+    def stage(k, label): print(f"STAGE|{k}|6|{label}", file=sys.stderr, flush=True)
+    stage(1, "Querying SEC EDGAR filings")
 
     # ── SEC DATA ──────────────────────────────────────────────────────────────
     cik           = get_cik_from_ticker(ticker)
@@ -602,11 +763,11 @@ def generate_analysis_payload(ticker):
     # ── SEC FILING ATTACHMENT ────────────────────────────────────────────────
     sec_filing_attachment = None
     if sec_available and filings:
-        print(f"[2/8] Downloading latest 10-K filing for attachment...", file=sys.stderr)
+        stage(2, "Downloading latest 10-K")
         sec_filing_attachment = download_latest_filing(cik, filings, ticker)
 
     # ── YAHOO FINANCE ─────────────────────────────────────────────────────────
-    print(f"[3/8] Fetching Yahoo Finance data...", file=sys.stderr)
+    stage(3, "Fetching price history & fundamentals")
     try:
         stock = yf.Ticker(ticker)
         info  = stock.info or {}
@@ -639,7 +800,7 @@ def generate_analysis_payload(ticker):
         current_price = hist['Close'].iloc[-1] if not hist.empty else None
 
     # ── REAL-TIME QUOTE & INTRADAY DATA ───────────────────────────────────────
-    print(f"[4/8] Fetching live quote and intraday bars...", file=sys.stderr)
+    stage(4, "Fetching live quote")
     live_quote   = get_live_quote(stock, info) if stock else {"fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     intraday_hist = fetch_intraday_data(stock) if stock else pd.DataFrame()
 
@@ -764,17 +925,21 @@ def generate_analysis_payload(ticker):
                 elif rep < est: misses += 1
 
     # ── OPTIONS CHAIN ─────────────────────────────────────────────────────────
-    print(f"[3/5] Fetching live options chain...", file=sys.stderr)
+    stage(5, "Reading options chain & patterns")
     options_data = fetch_options_chain(stock, latest or 0) if stock and latest else {'available_expirations': [], 'chains': [], 'iv_summary': {}}
 
     # ── CHART PATTERNS ────────────────────────────────────────────────────────
-    print(f"[4/5] Detecting chart patterns...", file=sys.stderr)
+
     chart_patterns, key_levels = detect_chart_patterns(hist, latest or 0)
 
     # ── ALGORITHMIC FLAGS ─────────────────────────────────────────────────────
-    print(f"[5/5] Generating signals...", file=sys.stderr)
+    stage(6, "Computing signals & price action")
     flags         = []
     data_warnings = []
+
+    # ── PRICE ACTION & INSTITUTIONAL FOOTPRINT ────────────────────────────
+    price_action  = analyze_price_action(hist, latest or 0)
+    institutional = analyze_institutional(hist)
 
     if is_valid(pe_trail, -1000, 10000):
         if pe_trail <= 0:    data_warnings.append("P/E <= 0: Company unprofitable or large one-time items.")
@@ -829,6 +994,18 @@ def generate_analysis_payload(ticker):
         flags.append(f"HIGH SHORT INTEREST: {short_float:.1%} of float shorted.")
     if misses >= 3: flags.append(f"EARNINGS: Missed estimates {misses}/4 recent quarters.")
     if beats == 4:  flags.append("EARNINGS: Beat estimates all 4 recent quarters.")
+
+    # Price-action structure as a headline signal
+    if price_action.get("trend") in ("UPTREND", "DOWNTREND", "RANGE / TRANSITION"):
+        cls = {"UPTREND": "BULLISH STRUCTURE", "DOWNTREND": "BEARISH STRUCTURE",
+               "RANGE / TRANSITION": "STRUCTURE TRANSITION"}[price_action["trend"]]
+        flags.append(f"{cls}: {price_action['trend']} — {price_action['trend_basis']}")
+    for ev in price_action.get("events", []):
+        flags.append(ev)
+    if institutional.get("net_bias") == "ACCUMULATION":
+        flags.append("INSTITUTIONAL ACCUMULATION: volume footprint points to net buying.")
+    elif institutional.get("net_bias") == "DISTRIBUTION":
+        flags.append("INSTITUTIONAL DISTRIBUTION: volume footprint points to net selling.")
 
     # ── BUILD AI PROMPT ───────────────────────────────────────────────────────
     ai_prompt = f"""⚠️ TODAY'S DATE: {TODAY_STR}. All data below was fetched live on this date. Every expiration date, price level, and recommendation must be evaluated relative to {TODAY_STR}. Do NOT reference any options expiration that has already passed. Do NOT invent strikes, expirations, or prices not listed below.
@@ -912,6 +1089,27 @@ You are an expert quantitative financial analyst. Analyze **{company_name} ({tic
     ai_prompt += f"\n### 12. ALGORITHMIC SIGNALS\n"
     for flag in (flags or ["NEUTRAL: No strong signals."]): ai_prompt += f"- {flag}\n"
 
+    # ── PRICE ACTION & INSTITUTIONAL FOOTPRINT ────────────────────────────
+    ai_prompt += f"""
+### 12b. PRICE ACTION & MARKET STRUCTURE (as of {TODAY_STR})
+- **Structural Trend**: {price_action.get('trend','N/A')} — {price_action.get('trend_basis','')}
+- **Most Recent Swing High / Low**: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_action.get('recent_swing_low'),'usd')}
+- **Structure Events**: {('; '.join(price_action.get('events')) if price_action.get('events') else 'None')}
+"""
+    if price_action.get("fib"):
+        ai_prompt += "- **Fibonacci retracement (last swing leg)**: " + \
+            " | ".join(f"{k}={fmt(v,'usd')}" for k, v in price_action["fib"].items()) + "\n"
+
+    ai_prompt += f"""
+### 12c. INSTITUTIONAL FOOTPRINT (volume-based proxies)
+- **Net Bias**: {institutional.get('net_bias','NEUTRAL')}
+- **On-Balance Volume Trend**: {institutional.get('obv_trend') or 'N/A'}
+- **Up-Day Volume Share (20D)**: {fmt(institutional.get('up_vol_ratio'),'pct')}
+- **Accumulation / Distribution days (25 sessions)**: {institutional.get('accumulation_days',0)} / {institutional.get('distribution_days',0)}
+"""
+    for s in institutional.get("signals", []):
+        ai_prompt += f"- {s}\n"
+
     if data_warnings:
         ai_prompt += "\n### DATA QUALITY NOTES\n"
         for w in data_warnings: ai_prompt += f"- {w}\n"
@@ -946,13 +1144,14 @@ Available expirations (future only): {', '.join(options_data['available_expirati
 ### ANALYSIS INSTRUCTIONS
 Today is {TODAY_STR}. Use this throughout your response.
 
-1. **Options**: Only reference strikes and expirations from Section 13. If asked about calls/puts, give specific strike + expiry from the live data, estimated premium (bid/ask midpoint), breakeven, and max loss.
-2. **Chart Patterns**: Interpret the detected patterns in Section 8 as a cohesive picture. What is the chart setup telling you?
-3. **Cross-Reference SEC vs Yahoo**: Prefer SEC data for fundamentals. Flag any discrepancies.
-4. **Validate Signals**: Do the algorithmic flags hold up? Call out misleading ones.
-5. **MD&A Consistency**: Is management's narrative in line with the numbers?
-6. **Verdict**: Undervalued / Fairly Valued / Overvalued — with a defined risk/reward.
-7. **Format**: Clear headings, bullets, bold key figures. Be direct and analytical.
+1. **Trend (define it explicitly)**: State the trend using market structure, not vibes. UPTREND = higher highs AND higher lows; DOWNTREND = lower highs AND lower lows; anything else is a RANGE or transition. Use Section 12b as the source of truth and reconcile it with the moving-average alignment.
+2. **Price action to ride institutions**: Use Sections 12b/12c to read where institutions are likely positioned. Tie breaks of structure, swing levels, Fibonacci retracement zones (Section 12b), and the volume footprint (OBV, up-day volume share, accumulation/distribution days) into a single narrative: are large players accumulating, distributing, or absent? Name the specific levels a buyer would defend and where the thesis is invalidated.
+3. **Options**: Only reference strikes and expirations from Section 13. Give strike + expiry, estimated premium (bid/ask midpoint), breakeven, and max loss.
+4. **Chart Patterns**: Interpret Section 8 as a cohesive picture.
+5. **Cross-Reference SEC vs Yahoo**: Prefer SEC data for fundamentals; flag discrepancies.
+6. **Validate Signals**: Do the algorithmic flags hold up? Call out misleading ones.
+7. **Verdict**: Undervalued / Fairly Valued / Overvalued, with a defined risk/reward and the key invalidation level.
+8. **Format**: Clear headings, bullets, bold key figures. Be direct and analytical. Do not truncate — finish every section you start.
 """
 
     # ── FINAL PAYLOAD ─────────────────────────────────────────────────────────
@@ -1002,6 +1201,8 @@ Today is {TODAY_STR}. Use this throughout your response.
         "live_quote":        live_quote,
         "price_history_1y":  price_history_1y,
         "sec_filing":        sec_filing_attachment,
+        "price_action":      price_action,
+        "institutional":     institutional,
         "algorithmic_signals": flags,
         "ai_prompt":         ai_prompt
     }

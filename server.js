@@ -1,5 +1,5 @@
 const http = require("http");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -7,7 +7,16 @@ const path = require("path");
 const API_KEY = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";  // ← paste your OpenRouter key
 const SCRAPER_PATH = "./scraperFinal.py";          // ← path to your Python script
 const PORT = process.env.PORT || 3000;
+const AI_MODEL = "anthropic/claude-sonnet-4-5";
+const PYTHON = process.env.PYTHON_BIN || "python3";
 // ──────────────────────────────────────────────────────────────────────────────
+
+function buildAiMessages(prompt) {
+  return [
+    { role: "system", content: "You are an expert quantitative financial analyst. You provide deep, insightful, and data-driven stock analysis based strictly on the provided metrics. Always finish every section you begin — never cut off mid-analysis." },
+    { role: "user", content: prompt }
+  ];
+}
 
 // Serve the frontend (index.html and any other static files placed alongside it)
 const PUBLIC_DIR = __dirname;
@@ -49,6 +58,80 @@ http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
+  // ── STREAMING ANALYZE (Server-Sent Events) ──────────────────────────────
+  // Streams real per-stage progress from the Python script, then the final result.
+  if (req.method === "GET" && req.url.startsWith("/analyze-stream")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const raw = url.searchParams.get("ticker") || "";
+    const ticker = raw.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    if (!ticker) { send("error", { error: "ticker is required." }); res.end(); return; }
+
+    send("progress", { stage: 0, total: 6, label: "Starting data pipeline" });
+
+    const py = spawn(PYTHON, [SCRAPER_PATH, ticker], { env: process.env });
+    let stdout = "", stderrTail = "";
+
+    // stderr carries STAGE|k|N|label markers — forward them as progress
+    let buf = "";
+    py.stderr.on("data", chunk => {
+      buf += chunk.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line.startsWith("STAGE|")) {
+          const [, k, n, label] = line.split("|");
+          send("progress", { stage: Number(k), total: Number(n), label });
+        } else if (line) {
+          stderrTail = (stderrTail + "\n" + line).slice(-2000);
+        }
+      }
+    });
+    py.stdout.on("data", chunk => (stdout += chunk));
+
+    req.on("close", () => { try { py.kill(); } catch (e) {} });
+
+    py.on("close", async () => {
+      if (!stdout.trim()) {
+        send("error", { error: "Script produced no output.", detail: stderrTail });
+        return res.end();
+      }
+      let payload;
+      try { payload = JSON.parse(stdout.trim()); }
+      catch (e) { send("error", { error: "Failed to parse Python output.", detail: stdout.slice(0, 500) }); return res.end(); }
+      if (payload.error) { send("error", { error: payload.error }); return res.end(); }
+
+      send("progress", { stage: 6, total: 6, label: "Running AI analysis" });
+      try {
+        const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}`, "HTTP-Referer": "http://localhost", "X-Title": "Squall" },
+          body: JSON.stringify({ model: AI_MODEL, temperature: 0.3, max_tokens: 8192, messages: buildAiMessages(payload.ai_prompt) })
+        });
+        const aiData = await aiRes.json();
+        if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
+        const aiSummary = aiData.choices[0].message.content;
+        send("result", { ...payload, aiSummary });
+      } catch (aiErr) {
+        // Still deliver the data even if the AI call fails, so the user keeps the dashboard
+        send("result", { ...payload, aiSummary: "", aiError: "AI call failed: " + aiErr.message });
+      }
+      res.end();
+    });
+
+    py.on("error", err => { send("error", { error: "Could not launch Python: " + err.message }); res.end(); });
     return;
   }
 
@@ -113,7 +196,7 @@ http.createServer(async (req, res) => {
               body: JSON.stringify({
                 model: "anthropic/claude-sonnet-4-5",
                 temperature: 0.3,
-                max_tokens: 4096,
+                max_tokens: 8192,
                 messages: [
                   {
                     role: "system",
@@ -169,7 +252,7 @@ http.createServer(async (req, res) => {
           body: JSON.stringify({
             model: "anthropic/claude-sonnet-4-5",
             temperature: 0.3,
-            max_tokens: 1000,
+            max_tokens: 4096,
             messages: [
               {
                 role: "system",
