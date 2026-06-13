@@ -11,11 +11,22 @@ const AI_MODEL = "anthropic/claude-sonnet-4-5";
 const PYTHON = process.env.PYTHON_BIN || "python3";
 // ──────────────────────────────────────────────────────────────────────────────
 
-function buildAiMessages(prompt) {
-  return [
+function buildAiMessages(prompt) {  return [
     { role: "system", content: "You are an expert quantitative financial analyst. You provide deep, insightful, and data-driven stock analysis based strictly on the provided metrics. Always finish every section you begin — never cut off mid-analysis." },
     { role: "user", content: prompt }
   ];
+}
+
+// Cheap, instant format gate — runs BEFORE we ever spawn Python or call the AI.
+// Its job is only to reject obvious garbage (empty, symbols, absurd length); the
+// scraper does the authoritative "does this security actually exist" check.
+// Kept lenient on purpose so valid odd tickers (BRK.B, RY.TO, ^GSPC) pass through.
+function validateTickerFormat(t) {
+  if (!t) return { ok: false, reason: "Enter a ticker symbol." };
+  if (t.length > 8) return { ok: false, reason: `"${t}" is too long to be a ticker symbol.` };
+  if (!/^\^?[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,4})?$/.test(t))
+    return { ok: false, reason: `"${t}" isn't a valid ticker format.` };
+  return { ok: true };
 }
 
 // Serve the frontend (index.html and any other static files placed alongside it)
@@ -77,6 +88,9 @@ http.createServer(async (req, res) => {
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     if (!ticker) { send("error", { error: "ticker is required." }); res.end(); return; }
+
+    const fmt = validateTickerFormat(ticker);
+    if (!fmt.ok) { send("error", { error: fmt.reason, invalid_ticker: true }); res.end(); return; }
 
     send("progress", { stage: 0, total: 6, label: "Starting data pipeline" });
 
@@ -154,6 +168,13 @@ http.createServer(async (req, res) => {
         }
 
         const cleanTicker = ticker.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
+
+        const fmt = validateTickerFormat(cleanTicker);
+        if (!fmt.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: fmt.reason, invalid_ticker: true }));
+          return;
+        }
 
         // Run Python script with ticker as a command-line argument
         exec(`python3 "${SCRAPER_PATH}" ${cleanTicker}`, { timeout: 150000, maxBuffer: 1024 * 1024 * 10 }, async (err, stdout, stderr) => {

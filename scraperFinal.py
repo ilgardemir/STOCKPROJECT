@@ -784,6 +784,20 @@ def generate_analysis_payload(ticker):
     try: spy = yf.Ticker("SPY").history(period="5y")
     except: spy = pd.DataFrame()
 
+    # ── VALIDATION GATE ───────────────────────────────────────────────────────
+    # A ticker is only analyzable if it resolves against at least ONE real source:
+    # an SEC CIK (filings) OR live market data (price history). If BOTH come back
+    # empty the symbol is invalid — bail out NOW, before any further computation
+    # and before the server ever calls the (paid) AI model.
+    if not sec_available and (hist is None or hist.empty):
+        return {
+            "error": (f"'{ticker}' doesn't look like a valid, tradeable ticker. "
+                      f"No SEC filings and no market data were found for it — "
+                      f"double-check the symbol and try again."),
+            "invalid_ticker": True,
+            "ticker": ticker
+        }
+
     try: fin_df = stock.financials if stock else None
     except: fin_df = None
 
