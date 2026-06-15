@@ -1066,24 +1066,27 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
     ai_prompt += f"""
 ---
 ### INSTRUCTIONS ({TODAY_STR})
-The reader sees every figure above in a live dashboard beside your analysis. DO NOT restate data, list metrics, or rebuild tables — interpret. If you catch yourself typing a number that's already in a section above, stop and explain what it means instead. Synthesis only. No preamble.
+You are writing a thorough equity analysis for an investor who sees every raw figure in a live dashboard beside your text. Do NOT restate metrics, rebuild tables, or list numbers for their own sake — interpret them. Cite a specific figure only when it anchors a judgment ("trading at 34x forward earnings against ~12% growth, the multiple is pricing in flawless execution"). Think carefully before writing; reason through the valuation, the balance sheet, the technical structure, and how the pieces corroborate or contradict each other.
 
-Output exactly these sections, respecting the word caps:
+Write these sections with markdown ## headers. Aim for depth and specificity over length — roughly 600–900 words total. No preamble, no restating the prompt.
 
 ## Verdict
-One line: Undervalued / Fairly Valued / Overvalued — plus the single biggest reason. Then one line of risk/reward with the price level that invalidates the call.
+Undervalued / Fairly Valued / Overvalued, with the core reason in one or two sentences. State a defined risk/reward and the single price level or event that would invalidate the call.
 
-## Thesis (≤110 words)
-The 2–3 factors that actually drive this name right now. Reconcile SEC vs FMP vs Yahoo only if a discrepancy is material; otherwise ignore it.
+## Valuation & Quality
+Is the current multiple justified by growth, margins, and returns on capital? Weigh P/E and PEG against the growth rate, FCF yield against the balance sheet, and EV/EBITDA against the sector. Where SEC, FMP, and Yahoo disagree on a number, say which you trust and why a discrepancy matters.
 
-## Price & Structure (≤90 words)
-Trend per §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). The level a buyer defends, the level where the thesis breaks, and what the OBV/volume footprint says about who's in control.
+## Fundamentals & Financial Health
+Read the trajectory, not the snapshot: margin direction, revenue growth durability, earnings quality (OCF vs net income), leverage, and liquidity. Flag anything in the SEC fundamentals or MD&A that changes the thesis. Connect the earnings-surprise history to forward credibility.
 
-## Trade Idea (≤80 words)
-One options structure using only strikes/expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss. If nothing in §13 sets up cleanly, say "No compelling options setup" and give one sentence why.
+## Price Action & Institutional Footprint
+Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Tie swing levels, Fibonacci zones, and the OBV/accumulation-distribution footprint into one narrative about who is in control. Name the level a buyer defends and the level where the structure breaks. Validate or dismiss the algorithmic signals — call out any that mislead.
 
-## Risks (≤60 words)
-The 2–3 things that would break the bull case. One line each.
+## Catalysts & Risks
+The 2–3 catalysts that could re-rate the stock (earnings, 8-K events, insider activity, sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
+
+## Trade Idea
+One actionable options structure using ONLY strikes/expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss, and the thesis it expresses. If nothing in §13 sets up cleanly, say so and explain why in one sentence.
 """
 
     return {

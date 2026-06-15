@@ -357,11 +357,29 @@ function renderAll(d) {
   /* AI summary */
   const ai = document.getElementById("aiSummary");
   ai.className = "prose";
-  ai.innerHTML = (d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "") + renderMarkdown(d.aiSummary || "");
+  const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
+  ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
   document.getElementById("aiScroll").scrollTop = 0;
 
   renderChat();
   requestAnimationFrame(drawChart);
+}
+
+/* ════════════════ SHOW THINKING (model reasoning trace) ════════════════ */
+function thinkingBlock(reasoning) {
+  if (!reasoning || !reasoning.trim()) return "";
+  const brain = `<svg class="brain" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>`;
+  const chev  = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+  return `<div id="thinkingWrap">
+    <button id="thinkingToggle" onclick="toggleThinking(this)">${brain}<span>Show thinking</span>${chev}</button>
+    <div id="thinkingPanel"><span class="tk-label">Model reasoning · summarized</span>${esc(reasoning)}</div>
+  </div>`;
+}
+function toggleThinking(btn) {
+  const panel = document.getElementById("thinkingPanel");
+  const open = panel.classList.toggle("show");
+  btn.classList.toggle("open", open);
+  btn.querySelector("span").textContent = open ? "Hide thinking" : "Show thinking";
 }
 
 function copyPrompt(btn) { navigator.clipboard.writeText(sessions[active]?.data?.ai_prompt || "").then(() => {

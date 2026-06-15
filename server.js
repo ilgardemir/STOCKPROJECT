@@ -7,9 +7,14 @@ const path = require("path");
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
 const SCRAPER_PATH = "./scraperFinal.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "anthropic/claude-sonnet-4-6";   // updated to sonnet-4-6
+const AI_MODEL    = "anthropic/claude-haiku-4.5";   // reasoning-capable Haiku; ~1/3 the output cost of Sonnet
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
+
+// Reasoning config (OpenRouter → Anthropic extended thinking).
+// REASON_BUDGET is the thinking allowance; ANALYSIS_MAX must exceed it (thinking + answer share the budget).
+const REASON_BUDGET = 2000;   // tokens the model may spend thinking
+const ANALYSIS_MAX  = 6000;   // total cap: ~2k thinking + ~4k answer
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -21,10 +26,9 @@ function buildAiMessages(prompt) {
     {
       role: "system",
       content: [
-        "You are a quantitative financial analyst writing a tight, high-signal read for someone who can already see all the underlying data.",
-        "Interpret and judge — never restate figures, rebuild tables, or list metrics that appear in the data sections.",
-        "Be concise: every sentence must add insight the numbers alone don't. Respect the word caps in the instructions.",
-        "Use only the data supplied; never invent figures.",
+        "You are a quantitative financial analyst writing a thorough, multi-section read for an investor who can already see all the underlying data.",
+        "Reason carefully before answering, then interpret — connect valuation, fundamentals, technicals, and institutional positioning into judgments. Never restate figures, rebuild tables, or list metrics for their own sake; cite a number only when it anchors a specific conclusion.",
+        "Be specific to this company, not generic. Use only the data supplied; never invent figures, strikes, or expirations.",
       ].join(" ")
     },
     { role: "user", content: prompt }
@@ -139,15 +143,18 @@ http.createServer(async (req, res) => {
           },
           body: JSON.stringify({
             model:       AI_MODEL,
-            temperature: 0.25,
-            max_tokens:  2600,   // tight synthesis output; was 8192
+            temperature: 1,            // extended thinking requires temperature 1
+            max_tokens:  ANALYSIS_MAX, // covers thinking + answer
+            reasoning:   { max_tokens: REASON_BUDGET },
             messages:    buildAiMessages(payload.ai_prompt)
           })
         });
         const aiData = await aiRes.json();
         if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
-        const aiSummary = aiData.choices[0].message.content;
-        send("result", { ...payload, aiSummary });
+        const aiMsg     = aiData.choices[0].message;
+        const aiSummary = aiMsg.content;
+        const aiReasoning = aiMsg.reasoning || "";   // summarized thinking trace
+        send("result", { ...payload, aiSummary, aiReasoning });
       } catch (aiErr) {
         // Deliver data even if AI fails — user keeps the dashboard
         send("result", { ...payload, aiSummary: "", aiError: "AI call failed: " + aiErr.message });
@@ -214,16 +221,19 @@ http.createServer(async (req, res) => {
                 },
                 body: JSON.stringify({
                   model:       AI_MODEL,
-                  temperature: 0.25,
-                  max_tokens:  2600,
+                  temperature: 1,
+                  max_tokens:  ANALYSIS_MAX,
+                  reasoning:   { max_tokens: REASON_BUDGET },
                   messages:    buildAiMessages(payload.ai_prompt)
                 })
               });
               const aiData   = await aiRes.json();
               if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
-              const aiSummary = aiData.choices[0].message.content;
+              const aiMsg     = aiData.choices[0].message;
+              const aiSummary = aiMsg.content;
+              const aiReasoning = aiMsg.reasoning || "";
               res.writeHead(200, {"Content-Type":"application/json"});
-              res.end(JSON.stringify({ ...payload, aiSummary }));
+              res.end(JSON.stringify({ ...payload, aiSummary, aiReasoning }));
             } catch (aiErr) {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: "AI call failed: " + aiErr.message }));
