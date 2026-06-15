@@ -1066,13 +1066,24 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
     ai_prompt += f"""
 ---
 ### INSTRUCTIONS ({TODAY_STR})
-1. TREND: define explicitly (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Use §12b as source of truth.
-2. PRICE ACTION: tie swing levels, Fib zones, and OBV/volume footprint into a single institutional narrative. Name levels a buyer would defend and where the thesis breaks.
-3. OPTIONS: use only strikes/expirations from §13. Give strike, expiry, premium (bid/ask midpoint), breakeven, max loss.
-4. FUNDAMENTALS: cross-reference SEC vs FMP vs Yahoo; flag discrepancies.
-5. SIGNALS: validate algorithmic flags — call out misleading ones.
-6. VERDICT: Undervalued / Fairly Valued / Overvalued + defined risk/reward + key invalidation level.
-Format: headers + bullets for data, analytical prose for synthesis. Complete every section. Do not truncate.
+The reader sees every figure above in a live dashboard beside your analysis. DO NOT restate data, list metrics, or rebuild tables — interpret. If you catch yourself typing a number that's already in a section above, stop and explain what it means instead. Synthesis only. No preamble.
+
+Output exactly these sections, respecting the word caps:
+
+## Verdict
+One line: Undervalued / Fairly Valued / Overvalued — plus the single biggest reason. Then one line of risk/reward with the price level that invalidates the call.
+
+## Thesis (≤110 words)
+The 2–3 factors that actually drive this name right now. Reconcile SEC vs FMP vs Yahoo only if a discrepancy is material; otherwise ignore it.
+
+## Price & Structure (≤90 words)
+Trend per §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). The level a buyer defends, the level where the thesis breaks, and what the OBV/volume footprint says about who's in control.
+
+## Trade Idea (≤80 words)
+One options structure using only strikes/expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss. If nothing in §13 sets up cleanly, say "No compelling options setup" and give one sentence why.
+
+## Risks (≤60 words)
+The 2–3 things that would break the bull case. One line each.
 """
 
     return {

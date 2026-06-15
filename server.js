@@ -21,10 +21,10 @@ function buildAiMessages(prompt) {
     {
       role: "system",
       content: [
-        "You are a quantitative financial analyst.",
-        "Analyse the equity using only the data supplied. Never invent figures.",
-        "Complete every section you begin — never truncate mid-analysis.",
-        "Format: use headers and bullets to organise data, analytical prose for synthesis and verdict.",
+        "You are a quantitative financial analyst writing a tight, high-signal read for someone who can already see all the underlying data.",
+        "Interpret and judge — never restate figures, rebuild tables, or list metrics that appear in the data sections.",
+        "Be concise: every sentence must add insight the numbers alone don't. Respect the word caps in the instructions.",
+        "Use only the data supplied; never invent figures.",
       ].join(" ")
     },
     { role: "user", content: prompt }
@@ -140,7 +140,7 @@ http.createServer(async (req, res) => {
           body: JSON.stringify({
             model:       AI_MODEL,
             temperature: 0.25,
-            max_tokens:  8192,   // Keep generous for detailed analysis
+            max_tokens:  2600,   // tight synthesis output; was 8192
             messages:    buildAiMessages(payload.ai_prompt)
           })
         });
@@ -215,7 +215,7 @@ http.createServer(async (req, res) => {
                 body: JSON.stringify({
                   model:       AI_MODEL,
                   temperature: 0.25,
-                  max_tokens:  8192,
+                  max_tokens:  2600,
                   messages:    buildAiMessages(payload.ai_prompt)
                 })
               });
