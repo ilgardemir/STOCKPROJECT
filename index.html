@@ -241,6 +241,80 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
   font-family: var(--mono); font-size: 11px; line-height: 1.7; padding: 8px 11px; color: var(--bright); box-shadow: var(--shadow); z-index: 5; white-space: nowrap; }
 #chartTip .tg { color: var(--green); } #chartTip .tr { color: var(--red); } #chartTip b { color: var(--accent); }
 
+/* CHART EXPAND BUTTON */
+.chart-expand-btn {
+  position: absolute; top: 8px; right: 8px; z-index: 6;
+  display: grid; place-items: center; width: 28px; height: 28px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-dim); cursor: pointer;
+  opacity: 0; transition: opacity .15s, color .15s, border-color .15s, transform .12s var(--ease);
+}
+#chartBox:hover .chart-expand-btn { opacity: 1; }
+.chart-expand-btn:hover { color: var(--accent); border-color: var(--accent); }
+.chart-expand-btn:active { transform: scale(.9); }
+.chart-expand-btn svg { width: 13px; height: 13px; pointer-events: none; }
+
+/* CHART EXPAND MODAL */
+#chartModal {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(5,12,20,.85);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  display: none; flex-direction: column; padding: 20px;
+}
+#chartModal.open { display: flex; animation: modalIn .22s var(--ease); }
+@keyframes modalIn { from { opacity: 0; transform: scale(.975); } to { opacity: 1; transform: none; } }
+#chartModalInner {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 32px 90px rgba(5,12,20,.6);
+  display: flex; flex-direction: column; flex: 1; overflow: hidden; min-height: 0;
+}
+#chartModalHead {
+  flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+  padding: 11px 16px; border-bottom: 1px solid var(--border-soft);
+}
+#chartModalTitle {
+  font-size: 12px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--bright);
+}
+#chartModalTag {
+  font-family: var(--mono); font-size: 10px; font-weight: 500;
+  color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 1px 7px;
+}
+#chartModalRangeSel {
+  display: inline-flex; margin-left: auto;
+  background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 99px; padding: 2px;
+}
+#chartModalRangeSel button {
+  background: none; border: none; cursor: pointer;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  color: var(--text-dim); padding: 4px 10px; border-radius: 99px; transition: all .15s;
+}
+#chartModalRangeSel button.active { background: var(--accent); color: var(--accent-ink); }
+#chartModalClose {
+  display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-dim); cursor: pointer; transition: color .15s, border-color .15s, transform .15s var(--ease);
+}
+#chartModalClose:hover { color: var(--red); border-color: var(--red); }
+#chartModalClose:active { transform: scale(.9); }
+#chartModalClose svg { width: 14px; height: 14px; pointer-events: none; }
+#chartModalBody {
+  flex: 1; position: relative; min-height: 0; padding: 14px 16px 16px;
+}
+#chartModalCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+#chartModalTip {
+  position: absolute; pointer-events: none; display: none;
+  background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+  padding: 8px 11px; color: var(--bright); box-shadow: var(--shadow); z-index: 5; white-space: nowrap;
+}
+#chartModalTip .tg { color: var(--green); } #chartModalTip .tr { color: var(--red); } #chartModalTip b { color: var(--accent); }
+/* overlay controls bar mirrors inline chart controls */
+#chartModalControls {
+  flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 8px 16px; border-top: 1px solid var(--border-soft);
+}
+
 /* AI PANE */
 #aiPane .pane-body { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 #aiScroll { flex: 1; overflow-y: auto; padding: 18px 20px 24px; min-height: 0; }
@@ -353,6 +427,109 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
     </section>
   </div>
 </div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+  CHART EXPAND MODAL
+  HTML shell only — app.js owns canvas rendering + range-selector logic.
+
+  Bridge API (set / called by app.js):
+    window.chartExpanded          boolean; true while modal is open
+    window.chartRedrawCallback    fn() → redraws on whichever canvas is active
+    window.expandChart(ticker)    opens modal, fires redraw at new size
+    window.collapseChart()        closes modal, fires redraw at original size
+
+  Active elements when expanded vs. collapsed:
+    canvas   →  #chartModalCanvas   |  #priceChart
+    tooltip  →  #chartModalTip      |  #chartTip
+    rangeSel →  #chartModalRangeSel |  #rangeSel
+  Use window._chartCanvasEl() / _chartTipEl() / _chartRangeSelEl()
+  inside the redraw callback to get the correct live element.
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="chartModal" role="dialog" aria-modal="true" aria-label="Expanded price chart">
+  <div id="chartModalInner">
+    <div id="chartModalHead">
+      <span id="chartModalTitle">Price Chart</span>
+      <span id="chartModalTag">OHLCV</span>
+      <div id="chartModalRangeSel"></div>
+      <button id="chartModalClose" title="Close (Esc)" onclick="window.collapseChart()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div id="chartModalBody">
+      <canvas id="chartModalCanvas"></canvas>
+      <div id="chartModalTip"></div>
+    </div>
+    <div id="chartModalControls"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── state ─────────────────────────────────────────────────────────────────
+  window.chartExpanded       = false;
+  window.chartRedrawCallback = null; // set by app.js: function() { … }
+
+  // ── element accessors (app.js uses these inside the redraw callback) ──────
+  window._chartCanvasEl   = function () { return document.getElementById(window.chartExpanded ? 'chartModalCanvas'   : 'priceChart'); };
+  window._chartTipEl      = function () { return document.getElementById(window.chartExpanded ? 'chartModalTip'      : 'chartTip');   };
+  window._chartRangeSelEl = function () { return document.getElementById(window.chartExpanded ? 'chartModalRangeSel' : 'rangeSel');   };
+
+  function fireRedraw() {
+    if (typeof window.chartRedrawCallback === 'function') window.chartRedrawCallback();
+  }
+
+  // ── open ──────────────────────────────────────────────────────────────────
+  window.expandChart = function (ticker) {
+    var modal = document.getElementById('chartModal');
+    if (!modal) return;
+
+    // update title
+    if (ticker) document.getElementById('chartModalTitle').textContent = ticker + ' — Price Chart';
+
+    // clone overlay toggles (MA, BB, Volume…) into modal controls bar,
+    // excluding #rangeSel which has its own mirrored version inside the modal head
+    var src = document.getElementById('chartControls');
+    var dst = document.getElementById('chartModalControls');
+    if (src && dst) {
+      dst.innerHTML = '';
+      Array.from(src.children).forEach(function (el) {
+        if (el.id !== 'rangeSel') dst.appendChild(el.cloneNode(true));
+      });
+    }
+
+    window.chartExpanded = true;
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    // double-rAF: let the modal lay out before the canvas measures its size
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () { fireRedraw(); });
+    });
+  };
+
+  // ── close ─────────────────────────────────────────────────────────────────
+  window.collapseChart = function () {
+    var modal = document.getElementById('chartModal');
+    if (!modal) return;
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+    window.chartExpanded = false;
+    requestAnimationFrame(function () { fireRedraw(); });
+  };
+
+  // ── close on backdrop click ───────────────────────────────────────────────
+  document.addEventListener('click', function (e) {
+    if (e.target && e.target.id === 'chartModal') window.collapseChart();
+  });
+
+  // ── close on Escape ───────────────────────────────────────────────────────
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && window.chartExpanded) window.collapseChart();
+  });
+}());
+</script>
 
 <script src="app.js"></script>
 </body>

@@ -1,60 +1,47 @@
-import yfinance as yf
-import requests
-import json
-import re
-import sys
-import os
-import math
+#!/usr/bin/env python3
+"""
+Squall v2 — Equity analysis scraper
+Sources: yahooquery (market data) · SEC EDGAR (filings) · FMP (optional cross-check)
+"""
+
+from yahooquery import Ticker as YQTicker
+import requests, json, re, sys, os, math
 import pandas as pd
 import numpy as np
 import warnings
 from datetime import datetime, timedelta
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-TODAY      = datetime.now()
-TODAY_STR  = TODAY.strftime('%B %d, %Y')
-TODAY_ISO  = TODAY.strftime('%Y-%m-%d')
+TODAY     = datetime.now()
+TODAY_STR = TODAY.strftime("%B %d, %Y")
+TODAY_ISO = TODAY.strftime("%Y-%m-%d")
 
-# ==========================================
-# ⚠️  SET YOUR EMAIL (SEC requires this)
-# ==========================================
-USER_AGENT  = "BasementQuantProject ilgardemir2@gmail.com"
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
+USER_AGENT  = os.getenv("SEC_USER_AGENT", "BasementQuantProject ilgardemir2@gmail.com")
 SEC_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")   # optional; set to enable FMP cross-checks
 
-# ==========================================
+# ══════════════════════════════════════════════════════════════════════════════
 # 1. UTILITIES
-# ==========================================
+# ══════════════════════════════════════════════════════════════════════════════
 def safe_divide(num, denom, default=0.0):
     if isinstance(num, (pd.Series, np.ndarray)) or isinstance(denom, (pd.Series, np.ndarray)):
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             res = num / denom
             if isinstance(res, pd.Series):
                 return res.replace([np.inf, -np.inf], np.nan).fillna(default)
             return np.nan_to_num(res, nan=default, posinf=default, neginf=default)
     if denom == 0 or pd.isna(denom) or pd.isna(num): return default
-    result = num / denom
-    return default if math.isinf(result) or math.isnan(result) else result
+    r = num / denom
+    return default if math.isinf(r) or math.isnan(r) else r
 
-def is_valid(val, min_val=-1e9, max_val=1e9):
+def is_valid(val, mn=-1e9, mx=1e9):
     if val is None: return False
     try:
         f = float(val)
-        return not math.isnan(f) and not math.isinf(f) and min_val <= f <= max_val
+        return not math.isnan(f) and not math.isinf(f) and mn <= f <= mx
     except: return False
-
-def get_risk_free_rate():
-    try:
-        rate = yf.Ticker("^TNX").info.get('previousClose', 40.0) / 1000
-        return rate if is_valid(rate, 0, 0.20) else 0.045
-    except: return 0.045
-
-def safe_get_financial(df, row_name, col_idx=0):
-    try:
-        if df is None or df.empty or row_name not in df.index: return None
-        val = df.loc[row_name].dropna()
-        return float(val.iloc[col_idx]) if not val.empty else None
-    except: return None
 
 def safe_float(v):
     try:
@@ -77,17 +64,154 @@ def fmt(val, t="pct"):
         return f"${v:,.2f}"
     return str(val)
 
-# ==========================================
-# 2. SEC EDGAR
-# ==========================================
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. YAHOOQUERY WRAPPER
+# ══════════════════════════════════════════════════════════════════════════════
+class YQData:
+    """Defensive wrapper around yahooquery Ticker — handles error strings and missing keys."""
+
+    def __init__(self, symbol: str):
+        self.sym    = symbol
+        self._yq    = YQTicker(symbol)
+        self._cache: dict = {}
+
+    # ── module helpers ────────────────────────────────────────────────────────
+    def _mod(self, name: str) -> dict:
+        if name in self._cache:
+            return self._cache[name]
+        try:
+            raw = getattr(self._yq, name, None)
+            if not isinstance(raw, dict):
+                self._cache[name] = {}; return {}
+            val = raw.get(self.sym) or raw.get(self.sym.upper()) or {}
+            result = val if isinstance(val, dict) else {}
+        except:
+            result = {}
+        self._cache[name] = result
+        return result
+
+    @property
+    def price_mod(self)      -> dict: return self._mod("price")
+    @property
+    def asset_profile(self)  -> dict: return self._mod("asset_profile")
+    @property
+    def financial_data(self) -> dict: return self._mod("financial_data")
+    @property
+    def key_stats(self)      -> dict: return self._mod("key_stats")
+    @property
+    def summary_detail(self) -> dict: return self._mod("summary_detail")
+    @property
+    def calendar_events(self)-> dict: return self._mod("calendar_events")
+
+    def get(self, key: str, *sources) -> any:
+        """Try a key across multiple module names, return first non-None hit."""
+        for src in sources:
+            v = self._mod(src).get(key)
+            if v is not None and v != "": return v
+        return None
+
+    # ── financial DataFrames ──────────────────────────────────────────────────
+    def _financial_df(self, raw) -> pd.DataFrame:
+        if not isinstance(raw, pd.DataFrame) or raw.empty:
+            return pd.DataFrame()
+        df = raw
+        if hasattr(df.index, "names") and "symbol" in df.index.names:
+            for sym in [self.sym, self.sym.upper()]:
+                try:  df = raw.xs(sym, level="symbol"); break
+                except KeyError: pass
+        # Flatten remaining MultiIndex so rows are individual periods
+        if hasattr(df.index, "names") and len(df.index.names) > 1:
+            df = df.reset_index()
+        elif not isinstance(df.index, pd.RangeIndex):
+            df = df.reset_index()
+        # Sort most-recent first
+        for date_col in ("asOfDate", "date", "endDate"):
+            if date_col in df.columns:
+                df = df.sort_values(date_col, ascending=False)
+                break
+        return df
+
+    def income_stmt(self, frequency="a") -> pd.DataFrame:
+        try:   return self._financial_df(self._yq.income_statement(frequency=frequency))
+        except: return pd.DataFrame()
+
+    def cashflow_stmt(self, frequency="a") -> pd.DataFrame:
+        try:   return self._financial_df(self._yq.cash_flow(frequency=frequency))
+        except: return pd.DataFrame()
+
+    def balance_sheet_stmt(self, frequency="a") -> pd.DataFrame:
+        try:   return self._financial_df(self._yq.balance_sheet(frequency=frequency))
+        except: return pd.DataFrame()
+
+    # ── price history ─────────────────────────────────────────────────────────
+    def history(self, **kwargs) -> pd.DataFrame:
+        try:
+            h = self._yq.history(**kwargs)
+            if not isinstance(h, pd.DataFrame) or h.empty:
+                return pd.DataFrame()
+            if hasattr(h.index, "names") and "symbol" in h.index.names:
+                for sym in [self.sym, self.sym.upper()]:
+                    try:  h = h.xs(sym, level="symbol"); break
+                    except KeyError: pass
+            # Standardise column names to yfinance convention
+            col_map = {"open":"Open","high":"High","low":"Low","close":"Close",
+                       "volume":"Volume","dividends":"Dividends","splits":"Stock Splits"}
+            h = h.rename(columns=col_map)
+            return h
+        except:
+            return pd.DataFrame()
+
+    # ── earnings history ──────────────────────────────────────────────────────
+    def earnings_hist(self) -> pd.DataFrame:
+        try:
+            raw = self._yq.earnings_history
+            if not isinstance(raw, pd.DataFrame) or raw.empty:
+                return pd.DataFrame()
+            if hasattr(raw.index, "names") and "symbol" in raw.index.names:
+                for sym in [self.sym, self.sym.upper()]:
+                    try:  raw = raw.xs(sym, level="symbol"); break
+                    except KeyError: pass
+            return raw.reset_index() if not isinstance(raw.index, pd.RangeIndex) else raw
+        except:
+            return pd.DataFrame()
+
+    # ── options ───────────────────────────────────────────────────────────────
+    def option_data(self, current_price: float) -> dict:
+        return _fetch_options_yq(self._yq, self.sym, current_price)
+
+
+def _stmt_val(df: pd.DataFrame, *cols) -> float | None:
+    """Return most-recent non-null value from a financial DataFrame."""
+    if df is None or df.empty: return None
+    for col in cols:
+        if col in df.columns:
+            s = df[col].dropna()
+            if not s.empty: return safe_float(s.iloc[0])
+    return None
+
+
+def _stmt_series(df: pd.DataFrame, *cols, n=5) -> list:
+    """Return up to n most-recent values from a column (most-recent first)."""
+    if df is None or df.empty: return []
+    for col in cols:
+        if col in df.columns:
+            s = df[col].dropna()
+            if not s.empty: return [safe_float(v) for v in s.head(n).tolist()]
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. SEC EDGAR  (unchanged from v1)
+# ══════════════════════════════════════════════════════════════════════════════
 def get_cik_from_ticker(ticker):
     try:
         r = requests.get("https://www.sec.gov/files/company_tickers.json",
                          headers={"User-Agent": USER_AGENT}, timeout=10)
         r.raise_for_status()
         for val in r.json().values():
-            if val['ticker'].lower() == ticker.lower():
-                return str(val['cik_str']).zfill(10)
+            if val["ticker"].lower() == ticker.lower():
+                return str(val["cik_str"]).zfill(10)
         return None
     except: return None
 
@@ -104,781 +228,566 @@ def get_recent_filings(cik, limit=50):
         r = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
                          headers={"User-Agent": USER_AGENT}, timeout=10)
         r.raise_for_status()
-        recent = r.json().get('filings', {}).get('recent', {})
-        primary_docs = recent.get('primaryDocument', [])
-        return [{'form': recent['form'][i], 'filing_date': recent['filingDate'][i],
-                 'accession_number': recent['accessionNumber'][i],
-                 'primary_document': primary_docs[i] if i < len(primary_docs) else None}
-                for i in range(min(limit, len(recent.get('accessionNumber', []))))]
+        recent = r.json().get("filings", {}).get("recent", {})
+        pdocs  = recent.get("primaryDocument", [])
+        return [{"form": recent["form"][i], "filing_date": recent["filingDate"][i],
+                 "accession_number": recent["accessionNumber"][i],
+                 "primary_document": pdocs[i] if i < len(pdocs) else None}
+                for i in range(min(limit, len(recent.get("accessionNumber", []))))]
     except: return []
 
 def extract_mda_text(cik, accession_number):
     try:
         clean_acc = accession_number.replace("-", "")
-        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{clean_acc}/{accession_number}.txt"
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{clean_acc}/{accession_number}.txt")
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
         r.raise_for_status()
         match = re.search(
-            r'(?:ITEM\s+7\.|ITEM\s+2\.)\s*MANAGEMENT[\s\S]*?DISCUSSION AND ANALYSIS.*?(?=ITEM\s+\d+\.)',
+            r"(?:ITEM\s+7\.|ITEM\s+2\.)\s*MANAGEMENT[\s\S]*?DISCUSSION AND ANALYSIS.*?(?=ITEM\s+\d+\.)",
             r.text, re.IGNORECASE)
         if match:
-            clean = re.sub(r'<[^>]+>', ' ', match.group(0))
-            return re.sub(r'\s+', ' ', clean).strip()[:3000]
+            clean = re.sub(r"<[^>]+>", " ", match.group(0))
+            return re.sub(r"\s+", " ", clean).strip()[:3000]
         return "MD&A section not found."
     except: return "Failed to fetch MD&A."
 
 def parse_8k_items(cik, accession_number):
     try:
         clean_acc = accession_number.replace("-", "")
-        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{clean_acc}/{accession_number}.txt"
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{clean_acc}/{accession_number}.txt")
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-        items = re.findall(r'ITEM\s+(\d+\.\d+|\d+)\.', r.text, re.IGNORECASE)
-        meanings = {'1.01':'Material Definitive Agreement','2.01':'Acquisition/Disposition of Assets',
-                    '2.02':'Results of Operations (Earnings Release)','2.06':'Material Impairment',
-                    '3.01':'Delisting Notice','4.01':'Change in Accountant',
-                    '5.02':'Departure/Appointment of Officers or Directors','8.01':'Other Material Events'}
-        return list(set([meanings.get(i, f'Item {i}') for i in items]))
+        items = re.findall(r"ITEM\s+(\d+\.\d+|\d+)\.", r.text, re.IGNORECASE)
+        meanings = {
+            "1.01":"Material Definitive Agreement","2.01":"Acquisition/Disposition of Assets",
+            "2.02":"Results of Operations (Earnings Release)","2.06":"Material Impairment",
+            "3.01":"Delisting Notice","4.01":"Change in Accountant",
+            "5.02":"Departure/Appointment of Officers or Directors","8.01":"Other Material Events"
+        }
+        return list(set([meanings.get(i, f"Item {i}") for i in items]))
     except: return []
 
 def analyze_form4(cik, accession_number):
     try:
         clean_acc = accession_number.replace("-", "")
-        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{clean_acc}/{accession_number}.txt"
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{clean_acc}/{accession_number}.txt")
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-        codes = re.findall(r'<transactionCode>\s*([PS])\s*</transactionCode>', r.text)
-        return {'buys': codes.count('P'), 'sells': codes.count('S')}
-    except: return {'buys': 0, 'sells': 0}
+        codes = re.findall(r"<transactionCode>\s*([PS])\s*</transactionCode>", r.text)
+        return {"buys": codes.count("P"), "sells": codes.count("S")}
+    except: return {"buys": 0, "sells": 0}
 
 def safe_extract_sec(facts, namespace, concept):
     try:
-        if namespace not in facts['facts'] or concept not in facts['facts'][namespace]:
+        if namespace not in facts["facts"] or concept not in facts["facts"][namespace]:
             return None, []
-        units = facts['facts'][namespace][concept]['units']
-        unit_key = 'USD' if 'USD' in units else (list(units.keys())[0] if units else None)
+        units    = facts["facts"][namespace][concept]["units"]
+        unit_key = "USD" if "USD" in units else (list(units.keys())[0] if units else None)
         if not unit_key: return None, []
-        annual = sorted([x for x in units[unit_key] if x.get('form') == '10-K'],
-                        key=lambda x: x.get('end', ''), reverse=True)
+        annual = sorted([x for x in units[unit_key] if x.get("form") == "10-K"],
+                        key=lambda x: x.get("end", ""), reverse=True)
         if not annual: return None, []
-        return annual[0].get('val'), [x.get('val') for x in annual[:5]]
+        return annual[0].get("val"), [x.get("val") for x in annual[:5]]
     except: return None, []
 
 def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs"):
-    """
-    Downloads the primary document of the most recent 10-K on file.
-    If no 10-K is present, falls back to the single most recent filing of any type.
-    A single lightweight GET request is made — gentle on SEC's servers.
-    """
-    if not filings:
-        return None
-
-    target = next((f for f in filings if f['form'] == '10-K'), None)
-    if not target:
-        target = filings[0]
-
-    if not target.get('primary_document'):
-        return {'form': target['form'], 'filing_date': target['filing_date'], 'error': 'No primary document listed.'}
-
+    if not filings: return None
+    target = next((f for f in filings if f["form"] == "10-K"), None) or filings[0]
+    if not target.get("primary_document"):
+        return {"form": target["form"], "filing_date": target["filing_date"], "error": "No primary document listed."}
     try:
-        acc_nodash = target['accession_number'].replace('-', '')
-        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_nodash}/{target['primary_document']}"
+        acc_nodash = target["accession_number"].replace("-", "")
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{acc_nodash}/{target['primary_document']}")
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
         r.raise_for_status()
-
-        ext = target['primary_document'].split('.')[-1] if '.' in target['primary_document'] else 'htm'
-        safe_form = target['form'].replace(' ', '').replace('/', '-')
-        filename = f"{ticker}_{safe_form}_{target['filing_date']}.{ext}"
-
+        ext = target["primary_document"].split(".")[-1] if "." in target["primary_document"] else "htm"
+        safe_form = target["form"].replace(" ", "").replace("/", "-")
+        filename  = f"{ticker}_{safe_form}_{target['filing_date']}.{ext}"
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, filename)
-        with open(out_path, 'wb') as fh:
-            fh.write(r.content)
-
-        return {
-            'form': target['form'],
-            'filing_date': target['filing_date'],
-            'accession_number': target['accession_number'],
-            'source_url': url,
-            'local_path': out_path,
-            'filename': filename,
-            'size_bytes': len(r.content)
-        }
+        with open(out_path, "wb") as fh: fh.write(r.content)
+        return {"form": target["form"], "filing_date": target["filing_date"],
+                "accession_number": target["accession_number"], "source_url": url,
+                "local_path": out_path, "filename": filename, "size_bytes": len(r.content)}
     except Exception as e:
-        return {'form': target['form'], 'filing_date': target['filing_date'], 'error': str(e)}
+        return {"form": target["form"], "filing_date": target["filing_date"], "error": str(e)}
 
-# ==========================================
-# 3. OPTIONS CHAIN (Live — Future Dates Only)
-# ==========================================
-def fetch_options_chain(stock, current_price):
-    """Fetches real options data with only future expiration dates."""
-    result = {'available_expirations': [], 'chains': [], 'iv_summary': {}}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. FINANCIAL MODELING PREP (optional)
+# ══════════════════════════════════════════════════════════════════════════════
+def fetch_fmp_data(ticker: str) -> dict | None:
+    """Fetch TTM metrics + latest annual income from FMP (needs FMP_API_KEY env var)."""
+    if not FMP_API_KEY:
+        return None
+    base = "https://financialmodelingprep.com/api/v3"
     try:
-        all_expirations = stock.options  # tuple of date strings like '2026-07-18'
-        if not all_expirations:
+        m  = requests.get(f"{base}/key-metrics-ttm/{ticker}?apikey={FMP_API_KEY}", timeout=6)
+        ic = requests.get(f"{base}/income-statement/{ticker}?limit=1&apikey={FMP_API_KEY}", timeout=6)
+        cf = requests.get(f"{base}/cash-flow-statement/{ticker}?limit=1&apikey={FMP_API_KEY}", timeout=6)
+        metrics = m.json()[0]  if m.status_code == 200 and m.json() else {}
+        income  = ic.json()[0] if ic.status_code == 200 and ic.json() else {}
+        cashflow= cf.json()[0] if cf.status_code == 200 and cf.json() else {}
+        if not metrics and not income:
+            return None
+        return {"metrics": metrics, "income": income, "cashflow": cashflow}
+    except:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. OPTIONS CHAIN
+# ══════════════════════════════════════════════════════════════════════════════
+def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
+    """Fetches the live options chain via yahooquery — 2 near expirations, 3 strikes each."""
+    result = {"available_expirations": [], "chains": [], "iv_summary": {}}
+    try:
+        chain_raw = yq_ticker.option_chain
+        if isinstance(chain_raw, str) or not isinstance(chain_raw, pd.DataFrame) or chain_raw.empty:
             return result
 
-        # Filter to FUTURE expirations only
-        future_exps = [e for e in all_expirations
-                       if datetime.strptime(e, '%Y-%m-%d') > TODAY]
+        idx = chain_raw.index
 
-        if not future_exps:
+        # Collect expiration dates from the index (level 1 of MultiIndex)
+        if idx.nlevels >= 2:
+            exps_raw = sorted(idx.get_level_values(1).unique())
+        elif "expiration" in chain_raw.columns:
+            exps_raw = sorted(chain_raw["expiration"].unique())
+        else:
             return result
 
-        result['available_expirations'] = future_exps[:8]  # show up to 8
-
-        # Fetch chains for next 4 expirations
-        for exp_date in future_exps[:4]:
+        future_exps = []
+        for e in exps_raw:
             try:
-                chain = stock.option_chain(exp_date)
-                calls = chain.calls
-                puts  = chain.puts
-                days_out = (datetime.strptime(exp_date, '%Y-%m-%d') - TODAY).days
+                exp_dt = pd.Timestamp(e).to_pydatetime() if not isinstance(e, datetime) else e
+                exp_dt = exp_dt.replace(tzinfo=None)
+                if exp_dt > TODAY:
+                    future_exps.append(exp_dt.strftime("%Y-%m-%d"))
+            except: continue
 
-                if calls.empty: continue
+        result["available_expirations"] = future_exps[:8]
 
-                # Find ATM strike (closest to current price)
-                calls['dist'] = abs(calls['strike'] - current_price)
-                puts['dist']  = abs(puts['strike']  - current_price)
-                atm_idx_c = calls['dist'].idxmin()
-                atm_idx_p = puts['dist'].idxmin()
+        for exp_str in future_exps[:2]:   # Only 2 expirations for token efficiency
+            try:
+                days_out = (datetime.strptime(exp_str, "%Y-%m-%d") - TODAY).days
+                calls_df = puts_df = None
 
-                # Get ATM and nearest OTM options
-                atm_strike = float(calls.loc[atm_idx_c, 'strike'])
+                # Try slicing by (symbol, expiration, optionType)
+                for sym_key in [ticker_sym, ticker_sym.upper()]:
+                    for exp_key in [exp_str, pd.Timestamp(exp_str)]:
+                        for call_label in ["calls", "CALL", "call"]:
+                            try:
+                                calls_df = chain_raw.xs((sym_key, exp_key, call_label), level=[0,1,2]).reset_index(drop=True)
+                                break
+                            except: pass
+                        for put_label in ["puts", "PUT", "put"]:
+                            try:
+                                puts_df = chain_raw.xs((sym_key, exp_key, put_label), level=[0,1,2]).reset_index(drop=True)
+                                break
+                            except: pass
+                        if calls_df is not None: break
+                    if calls_df is not None: break
 
-                # Select a window of strikes around ATM
-                otm_calls = calls[calls['strike'] >= atm_strike].head(5)
-                otm_puts  = puts[puts['strike']  <= atm_strike].tail(5)
+                # Fallback: filter by columns if xs failed
+                if calls_df is None and "optionType" in chain_raw.columns and "expiration" in chain_raw.columns:
+                    mask = chain_raw["expiration"].astype(str).str[:10] == exp_str
+                    calls_df = chain_raw[mask & chain_raw["optionType"].str.lower().isin(["calls","call"])].reset_index(drop=True)
+                    puts_df  = chain_raw[mask & chain_raw["optionType"].str.lower().isin(["puts","put"])].reset_index(drop=True)
 
-                chain_data = {
-                    'expiration':   exp_date,
-                    'days_to_exp':  days_out,
-                    'atm_strike':   atm_strike,
-                    'calls': [],
-                    'puts':  []
-                }
+                if calls_df is None or calls_df.empty or "strike" not in calls_df.columns:
+                    continue
 
-                for _, row in otm_calls.iterrows():
-                    chain_data['calls'].append({
-                        'strike':          safe_float(row.get('strike')),
-                        'last':            safe_float(row.get('lastPrice')),
-                        'bid':             safe_float(row.get('bid')),
-                        'ask':             safe_float(row.get('ask')),
-                        'iv':              safe_float(row.get('impliedVolatility')),
-                        'open_interest':   int(row.get('openInterest', 0) or 0),
-                        'volume':          int(row.get('volume', 0) or 0),
-                        'in_the_money':    bool(row.get('inTheMoney', False))
-                    })
+                calls_df["dist"] = abs(calls_df["strike"] - current_price)
+                atm_idx    = calls_df["dist"].idxmin()
+                atm_strike = float(calls_df.loc[atm_idx, "strike"])
+                otm_calls  = calls_df[calls_df["strike"] >= atm_strike].head(3)
+                otm_puts   = puts_df[puts_df["strike"] <= atm_strike].tail(3) if puts_df is not None and not puts_df.empty and "strike" in puts_df.columns else pd.DataFrame()
 
-                for _, row in otm_puts.iterrows():
-                    chain_data['puts'].append({
-                        'strike':          safe_float(row.get('strike')),
-                        'last':            safe_float(row.get('lastPrice')),
-                        'bid':             safe_float(row.get('bid')),
-                        'ask':             safe_float(row.get('ask')),
-                        'iv':              safe_float(row.get('impliedVolatility')),
-                        'open_interest':   int(row.get('openInterest', 0) or 0),
-                        'volume':          int(row.get('volume', 0) or 0),
-                        'in_the_money':    bool(row.get('inTheMoney', False))
-                    })
+                def row_to_opt(r):
+                    return {"strike": safe_float(r.get("strike")), "bid": safe_float(r.get("bid")),
+                            "ask": safe_float(r.get("ask")), "iv": safe_float(r.get("impliedVolatility")),
+                            "open_interest": int(r.get("openInterest", 0) or 0),
+                            "volume": int(r.get("volume", 0) or 0),
+                            "in_the_money": bool(r.get("inTheMoney", False))}
 
-                result['chains'].append(chain_data)
+                chain_data = {"expiration": exp_str, "days_to_exp": days_out,
+                              "atm_strike": atm_strike,
+                              "calls": [row_to_opt(r) for _, r in otm_calls.iterrows()],
+                              "puts":  [row_to_opt(r) for _, r in otm_puts.iterrows()]}
+                result["chains"].append(chain_data)
 
-                # IV summary from ATM call
-                atm_iv = safe_float(calls.loc[atm_idx_c, 'impliedVolatility'])
-                if atm_iv:
-                    result['iv_summary'][exp_date] = atm_iv
+                atm_iv = safe_float(calls_df.loc[atm_idx, "impliedVolatility"])
+                if atm_iv: result["iv_summary"][exp_str] = atm_iv
 
-            except Exception:
-                continue
+            except: continue
 
-    except Exception:
-        pass
-
+    except: pass
     return result
 
-# ==========================================
-# 3b. REAL-TIME / INTRADAY DATA
-# ==========================================
-def fetch_intraday_data(stock):
-    """
-    Fetches recent intraday bars — enough resolution and lookback for
-    pattern detection across a typical multi-day trading window.
-    Tries 5-minute bars over the last 5 trading days first (yfinance's
-    practical limit for that interval), falling back to coarser bars
-    if the ticker has limited intraday history.
-    """
-    for period, interval in [("5d", "5m"), ("1mo", "15m"), ("1mo", "30m")]:
-        try:
-            intraday = stock.history(period=period, interval=interval)
-            if not intraday.empty and len(intraday) >= 50:
-                intraday.attrs['interval'] = interval
-                intraday.attrs['period'] = period
-                return intraday
-        except Exception:
-            continue
-    return pd.DataFrame()
 
-def get_live_quote(stock, info):
-    """Best-effort real-time quote snapshot (delayed per Yahoo's feed, but the freshest available)."""
-    quote = {"fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    try:
-        fi = stock.fast_info
-        quote.update({
-            "last_price":     safe_float(fi.get('lastPrice')),
-            "previous_close": safe_float(fi.get('previousClose')),
-            "open":           safe_float(fi.get('open')),
-            "day_high":       safe_float(fi.get('dayHigh')),
-            "day_low":        safe_float(fi.get('dayLow')),
-            "last_volume":    safe_float(fi.get('lastVolume')),
-            "market_cap":     safe_float(fi.get('marketCap')),
-            "year_high":      safe_float(fi.get('yearHigh')),
-            "year_low":       safe_float(fi.get('yearLow')),
-            "currency":       fi.get('currency'),
-            "exchange":       fi.get('exchange'),
-        })
-    except Exception:
-        pass
-    quote["bid"]            = safe_float(info.get('bid'))
-    quote["ask"]            = safe_float(info.get('ask'))
-    quote["bid_size"]       = info.get('bidSize')
-    quote["ask_size"]       = info.get('askSize')
-    quote["market_state"]   = info.get('marketState')
-    return quote
-
-def get_price_history_series(hist, days=252):
-    """Returns the trailing `days` of daily OHLCV (oldest first) for charting downstream."""
-    if hist is None or hist.empty:
-        return []
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. PRICE HISTORY SERIALISER
+# ══════════════════════════════════════════════════════════════════════════════
+def get_price_history_series(hist: pd.DataFrame, days: int = 1260) -> list:
+    """Returns trailing `days` of daily OHLCV (oldest first) for charting."""
+    if hist is None or hist.empty: return []
     recent = hist.tail(days)
-    series = []
+    out = []
     for idx, row in recent.iterrows():
-        series.append({
-            "date":   idx.strftime('%Y-%m-%d'),
-            "open":   safe_float(row.get('Open')),
-            "high":   safe_float(row.get('High')),
-            "low":    safe_float(row.get('Low')),
-            "close":  safe_float(row.get('Close')),
-            "volume": int(row.get('Volume', 0) or 0)
-        })
-    return series
+        dt = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+        out.append({"date": dt, "open": safe_float(row.get("Open")),
+                    "high": safe_float(row.get("High")), "low": safe_float(row.get("Low")),
+                    "close": safe_float(row.get("Close")),
+                    "volume": int(row.get("Volume", 0) or 0)})
+    return out
 
-# ==========================================
-# 4. CHART PATTERN DETECTION
-# ==========================================
-def detect_chart_patterns(hist, current_price):
-    """Detects common chart patterns algorithmically from price history."""
-    patterns   = []
-    key_levels = {}
 
-    if hist.empty or len(hist) < 50:
-        return patterns, key_levels
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. CHART PATTERN DETECTION  (logic unchanged from v1)
+# ══════════════════════════════════════════════════════════════════════════════
+def detect_chart_patterns(hist: pd.DataFrame, current_price: float):
+    patterns, key_levels = [], {}
+    if hist.empty or len(hist) < 50: return patterns, key_levels
 
-    close  = hist['Close']
-    high   = hist['High']
-    low    = hist['Low']
-    volume = hist['Volume']
+    close  = hist["Close"]; high = hist["High"]; low = hist["Low"]; volume = hist["Volume"]
+    ma20   = close.rolling(20).mean(); ma50 = close.rolling(50).mean(); ma200 = close.rolling(200).mean()
 
-    # ── MOVING AVERAGES ───────────────────────────────────────────────────────
-    ma20  = close.rolling(20).mean()
-    ma50  = close.rolling(50).mean()
-    ma200 = close.rolling(200).mean()
-
-    # Golden / Death Cross (recent crossover within last 30 days)
     if len(ma50.dropna()) > 30 and len(ma200.dropna()) > 30:
-        ma50_arr  = ma50.dropna().values
-        ma200_arr = ma200.dropna().values
-        n = min(len(ma50_arr), len(ma200_arr))
-        if n >= 30:
-            recent_cross_window = 20
-            for i in range(max(1, n - recent_cross_window), n):
-                if ma50_arr[i] > ma200_arr[i] and ma50_arr[i-1] <= ma200_arr[i-1]:
-                    patterns.append("GOLDEN CROSS: 50MA crossed above 200MA recently — strong bullish signal.")
-                    break
-                if ma50_arr[i] < ma200_arr[i] and ma50_arr[i-1] >= ma200_arr[i-1]:
-                    patterns.append("DEATH CROSS: 50MA crossed below 200MA recently — strong bearish signal.")
-                    break
+        a50 = ma50.dropna().values; a200 = ma200.dropna().values
+        n = min(len(a50), len(a200))
+        for i in range(max(1, n-20), n):
+            if a50[i] > a200[i] and a50[i-1] <= a200[i-1]:
+                patterns.append("GOLDEN CROSS: 50MA crossed above 200MA recently."); break
+            if a50[i] < a200[i] and a50[i-1] >= a200[i-1]:
+                patterns.append("DEATH CROSS: 50MA crossed below 200MA recently."); break
 
-    # ── BOLLINGER BANDS ───────────────────────────────────────────────────────
-    bb_mid  = close.rolling(20).mean()
-    bb_std  = close.rolling(20).std()
-    bb_up   = bb_mid + 2 * bb_std
-    bb_low  = bb_mid - 2 * bb_std
-    bb_width = safe_divide((bb_up.iloc[-1] - bb_low.iloc[-1]), bb_mid.iloc[-1])
+    bb_mid = close.rolling(20).mean(); bb_std = close.rolling(20).std()
+    bb_up  = bb_mid + 2*bb_std;        bb_lo  = bb_mid - 2*bb_std
+    bb_w   = safe_divide(bb_up.iloc[-1] - bb_lo.iloc[-1], bb_mid.iloc[-1])
+    if current_price >= bb_up.iloc[-1]*0.99:  patterns.append("BB UPPER TOUCH: Price at/above upper Bollinger Band.")
+    elif current_price <= bb_lo.iloc[-1]*1.01: patterns.append("BB LOWER TOUCH: Price at/below lower Bollinger Band.")
+    if bb_w < 0.05:   patterns.append("BB SQUEEZE: Bands extremely tight — big move imminent.")
+    elif bb_w > 0.20: patterns.append("BB EXPANSION: Very wide bands — high volatility regime.")
+    key_levels["bb_upper"] = safe_float(bb_up.iloc[-1])
+    key_levels["bb_lower"] = safe_float(bb_lo.iloc[-1])
+    key_levels["bb_width_pct"] = safe_float(bb_w)
 
-    if current_price >= bb_up.iloc[-1] * 0.99:
-        patterns.append(f"BB UPPER TOUCH: Price at/above upper Bollinger Band — overbought or strong breakout.")
-    elif current_price <= bb_low.iloc[-1] * 1.01:
-        patterns.append(f"BB LOWER TOUCH: Price at/below lower Bollinger Band — oversold or breakdown.")
+    ema12 = close.ewm(span=12, adjust=False).mean(); ema26 = close.ewm(span=26, adjust=False).mean()
+    macd  = ema12 - ema26; sig = macd.ewm(span=9, adjust=False).mean(); hist_m = macd - sig
+    mv, sv, hv = safe_float(macd.iloc[-1]), safe_float(sig.iloc[-1]), safe_float(hist_m.iloc[-1])
+    if mv and sv:
+        if mv > sv and hist_m.iloc[-2] <= sig.iloc[-2]:   patterns.append("MACD BULLISH CROSSOVER: MACD just crossed above signal line.")
+        elif mv < sv and hist_m.iloc[-2] >= sig.iloc[-2]: patterns.append("MACD BEARISH CROSSOVER: MACD just crossed below signal line.")
+        elif mv > 0 and sv > 0: patterns.append("MACD BULLISH: Both MACD and signal above zero.")
+        elif mv < 0 and sv < 0: patterns.append("MACD BEARISH: Both MACD and signal below zero.")
+    key_levels["macd"] = mv; key_levels["macd_signal"] = sv; key_levels["macd_hist"] = hv
 
-    if bb_width < 0.05:
-        patterns.append("BB SQUEEZE: Bollinger Bands extremely tight — major move imminent, direction unknown.")
-    elif bb_width > 0.20:
-        patterns.append("BB EXPANSION: Bollinger Bands very wide — high volatility regime.")
-
-    key_levels['bb_upper'] = safe_float(bb_up.iloc[-1])
-    key_levels['bb_lower'] = safe_float(bb_low.iloc[-1])
-    key_levels['bb_width_pct'] = safe_float(bb_width)
-
-    # ── MACD ──────────────────────────────────────────────────────────────────
-    ema12  = close.ewm(span=12, adjust=False).mean()
-    ema26  = close.ewm(span=26, adjust=False).mean()
-    macd   = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    hist_m = macd - signal
-
-    macd_val   = safe_float(macd.iloc[-1])
-    signal_val = safe_float(signal.iloc[-1])
-    hist_val   = safe_float(hist_m.iloc[-1])
-
-    if macd_val and signal_val:
-        if macd_val > signal_val and hist_m.iloc[-2] <= signal.iloc[-2]:
-            patterns.append("MACD BULLISH CROSSOVER: MACD just crossed above signal line.")
-        elif macd_val < signal_val and hist_m.iloc[-2] >= signal.iloc[-2]:
-            patterns.append("MACD BEARISH CROSSOVER: MACD just crossed below signal line.")
-        elif macd_val > 0 and signal_val > 0:
-            patterns.append("MACD BULLISH: Both MACD and signal above zero.")
-        elif macd_val < 0 and signal_val < 0:
-            patterns.append("MACD BEARISH: Both MACD and signal below zero.")
-
-    key_levels['macd']        = macd_val
-    key_levels['macd_signal'] = signal_val
-    key_levels['macd_hist']   = hist_val
-
-    # ── SUPPORT & RESISTANCE (Pivot-based) ───────────────────────────────────
-    # Use rolling local highs/lows over last 252 trading days
-    lookback = min(252, len(hist))
-    recent   = hist.tail(lookback)
-    r_high   = recent['High']
-    r_low    = recent['Low']
-
-    # Find swing highs/lows using a 10-period window
+    lookback = min(252, len(hist)); r = hist.tail(lookback)
+    local_highs, local_lows = [], []
     window = 10
-    local_highs = []
-    local_lows  = []
-    for i in range(window, len(recent) - window):
-        if r_high.iloc[i] == r_high.iloc[i-window:i+window+1].max():
-            local_highs.append(float(r_high.iloc[i]))
-        if r_low.iloc[i] == r_low.iloc[i-window:i+window+1].min():
-            local_lows.append(float(r_low.iloc[i]))
+    for i in range(window, len(r)-window):
+        if r["High"].iloc[i] == r["High"].iloc[i-window:i+window+1].max(): local_highs.append(float(r["High"].iloc[i]))
+        if r["Low"].iloc[i]  == r["Low"].iloc[i-window:i+window+1].min():  local_lows.append(float(r["Low"].iloc[i]))
 
-    # Cluster nearby levels (within 1%)
-    def cluster_levels(levels, tolerance=0.01):
+    def cluster(levels, tol=0.01):
         if not levels: return []
-        levels = sorted(levels)
-        clusters = []
-        group = [levels[0]]
+        levels = sorted(levels); clusters = []; g = [levels[0]]
         for l in levels[1:]:
-            if (l - group[0]) / group[0] <= tolerance:
-                group.append(l)
-            else:
-                clusters.append(sum(group) / len(group))
-                group = [l]
-        clusters.append(sum(group) / len(group))
-        return clusters
+            if (l - g[0])/g[0] <= tol: g.append(l)
+            else: clusters.append(sum(g)/len(g)); g = [l]
+        clusters.append(sum(g)/len(g)); return clusters
 
-    resistance_levels = [r for r in cluster_levels(local_highs) if r > current_price]
-    support_levels    = [s for s in cluster_levels(local_lows)  if s < current_price]
+    key_levels["resistance"] = sorted([r for r in cluster(local_highs) if r > current_price])[:3]
+    key_levels["support"]    = sorted([s for s in cluster(local_lows)  if s < current_price], reverse=True)[:3]
 
-    key_levels['resistance'] = sorted(resistance_levels)[:3]
-    key_levels['support']    = sorted(support_levels, reverse=True)[:3]
+    for r in key_levels["resistance"][:2]:
+        if abs(current_price-r)/r < 0.02: patterns.append(f"AT RESISTANCE: Price within 2% of {fmt(r,'usd')}.")
+    for s in key_levels["support"][:2]:
+        if abs(current_price-s)/s < 0.02: patterns.append(f"AT SUPPORT: Price within 2% of {fmt(s,'usd')}.")
 
-    # Annotate if price is near a key level
-    for r in key_levels['resistance'][:2]:
-        if abs(current_price - r) / r < 0.02:
-            patterns.append(f"AT RESISTANCE: Price within 2% of resistance at {fmt(r, 'usd')}.")
-
-    for s in key_levels['support'][:2]:
-        if abs(current_price - s) / s < 0.02:
-            patterns.append(f"AT SUPPORT: Price within 2% of support at {fmt(s, 'usd')}.")
-
-    # ── TREND CHANNEL ─────────────────────────────────────────────────────────
-    # Fit a linear trend to last 60 days
     if len(close) >= 60:
-        recent60 = close.tail(60).values
-        x = np.arange(len(recent60))
-        slope, intercept = np.polyfit(x, recent60, 1)
-        slope_pct = slope / recent60[0] * 100  # daily % slope
+        rc = close.tail(60).values; x = np.arange(len(rc))
+        slope, _ = np.polyfit(x, rc, 1)
+        sp = slope / rc[0] * 100
+        if sp > 0.15: patterns.append(f"STRONG UPTREND: 60-day slope +{sp:.2f}%/day.")
+        elif sp > 0.05: patterns.append(f"MILD UPTREND: 60-day slope +{sp:.2f}%/day.")
+        elif sp < -0.15: patterns.append(f"STRONG DOWNTREND: 60-day slope {sp:.2f}%/day.")
+        elif sp < -0.05: patterns.append(f"MILD DOWNTREND: 60-day slope {sp:.2f}%/day.")
+        else: patterns.append(f"SIDEWAYS: 60-day slope flat ({sp:.2f}%/day).")
+        key_levels["trend_slope_daily_pct"] = safe_float(sp)
 
-        if slope_pct > 0.15:
-            patterns.append(f"STRONG UPTREND: 60-day trend slope is +{slope_pct:.2f}%/day.")
-        elif slope_pct > 0.05:
-            patterns.append(f"MILD UPTREND: 60-day trend slope is +{slope_pct:.2f}%/day.")
-        elif slope_pct < -0.15:
-            patterns.append(f"STRONG DOWNTREND: 60-day trend slope is {slope_pct:.2f}%/day.")
-        elif slope_pct < -0.05:
-            patterns.append(f"MILD DOWNTREND: 60-day trend slope is {slope_pct:.2f}%/day.")
-        else:
-            patterns.append(f"SIDEWAYS CONSOLIDATION: 60-day price trend is flat ({slope_pct:.2f}%/day).")
-
-        key_levels['trend_slope_daily_pct'] = safe_float(slope_pct)
-
-    # ── DOUBLE TOP / DOUBLE BOTTOM ────────────────────────────────────────────
     if len(local_highs) >= 2:
-        # Two recent highs within 3% of each other above current price
-        recent_highs = sorted(local_highs, reverse=True)[:5]
-        for i in range(len(recent_highs) - 1):
-            if abs(recent_highs[i] - recent_highs[i+1]) / recent_highs[i] < 0.03:
-                if recent_highs[i] > current_price * 1.01:
-                    patterns.append(f"DOUBLE TOP: Two peaks near {fmt(recent_highs[i], 'usd')} — potential reversal zone.")
-                    break
-
+        rh = sorted(local_highs, reverse=True)[:5]
+        for i in range(len(rh)-1):
+            if abs(rh[i]-rh[i+1])/rh[i] < 0.03 and rh[i] > current_price*1.01:
+                patterns.append(f"DOUBLE TOP: Two peaks near {fmt(rh[i],'usd')} — potential reversal."); break
     if len(local_lows) >= 2:
-        recent_lows = sorted(local_lows)[:5]
-        for i in range(len(recent_lows) - 1):
-            if abs(recent_lows[i] - recent_lows[i+1]) / (recent_lows[i] + 0.01) < 0.03:
-                if recent_lows[i] < current_price * 0.99:
-                    patterns.append(f"DOUBLE BOTTOM: Two troughs near {fmt(recent_lows[i], 'usd')} — potential support base.")
-                    break
+        rl = sorted(local_lows)[:5]
+        for i in range(len(rl)-1):
+            if abs(rl[i]-rl[i+1])/(rl[i]+0.01) < 0.03 and rl[i] < current_price*0.99:
+                patterns.append(f"DOUBLE BOTTOM: Two troughs near {fmt(rl[i],'usd')} — potential support base."); break
 
-    # ── VOLUME SURGE ──────────────────────────────────────────────────────────
     if len(volume) > 20:
-        avg_vol = volume.tail(20).mean()
-        last_vol = volume.iloc[-1]
-        vol_ratio = safe_divide(last_vol, avg_vol)
-        if vol_ratio > 2.5:
-            patterns.append(f"VOLUME SURGE: Today's volume is {vol_ratio:.1f}x the 20-day average — institutional activity.")
-        elif vol_ratio < 0.4:
-            patterns.append(f"LOW VOLUME: Today's volume is only {vol_ratio:.1f}x average — lack of conviction.")
+        avg_v = volume.tail(20).mean(); last_v = volume.iloc[-1]
+        vr    = safe_divide(last_v, avg_v)
+        if vr > 2.5:  patterns.append(f"VOLUME SURGE: {vr:.1f}x 20-day avg — possible institutional activity.")
+        elif vr < 0.4: patterns.append(f"LOW VOLUME: {vr:.1f}x 20-day avg — weak conviction.")
 
-    # ── BASE FORMATION ────────────────────────────────────────────────────────
     if len(close) >= 40:
-        last_40 = close.tail(40)
-        range_pct = (last_40.max() - last_40.min()) / last_40.min()
-        if range_pct < 0.08 and close.iloc[-1] > ma50.iloc[-1]:
-            patterns.append(f"BASE FORMATION: Tight 40-day range ({range_pct:.1%}) above 50MA — potential breakout setup.")
+        l40   = close.tail(40)
+        rng_p = (l40.max() - l40.min()) / l40.min()
+        if rng_p < 0.08 and close.iloc[-1] > ma50.iloc[-1]:
+            patterns.append(f"BASE FORMATION: Tight 40-day range ({rng_p:.1%}) above 50MA — breakout setup.")
 
     return patterns, key_levels
 
-# ==========================================
-# 4b. PRICE ACTION / MARKET STRUCTURE / INSTITUTIONAL
-# ==========================================
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. PRICE ACTION & INSTITUTIONAL FOOTPRINT  (unchanged logic)
+# ══════════════════════════════════════════════════════════════════════════════
 def find_swings(series, left=5, right=5):
-    """Return swing highs and lows as (index, price) using a fractal pivot of width left/right."""
-    highs, lows = [], []
-    n = len(series)
-    for i in range(left, n - right):
-        win = series[i - left:i + right + 1]
-        if series[i] == max(win) and list(win).count(series[i]) == 1:
-            highs.append((i, float(series[i])))
-        if series[i] == min(win) and list(win).count(series[i]) == 1:
-            lows.append((i, float(series[i])))
+    highs, lows, n = [], [], len(series)
+    for i in range(left, n-right):
+        win = series[i-left:i+right+1]
+        if series[i] == max(win) and list(win).count(series[i]) == 1: highs.append((i, float(series[i])))
+        if series[i] == min(win) and list(win).count(series[i]) == 1: lows.append((i, float(series[i])))
     return highs, lows
 
-
-def analyze_price_action(hist, current_price):
-    """
-    Defines trend by market structure (higher highs/higher lows vs lower highs/lower lows),
-    detects break-of-structure / change-of-character, and returns the most recent swing levels.
-    This is the 'read the chart like price action' layer used to infer institutional intent.
-    """
-    out = {
-        "trend": "INSUFFICIENT DATA", "trend_basis": "",
-        "structure": [], "recent_swing_high": None, "recent_swing_low": None,
-        "events": [], "fib": {}
-    }
-    if hist is None or hist.empty or len(hist) < 60:
-        return out
-
-    highs_s = hist["High"]
-    lows_s = hist["Low"]
-    sh = find_swings(highs_s.values, 8, 8)[0]
-    sl_lows = find_swings(lows_s.values, 8, 8)[1]
-
-    # Keep the last few swing highs / lows
-    last_highs = [p for _, p in sh[-4:]]
-    last_lows = [p for _, p in sl_lows[-4:]]
+def analyze_price_action(hist: pd.DataFrame, current_price: float) -> dict:
+    out = {"trend":"INSUFFICIENT DATA","trend_basis":"","structure":[],"recent_swing_high":None,
+           "recent_swing_low":None,"events":[],"fib":{}}
+    if hist is None or hist.empty or len(hist) < 60: return out
+    sh = find_swings(hist["High"].values, 8, 8)[0]
+    sl = find_swings(hist["Low"].values, 8, 8)[1]
+    last_highs = [p for _, p in sh[-4:]]; last_lows  = [p for _, p in sl[-4:]]
     out["recent_swing_high"] = safe_float(last_highs[-1]) if last_highs else None
-    out["recent_swing_low"] = safe_float(last_lows[-1]) if last_lows else None
+    out["recent_swing_low"]  = safe_float(last_lows[-1])  if last_lows  else None
 
-    # ── TREND DEFINITION (structural, noise-robust) ───────────────────────
-    # Compare the average of the most-recent swings to the average of the
-    # earlier swings, so a single noisy pivot can't flip the trend.
     def rising(seq):
         if len(seq) < 2: return None
-        half = max(1, len(seq) // 2)
-        early, late = seq[:half], seq[half:]
-        return (sum(late) / len(late)) > (sum(early) / len(early)) * 1.005
+        half = max(1, len(seq)//2); e, l = seq[:half], seq[half:]
+        return (sum(l)/len(l)) > (sum(e)/len(e))*1.005
     def falling(seq):
         if len(seq) < 2: return None
-        half = max(1, len(seq) // 2)
-        early, late = seq[:half], seq[half:]
-        return (sum(late) / len(late)) < (sum(early) / len(early)) * 0.995
+        half = max(1, len(seq)//2); e, l = seq[:half], seq[half:]
+        return (sum(l)/len(l)) < (sum(e)/len(e))*0.995
 
     hh, hl = rising(last_highs), rising(last_lows)
     lh, ll = falling(last_highs), falling(last_lows)
+    if hh and hl:   out["trend"] = "UPTREND";   out["trend_basis"] = "HH + HL — bullish structure."
+    elif lh and ll: out["trend"] = "DOWNTREND";  out["trend_basis"] = "LH + LL — bearish structure."
+    elif (hh and ll) or (lh and hl): out["trend"] = "RANGE / TRANSITION"; out["trend_basis"] = "Mixed swings — consolidation."
+    else:           out["trend"] = "RANGE";      out["trend_basis"] = "No directional swing sequence."
 
-    if hh and hl:
-        out["trend"] = "UPTREND"
-        out["trend_basis"] = "Higher highs AND higher lows — bullish market structure intact."
-    elif lh and ll:
-        out["trend"] = "DOWNTREND"
-        out["trend_basis"] = "Lower highs AND lower lows — bearish market structure intact."
-    elif (hh and ll) or (lh and hl):
-        out["trend"] = "RANGE / TRANSITION"
-        out["trend_basis"] = "Mixed structure (a high and low disagree) — consolidation or a turning point."
-    else:
-        out["trend"] = "RANGE"
-        out["trend_basis"] = "No clean sequence of higher or lower swings — sideways."
+    out["structure"] = ([{"type":"swing_high","price":safe_float(p)} for p in last_highs[-3:]] +
+                        [{"type":"swing_low", "price":safe_float(p)} for p in last_lows[-3:]])
+    if last_highs and current_price > last_highs[-1]*1.001: out["events"].append(f"BOS (bullish): cleared prior swing high at {fmt(last_highs[-1],'usd')}.")
+    if last_lows  and current_price < last_lows[-1]*0.999:  out["events"].append(f"BOS (bearish): broke prior swing low at {fmt(last_lows[-1],'usd')}.")
+    if out["trend"] == "DOWNTREND" and last_highs and current_price > last_highs[-1]: out["events"].append("CHoCH: first bullish break inside downtrend.")
+    if out["trend"] == "UPTREND"   and last_lows  and current_price < last_lows[-1]:  out["events"].append("CHoCH: first bearish break inside uptrend.")
 
-    out["structure"] = [
-        {"type": "swing_high", "price": safe_float(p)} for p in last_highs[-3:]
-    ] + [
-        {"type": "swing_low", "price": safe_float(p)} for p in last_lows[-3:]
-    ]
-
-    # ── BREAK OF STRUCTURE / CHANGE OF CHARACTER ──────────────────────────
-    if last_highs and current_price > last_highs[-1] * 1.001:
-        out["events"].append(f"BREAK OF STRUCTURE (bullish): price cleared the prior swing high at {fmt(last_highs[-1],'usd')}.")
-    if last_lows and current_price < last_lows[-1] * 0.999:
-        out["events"].append(f"BREAK OF STRUCTURE (bearish): price broke the prior swing low at {fmt(last_lows[-1],'usd')}.")
-    if out["trend"] == "DOWNTREND" and last_highs and current_price > last_highs[-1]:
-        out["events"].append("CHANGE OF CHARACTER: first break above a swing high inside a downtrend — possible reversal.")
-    if out["trend"] == "UPTREND" and last_lows and current_price < last_lows[-1]:
-        out["events"].append("CHANGE OF CHARACTER: first break below a swing low inside an uptrend — possible reversal.")
-
-    # ── FIBONACCI RETRACEMENT (last major swing leg) ──────────────────────
     if out["recent_swing_high"] and out["recent_swing_low"]:
         hi, lo = out["recent_swing_high"], out["recent_swing_low"]
         if hi > lo:
             diff = hi - lo
-            out["fib"] = {lvl: safe_float(hi - diff * r) for lvl, r in
-                          {"0.0": 0.0, "0.236": 0.236, "0.382": 0.382, "0.5": 0.5,
-                           "0.618": 0.618, "0.786": 0.786, "1.0": 1.0}.items()}
-            out["fib_high"], out["fib_low"] = safe_float(hi), safe_float(lo)
+            out["fib"] = {k: safe_float(hi - diff*r) for k, r in
+                          {"0.0":0,"0.236":0.236,"0.382":0.382,"0.5":0.5,"0.618":0.618,"0.786":0.786,"1.0":1.0}.items()}
+            out["fib_high"] = safe_float(hi); out["fib_low"] = safe_float(lo)
     return out
 
-
-def analyze_institutional(hist):
-    """
-    Proxies for institutional accumulation/distribution from price+volume:
-    On-Balance Volume trend, up-day vs down-day volume, and large-range closes near highs.
-    These are footprints, not confirmation — the AI is told to treat them as such.
-    """
-    out = {"signals": [], "obv_trend": None, "up_vol_ratio": None,
-           "accumulation_days": 0, "distribution_days": 0, "net_bias": "NEUTRAL"}
-    if hist is None or hist.empty or len(hist) < 40:
-        return out
-
-    close = hist["Close"]
-    vol = hist["Volume"]
-    ret = close.diff()
-
-    # On-Balance Volume slope over last 30 sessions
-    obv = (np.sign(ret).fillna(0) * vol).cumsum()
+def analyze_institutional(hist: pd.DataFrame) -> dict:
+    out = {"signals":[],"obv_trend":None,"up_vol_ratio":None,
+           "accumulation_days":0,"distribution_days":0,"net_bias":"NEUTRAL"}
+    if hist is None or hist.empty or len(hist) < 40: return out
+    close = hist["Close"]; vol = hist["Volume"]; ret = close.diff()
+    obv   = (np.sign(ret).fillna(0) * vol).cumsum()
     recent_obv = obv.tail(30)
     if len(recent_obv) > 5:
-        x = np.arange(len(recent_obv))
-        slope = np.polyfit(x, recent_obv.values, 1)[0]
+        slope = np.polyfit(np.arange(len(recent_obv)), recent_obv.values, 1)[0]
         out["obv_trend"] = "RISING" if slope > 0 else "FALLING"
-
-    # Up-day vs down-day volume over last 20 sessions
     last20 = hist.tail(20)
-    up_vol = last20.loc[last20["Close"] >= last20["Open"], "Volume"].sum()
-    dn_vol = last20.loc[last20["Close"] < last20["Open"], "Volume"].sum()
-    if (up_vol + dn_vol) > 0:
-        out["up_vol_ratio"] = safe_float(up_vol / (up_vol + dn_vol))
-
-    # Accumulation / distribution days (>1.4x avg volume, strong directional close)
-    avg_vol = vol.tail(50).mean()
-    rng = (hist["High"] - hist["Low"]).replace(0, np.nan)
-    close_pos = (close - hist["Low"]) / rng  # 1 = closed at high, 0 = at low
-    for i in range(max(0, len(hist) - 25), len(hist)):
-        if vol.iloc[i] > 1.4 * avg_vol:
-            if close_pos.iloc[i] > 0.66 and ret.iloc[i] > 0:
-                out["accumulation_days"] += 1
-            elif close_pos.iloc[i] < 0.34 and ret.iloc[i] < 0:
-                out["distribution_days"] += 1
-
-    if out["obv_trend"] == "RISING":
-        out["signals"].append("OBV RISING: cumulative volume flow is positive — buyers in control.")
-    elif out["obv_trend"] == "FALLING":
-        out["signals"].append("OBV FALLING: cumulative volume flow is negative — sellers in control.")
-    if is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] > 0.62:
-        out["signals"].append(f"UP-VOLUME DOMINANCE: {out['up_vol_ratio']:.0%} of 20-day volume came on up days — accumulation.")
-    elif is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] < 0.40:
-        out["signals"].append(f"DOWN-VOLUME DOMINANCE: only {out['up_vol_ratio']:.0%} of 20-day volume on up days — distribution.")
-    if out["accumulation_days"] >= 3:
-        out["signals"].append(f"ACCUMULATION: {out['accumulation_days']} high-volume up-closes in 25 sessions — institutional buying footprint.")
-    if out["distribution_days"] >= 3:
-        out["signals"].append(f"DISTRIBUTION: {out['distribution_days']} high-volume down-closes in 25 sessions — institutional selling footprint.")
-
+    up_v = last20.loc[last20["Close"] >= last20["Open"], "Volume"].sum()
+    dn_v = last20.loc[last20["Close"] <  last20["Open"], "Volume"].sum()
+    if (up_v+dn_v) > 0: out["up_vol_ratio"] = safe_float(up_v/(up_v+dn_v))
+    avg_vol  = vol.tail(50).mean()
+    rng      = (hist["High"] - hist["Low"]).replace(0, np.nan)
+    close_pos= (close - hist["Low"]) / rng
+    for i in range(max(0, len(hist)-25), len(hist)):
+        if vol.iloc[i] > 1.4*avg_vol:
+            if close_pos.iloc[i] > 0.66 and ret.iloc[i] > 0: out["accumulation_days"] += 1
+            elif close_pos.iloc[i] < 0.34 and ret.iloc[i] < 0: out["distribution_days"] += 1
+    if out["obv_trend"] == "RISING":  out["signals"].append("OBV RISING: cumulative volume flow positive.")
+    elif out["obv_trend"] == "FALLING": out["signals"].append("OBV FALLING: cumulative volume flow negative.")
+    if is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] > 0.62: out["signals"].append(f"UP-VOL DOMINANCE: {out['up_vol_ratio']:.0%} of 20D volume on up days.")
+    elif is_valid(out["up_vol_ratio"]) and out["up_vol_ratio"] < 0.40: out["signals"].append(f"DOWN-VOL DOMINANCE: {out['up_vol_ratio']:.0%} of 20D volume on up days.")
+    if out["accumulation_days"] >= 3: out["signals"].append(f"ACCUMULATION: {out['accumulation_days']} high-vol up-closes in 25 sessions.")
+    if out["distribution_days"] >= 3: out["signals"].append(f"DISTRIBUTION: {out['distribution_days']} high-vol down-closes in 25 sessions.")
     acc, dist = out["accumulation_days"], out["distribution_days"]
-    if (out["obv_trend"] == "RISING") and acc >= dist:
-        out["net_bias"] = "ACCUMULATION"
-    elif (out["obv_trend"] == "FALLING") and dist >= acc:
-        out["net_bias"] = "DISTRIBUTION"
+    if out["obv_trend"] == "RISING"  and acc >= dist: out["net_bias"] = "ACCUMULATION"
+    if out["obv_trend"] == "FALLING" and dist >= acc: out["net_bias"] = "DISTRIBUTION"
     return out
 
-# ==========================================
-# 5. MAIN ENGINE
-# ==========================================
-def generate_analysis_payload(ticker):
-    def stage(k, label): print(f"STAGE|{k}|6|{label}", file=sys.stderr, flush=True)
-    stage(1, "Querying SEC EDGAR filings")
 
-    # ── SEC DATA ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. INTRADAY DATA
+# ══════════════════════════════════════════════════════════════════════════════
+def fetch_intraday_data(yqdata: YQData) -> pd.DataFrame:
+    for period, interval in [("5d","5m"), ("1mo","15m"), ("1mo","30m")]:
+        try:
+            h = yqdata.history(period=period, interval=interval)
+            if not h.empty and len(h) >= 50:
+                h.attrs["interval"] = interval; h.attrs["period"] = period
+                return h
+        except: continue
+    return pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. MAIN ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+def generate_analysis_payload(ticker: str) -> dict:
+    def stage(k: int, label: str):
+        print(f"STAGE|{k}|7|{label}", file=sys.stderr, flush=True)
+
+    # ── STAGE 1: SEC EDGAR ───────────────────────────────────────────────────
+    stage(1, "Querying SEC EDGAR filings")
     cik           = get_cik_from_ticker(ticker)
     sec_available = cik is not None
-    facts, filings, mda_text = None, [], "SEC data unavailable."
+    facts = None; filings = []; mda_text = "SEC data unavailable."
     sec_rev_val = sec_ni_val = sec_assets_val = sec_liab_val = sec_equity_val = sec_ocf_val = sec_rev_cagr = None
-    filing_signals = {'8k_events': [], 'insider_buys': 0, 'insider_sells': 0, 'activist_13d': False}
+    filing_signals = {"8k_events": [], "insider_buys": 0, "insider_sells": 0, "activist_13d": False}
+    company_name = ticker
 
     if sec_available:
         facts   = get_company_facts(cik)
         filings = get_recent_filings(cik, limit=50)
+        company_name = (facts or {}).get("entityName", ticker)
 
-        sec_rev_val,  sec_rev_hist = safe_extract_sec(facts, 'us-gaap', 'Revenues') if facts else (None, [])
-        if sec_rev_val is None:
-            sec_rev_val, sec_rev_hist = safe_extract_sec(facts, 'us-gaap', 'RevenueFromContractWithCustomerExcludingAssessedTax') if facts else (None, [])
-        sec_ni_val,    _ = safe_extract_sec(facts, 'us-gaap', 'NetIncomeLoss')      if facts else (None, [])
-        sec_assets_val,_ = safe_extract_sec(facts, 'us-gaap', 'Assets')             if facts else (None, [])
-        sec_liab_val,  _ = safe_extract_sec(facts, 'us-gaap', 'Liabilities')        if facts else (None, [])
-        sec_equity_val,_ = safe_extract_sec(facts, 'us-gaap', 'StockholdersEquity') if facts else (None, [])
-        sec_ocf_val,   _ = safe_extract_sec(facts, 'us-gaap', 'NetCashProvidedByUsedInOperatingActivities') if facts else (None, [])
+        def sec_val(ns, concept):
+            return safe_extract_sec(facts, ns, concept) if facts else (None, [])
+
+        sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
+        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
+        sec_ni_val,     _  = sec_val("us-gaap", "NetIncomeLoss")
+        sec_assets_val, _  = sec_val("us-gaap", "Assets")
+        sec_liab_val,   _  = sec_val("us-gaap", "Liabilities")
+        sec_equity_val, _  = sec_val("us-gaap", "StockholdersEquity")
+        sec_ocf_val,    _  = sec_val("us-gaap", "NetCashProvidedByUsedInOperatingActivities")
 
         if len(sec_rev_hist) >= 3 and sec_rev_hist[2] and sec_rev_hist[2] > 0:
-            try: sec_rev_cagr = ((sec_rev_hist[0] / sec_rev_hist[2]) ** (1/2)) - 1
+            try: sec_rev_cagr = ((sec_rev_hist[0] / sec_rev_hist[2]) ** 0.5) - 1
             except: pass
 
-        company_name = facts.get('entityName', ticker) if facts else ticker
-
-        latest_10k = next((f['accession_number'] for f in filings if f['form'] == '10-K'), None)
-        if latest_10k:
-            mda_text = extract_mda_text(cik, latest_10k)
+        latest_10k = next((f["accession_number"] for f in filings if f["form"] == "10-K"), None)
+        if latest_10k: mda_text = extract_mda_text(cik, latest_10k)
 
         cutoff = TODAY - timedelta(days=90)
         for f in filings:
             try:
-                if datetime.strptime(f['filing_date'], '%Y-%m-%d') >= cutoff:
-                    if f['form'] == '8-K':
-                        filing_signals['8k_events'].extend(parse_8k_items(cik, f['accession_number']))
-                    elif f['form'] == '4':
-                        tx = analyze_form4(cik, f['accession_number'])
-                        filing_signals['insider_buys']  += tx['buys']
-                        filing_signals['insider_sells'] += tx['sells']
-                    elif f['form'] in ['SC 13D', 'SC 13D/A']:
-                        filing_signals['activist_13d'] = True
+                if datetime.strptime(f["filing_date"], "%Y-%m-%d") >= cutoff:
+                    if f["form"] == "8-K":
+                        filing_signals["8k_events"].extend(parse_8k_items(cik, f["accession_number"]))
+                    elif f["form"] == "4":
+                        tx = analyze_form4(cik, f["accession_number"])
+                        filing_signals["insider_buys"]  += tx["buys"]
+                        filing_signals["insider_sells"] += tx["sells"]
+                    elif f["form"] in ["SC 13D", "SC 13D/A"]:
+                        filing_signals["activist_13d"] = True
             except: continue
-        filing_signals['8k_events'] = list(set(filing_signals['8k_events']))
+        filing_signals["8k_events"] = list(set(filing_signals["8k_events"]))
 
-    # ── SEC FILING ATTACHMENT ────────────────────────────────────────────────
+    # ── STAGE 2: Download latest filing ──────────────────────────────────────
     sec_filing_attachment = None
     if sec_available and filings:
         stage(2, "Downloading latest 10-K")
         sec_filing_attachment = download_latest_filing(cik, filings, ticker)
 
-    # ── YAHOO FINANCE ─────────────────────────────────────────────────────────
+    # ── STAGE 3: Market data via yahooquery ───────────────────────────────────
     stage(3, "Fetching price history & fundamentals")
-    try:
-        stock = yf.Ticker(ticker)
-        info  = stock.info or {}
-    except:
-        info  = {}
-        stock = None
+    yqd = YQData(ticker)
 
     if not sec_available:
-        company_name = info.get('shortName', ticker)
+        company_name = yqd.asset_profile.get("longName") or yqd.price_mod.get("longName") or ticker
 
-    try: hist = stock.history(period="5y") if stock else pd.DataFrame()
-    except: hist = pd.DataFrame()
+    hist     = yqd.history(period="5y", interval="1d")
+    spy_hist = YQData("SPY").history(period="5y", interval="1d")
 
-    try: spy = yf.Ticker("SPY").history(period="5y")
-    except: spy = pd.DataFrame()
-
-    # ── VALIDATION GATE ───────────────────────────────────────────────────────
-    # A ticker is only analyzable if it resolves against at least ONE real source:
-    # an SEC CIK (filings) OR live market data (price history). If BOTH come back
-    # empty the symbol is invalid — bail out NOW, before any further computation
-    # and before the server ever calls the (paid) AI model.
+    # Validation gate — need at least one live data source
     if not sec_available and (hist is None or hist.empty):
-        return {
-            "error": (f"'{ticker}' doesn't look like a valid, tradeable ticker. "
-                      f"No SEC filings and no market data were found for it — "
-                      f"double-check the symbol and try again."),
-            "invalid_ticker": True,
-            "ticker": ticker
-        }
+        return {"error": (f"'{ticker}' doesn't look like a valid tradeable ticker. "
+                          "No SEC filings and no market data were found."),
+                "invalid_ticker": True, "ticker": ticker}
 
-    try: fin_df = stock.financials if stock else None
-    except: fin_df = None
+    inc_df = yqd.income_stmt()
+    cf_df  = yqd.cashflow_stmt()
 
-    try: cf_df = stock.cashflow if stock else None
-    except: cf_df = None
+    # Unified info dict built from yahooquery modules
+    fd  = yqd.financial_data     # margins, targets, ratios
+    ks  = yqd.key_stats          # pe, peg, pb, shorts, ev
+    sd  = yqd.summary_detail     # market cap, trailing/forward pe
+    ap  = yqd.asset_profile      # sector, industry, description
+    pm  = yqd.price_mod          # live price, bid/ask, market state
 
-    try: earnings_dates = stock.earnings_dates if stock else None
-    except: earnings_dates = None
+    # ── Current price ─────────────────────────────────────────────────────────
+    current_price = safe_float(pm.get("regularMarketPrice"))
+    if current_price is None and not hist.empty:
+        current_price = safe_float(hist["Close"].iloc[-1])
 
-    # Current price — prefer fast_info for freshness
-    try:
-        current_price = stock.fast_info['lastPrice']
-    except:
-        current_price = hist['Close'].iloc[-1] if not hist.empty else None
+    # ── STAGE 4: FMP cross-check ──────────────────────────────────────────────
+    stage(4, "Fetching FMP verification data")
+    fmp      = fetch_fmp_data(ticker)
+    fmp_m    = fmp["metrics"]  if fmp else {}
+    fmp_inc  = fmp["income"]   if fmp else {}
+    fmp_cf   = fmp["cashflow"] if fmp else {}
 
-    # ── REAL-TIME QUOTE & INTRADAY DATA ───────────────────────────────────────
-    stage(4, "Fetching live quote")
-    live_quote   = get_live_quote(stock, info) if stock else {"fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    intraday_hist = fetch_intraday_data(stock) if stock else pd.DataFrame()
+    # ── STAGE 5: Live quote, options, intraday ─────────────────────────────────
+    stage(5, "Live quote, options & intraday")
+    live_quote = {
+        "fetched_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_price":     safe_float(pm.get("regularMarketPrice")),
+        "open":           safe_float(pm.get("regularMarketOpen")),
+        "day_high":       safe_float(pm.get("regularMarketDayHigh")),
+        "day_low":        safe_float(pm.get("regularMarketDayLow")),
+        "previous_close": safe_float(pm.get("regularMarketPreviousClose")),
+        "bid":            safe_float(pm.get("bid") or sd.get("bid")),
+        "ask":            safe_float(pm.get("ask") or sd.get("ask")),
+        "bid_size":       pm.get("bidSize") or sd.get("bidSize"),
+        "ask_size":       pm.get("askSize") or sd.get("askSize"),
+        "market_state":   pm.get("marketState"),
+        "currency":       pm.get("currency"),
+        "exchange":       pm.get("exchangeName") or pm.get("exchange"),
+        "market_cap":     safe_float(pm.get("marketCap") or sd.get("marketCap")),
+        "year_high":      safe_float(pm.get("fiftyTwoWeekHigh") or sd.get("fiftyTwoWeekHigh")),
+        "year_low":       safe_float(pm.get("fiftyTwoWeekLow")  or sd.get("fiftyTwoWeekLow")),
+        "last_volume":    safe_float(pm.get("regularMarketVolume")),
+    }
 
-    # ── 1-YEAR DAILY PRICE HISTORY (for charting) ─────────────────────────────
-    price_history_1y = get_price_history_series(hist, days=252)
+    intraday_hist = fetch_intraday_data(yqd)
+    options_data  = yqd.option_data(current_price or 0) if current_price else {"available_expirations":[],"chains":[],"iv_summary":{}}
+    price_history = get_price_history_series(hist, days=1260)   # 5Y for multi-timeframe charts
 
-    # ── VALUATION ─────────────────────────────────────────────────────────────
-    pe_trail  = info.get('trailingPE')
-    pe_fwd    = info.get('forwardPE')
-    peg       = info.get('pegRatio')
-    pb        = info.get('priceToBook')
-    ps        = info.get('priceToSalesTrailing12Months')
-    ev_ebitda = info.get('enterpriseToEbitda')
-    mkt_cap   = info.get('marketCap')
-    fcf       = info.get('freeCashflow')
-    rev_yf    = info.get('totalRevenue')
-    fcf_margin = safe_divide(fcf, rev_yf)    if is_valid(fcf) and is_valid(rev_yf) and rev_yf != 0 else None
-    fcf_yield  = safe_divide(fcf, mkt_cap)   if is_valid(fcf) and is_valid(mkt_cap) and mkt_cap != 0 else None
-
-    # ── MARGINS & PROFITABILITY ───────────────────────────────────────────────
-    gross_m = info.get('grossMargins')
-    op_m    = info.get('operatingMargins')
-    net_m   = info.get('profitMargins')
-    roe     = info.get('returnOnEquity')
-    roa     = info.get('returnOnAssets')
-
-    # ── REVENUE GROWTH ────────────────────────────────────────────────────────
-    rev_1y = rev_3y = rev_5y = None
-    rev_shrinking = False
-    if fin_df is not None and not fin_df.empty and 'Total Revenue' in fin_df.index:
-        revs = fin_df.loc['Total Revenue'].dropna()
-        if len(revs) >= 2: rev_1y = safe_divide(revs.iloc[0], revs.iloc[1], 0) - 1
-        if len(revs) >= 4:
-            rev_3y = ((safe_divide(revs.iloc[0], revs.iloc[3], 0)) ** (1/3)) - 1
-            if rev_3y < 0: rev_shrinking = True
-        if len(revs) >= 5: rev_5y = ((safe_divide(revs.iloc[0], revs.iloc[4], 0)) ** (1/4)) - 1
-
-    # ── FINANCIAL HEALTH ──────────────────────────────────────────────────────
-    curr_ratio = info.get('currentRatio')
-    debt_eq    = info.get('debtToEquity')
-    ocf_yf     = safe_get_financial(cf_df, 'Operating Cash Flow')
-    ni_yf      = safe_get_financial(fin_df, 'Net Income')
-    earnings_quality = safe_divide(ocf_yf, ni_yf) if is_valid(ocf_yf) and is_valid(ni_yf) and ni_yf != 0 else None
-
-    # ── PRICE & TECHNICALS ────────────────────────────────────────────────────
+    # ── STAGE 6: Technicals & pattern detection ────────────────────────────────
+    stage(6, "Computing technicals & chart patterns")
     latest = current_price
-    prev   = hist['Close'].iloc[-2] if len(hist) > 1 else latest
+    prev   = hist["Close"].iloc[-2] if len(hist) > 1 else latest
     daily_change = safe_divide((latest - prev), prev) if latest and prev else 0
 
-    high_52w = hist['High'].tail(252).max() if not hist.empty else None
-    low_52w  = hist['Low'].tail(252).min()  if not hist.empty else None
-    high_5y  = hist['High'].max()           if not hist.empty else None
-    low_5y   = hist['Low'].min()            if not hist.empty else None
+    high_52w = hist["High"].tail(252).max() if not hist.empty else None
+    low_52w  = hist["Low"].tail(252).min()  if not hist.empty else None
+    high_5y  = hist["High"].max()           if not hist.empty else None
+    low_5y   = hist["Low"].min()            if not hist.empty else None
 
     pct_from_52_high = safe_divide((latest - high_52w), high_52w) if latest and high_52w else 0
     pct_from_5y_high = safe_divide((latest - high_5y),  high_5y)  if latest and high_5y  else 0
 
-    ma_50  = hist['Close'].rolling(50).mean().iloc[-1]  if not hist.empty else None
-    ma_200 = hist['Close'].rolling(200).mean().iloc[-1] if not hist.empty else None
+    ma_50  = hist["Close"].rolling(50).mean().iloc[-1]  if not hist.empty else None
+    ma_200 = hist["Close"].rolling(200).mean().iloc[-1] if not hist.empty else None
 
-    # RSI
     rsi_latest = 50.0
     if not hist.empty:
-        delta    = hist['Close'].diff()
+        delta    = hist["Close"].diff()
         gain     = delta.where(delta > 0, 0.0)
         loss     = -delta.where(delta < 0, 0.0)
         avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
@@ -886,108 +795,133 @@ def generate_analysis_payload(ticker):
         rs = safe_divide(avg_gain.iloc[-1], avg_loss.iloc[-1], 1.0)
         rsi_latest = 100 - (100 / (1 + rs))
 
-    # Volume
-    avg_volume    = hist['Volume'].rolling(20).mean().iloc[-1] if not hist.empty else 0
-    latest_volume = hist['Volume'].iloc[-1]                    if not hist.empty else 0
-    volume_ratio  = safe_divide(latest_volume, avg_volume) if avg_volume > 0 else 1.0
+    avg_volume   = hist["Volume"].rolling(20).mean().iloc[-1] if not hist.empty else 0
+    latest_volume= hist["Volume"].iloc[-1]                    if not hist.empty else 0
+    volume_ratio = safe_divide(latest_volume, avg_volume) if avg_volume > 0 else 1.0
 
-    # CAGR, Volatility, Sharpe, Max Drawdown, Beta
-    cagr = annual_vol = sharpe = max_drawdown = 0.0
-    beta = np.nan
+    cagr = annual_vol = sharpe = max_drawdown = 0.0; beta = np.nan
+    rf_rate = 0.045
     if not hist.empty and len(hist) > 200:
-        daily_returns = hist['Close'].pct_change().dropna()
+        daily_returns = hist["Close"].pct_change().dropna()
         years = len(hist) / 252
-        cagr  = ((safe_divide(latest, hist['Close'].iloc[0])) ** (1 / years)) - 1 if years > 0 else 0
-        annual_vol = daily_returns.std() * np.sqrt(252)
-        cumulative = (1 + daily_returns).cumprod()
-        peak       = cumulative.expanding(min_periods=1).max()
+        cagr  = ((safe_divide(latest, hist["Close"].iloc[0])) ** (1/years)) - 1 if years > 0 else 0
+        annual_vol   = daily_returns.std() * np.sqrt(252)
+        cumulative   = (1 + daily_returns).cumprod()
+        peak         = cumulative.expanding(min_periods=1).max()
         max_drawdown = safe_divide((cumulative - peak), peak).min()
-        rf_rate = get_risk_free_rate()
-        sharpe  = safe_divide((cagr - rf_rate), annual_vol)
-        if not spy.empty:
-            spy_returns = spy['Close'].pct_change().dropna()
-            aligned = pd.DataFrame({'stock': daily_returns, 'spy': spy_returns}).dropna()
+        try:
+            tnx = YQData("^TNX")
+            r   = safe_float(tnx.price_mod.get("regularMarketPrice"))
+            if r: rf_rate = r / 100
+        except: pass
+        sharpe = safe_divide((cagr - rf_rate), annual_vol)
+        if not spy_hist.empty:
+            spy_ret = spy_hist["Close"].pct_change().dropna()
+            aligned = pd.DataFrame({"stock": daily_returns, "spy": spy_ret}).dropna()
             if len(aligned) > 30:
-                beta = safe_divide(aligned['stock'].cov(aligned['spy']), aligned['spy'].var())
+                beta = safe_divide(aligned["stock"].cov(aligned["spy"]), aligned["spy"].var())
 
-    spy_vol = spy['Close'].pct_change().dropna().std() * np.sqrt(252) if not spy.empty else np.nan
-
-    # ── SENTIMENT & EARNINGS ──────────────────────────────────────────────────
-    short_float = info.get('shortPercentOfFloat')
-    target_mean = info.get('targetMeanPrice')
-    target_high = info.get('targetHighPrice')
-    target_low  = info.get('targetLowPrice')
-    rec_key     = info.get('recommendationKey', 'N/A')
-    inst_own    = info.get('heldPercentInstitutions')
-    insider_own = info.get('heldPercentInsiders')
-    next_earnings = info.get('earningsDate') or info.get('earningsTimestamp')
-
-    beats, misses = 0, 0
-    recent_earnings = []
-    if earnings_dates is not None and not earnings_dates.empty:
-        for idx, row in earnings_dates.head(4).iterrows():
-            est = row.get('EPS Estimate')
-            rep = row.get('Reported EPS')
-            if pd.notna(est) and pd.notna(rep):
-                surprise = safe_divide((rep - est), abs(est)) if est != 0 else 0
-                recent_earnings.append({
-                    "date": str(idx.date()) if hasattr(idx, 'date') else str(idx),
-                    "estimate": float(est), "reported": float(rep),
-                    "surprise_pct": float(surprise)
-                })
-                if rep > est: beats += 1
-                elif rep < est: misses += 1
-
-    # ── OPTIONS CHAIN ─────────────────────────────────────────────────────────
-    stage(5, "Reading options chain & patterns")
-    options_data = fetch_options_chain(stock, latest or 0) if stock and latest else {'available_expirations': [], 'chains': [], 'iv_summary': {}}
-
-    # ── CHART PATTERNS ────────────────────────────────────────────────────────
+    spy_vol = spy_hist["Close"].pct_change().dropna().std() * np.sqrt(252) if not spy_hist.empty else np.nan
 
     chart_patterns, key_levels = detect_chart_patterns(hist, latest or 0)
 
-    # ── ALGORITHMIC FLAGS ─────────────────────────────────────────────────────
-    stage(6, "Computing signals & price action")
-    flags         = []
-    data_warnings = []
-
-    # ── PRICE ACTION & INSTITUTIONAL FOOTPRINT ────────────────────────────
+    # ── STAGE 7: Signals & prompt ──────────────────────────────────────────────
+    stage(7, "Computing signals & building AI prompt")
     price_action  = analyze_price_action(hist, latest or 0)
     institutional = analyze_institutional(hist)
 
+    # ── Valuation (yahoo modules with FMP fallback) ────────────────────────────
+    pe_trail  = safe_float(sd.get("trailingPE")     or ks.get("trailingPE")     or fmp_m.get("peRatioTTM"))
+    pe_fwd    = safe_float(sd.get("forwardPE")      or ks.get("forwardPE"))
+    peg       = safe_float(ks.get("pegRatio")       or fmp_m.get("pegRatioTTM"))
+    pb        = safe_float(ks.get("priceToBook")    or fmp_m.get("pbRatioTTM"))
+    ps        = safe_float(ks.get("priceToSalesTrailingTwelveMonths") or sd.get("priceToSalesTrailingTwelveMonths"))
+    ev_ebitda = safe_float(ks.get("enterpriseToEbitda") or fmp_m.get("evToEbitdaTTM") or fmp_m.get("enterpriseValueMultipleTTM"))
+    mkt_cap   = safe_float(sd.get("marketCap")      or pm.get("marketCap"))
+    ev        = safe_float(ks.get("enterpriseValue") or fmp_m.get("enterpriseValueTTM"))
+    fcf       = safe_float(fd.get("freeCashflow"))
+    rev_yf    = safe_float(fd.get("totalRevenue"))
+    fcf_margin= safe_divide(fcf, rev_yf)  if is_valid(fcf) and is_valid(rev_yf) and rev_yf else None
+    fcf_yield = safe_divide(fcf, mkt_cap) if is_valid(fcf) and is_valid(mkt_cap) and mkt_cap else None
+
+    # ── Margins & profitability ────────────────────────────────────────────────
+    gross_m = safe_float(fd.get("grossMargins")     or fmp_m.get("grossProfitMarginTTM"))
+    op_m    = safe_float(fd.get("operatingMargins") or fmp_m.get("operatingProfitMarginTTM"))
+    net_m   = safe_float(fd.get("profitMargins")    or fmp_m.get("netProfitMarginTTM"))
+    roe     = safe_float(fd.get("returnOnEquity")   or fmp_m.get("roeTTM"))
+    roa     = safe_float(fd.get("returnOnAssets")   or fmp_m.get("roaTTM"))
+
+    # ── Revenue growth from yahooquery income statement ────────────────────────
+    rev_1y = rev_3y = rev_5y = None; rev_shrinking = False
+    revs = _stmt_series(inc_df, "TotalRevenue", "Revenue", "Total Revenue", n=5)
+    if len(revs) >= 2 and revs[0] and revs[1]: rev_1y = safe_divide(revs[0], revs[1]) - 1
+    if len(revs) >= 4 and revs[0] and revs[3]: rev_3y = ((safe_divide(revs[0], revs[3])) ** (1/3)) - 1
+    if len(revs) >= 5 and revs[0] and revs[4]: rev_5y = ((safe_divide(revs[0], revs[4])) ** (1/4)) - 1
+    if rev_3y is not None and rev_3y < 0: rev_shrinking = True
+
+    # ── Financial health ──────────────────────────────────────────────────────
+    curr_ratio = safe_float(fd.get("currentRatio") or fmp_m.get("currentRatioTTM"))
+    debt_eq    = safe_float(fd.get("debtToEquity") or fmp_m.get("debtToEquityTTM"))
+    ocf_val    = _stmt_val(cf_df, "OperatingCashFlow", "Operating Cash Flow")
+    ni_val     = _stmt_val(inc_df, "NetIncome", "Net Income")
+    earnings_quality = safe_divide(ocf_val, ni_val) if is_valid(ocf_val) and is_valid(ni_val) and ni_val else None
+
+    # ── Sentiment & analyst targets ───────────────────────────────────────────
+    short_float = safe_float(ks.get("shortPercentOfFloat") or ks.get("shortPercent"))
+    target_mean = safe_float(fd.get("targetMeanPrice"))
+    target_high = safe_float(fd.get("targetHighPrice"))
+    target_low  = safe_float(fd.get("targetLowPrice"))
+    rec_key     = fd.get("recommendationKey", "N/A") or "N/A"
+    inst_own    = safe_float(ks.get("heldPercentInstitutions"))
+    insider_own = safe_float(ks.get("heldPercentInsiders"))
+    next_earnings_raw = (yqd.calendar_events.get("earnings") or {}).get("earningsDate")
+    next_earnings = next_earnings_raw[0] if isinstance(next_earnings_raw, list) and next_earnings_raw else next_earnings_raw
+
+    # ── Earnings history ──────────────────────────────────────────────────────
+    beats = misses = 0
+    recent_earnings = []
+    eh = yqd.earnings_hist()
+    if not eh.empty:
+        for _, row in eh.head(4).iterrows():
+            est = safe_float(row.get("epsEstimate"))
+            rep = safe_float(row.get("epsActual"))
+            if est is not None and rep is not None:
+                surprise = safe_divide((rep - est), abs(est)) if est != 0 else 0
+                date_val = str(row.get("period",""))[:10] or str(row.get("quarter",""))[:10]
+                recent_earnings.append({"date": date_val, "estimate": float(est),
+                                        "reported": float(rep), "surprise_pct": float(surprise)})
+                if rep > est: beats += 1
+                elif rep < est: misses += 1
+
+    # ── Algorithmic flags ─────────────────────────────────────────────────────
+    flags, data_warnings = [], []
+
     if is_valid(pe_trail, -1000, 10000):
-        if pe_trail <= 0:    data_warnings.append("P/E <= 0: Company unprofitable or large one-time items.")
-        elif pe_trail > 500: flags.append(f"EXTREME VALUATION: Trailing P/E is {pe_trail:.2f} (>500).")
+        if pe_trail <= 0: data_warnings.append("P/E ≤ 0: unprofitable or large one-time item.")
+        elif pe_trail > 500: flags.append(f"EXTREME VALUATION: Trailing P/E {pe_trail:.2f} (>500).")
     if is_valid(peg, -10, 50):
-        if peg < 0:   flags.append("NEGATIVE PEG: Earnings growth is negative or anomalous.")
+        if peg < 0: flags.append("NEGATIVE PEG: negative earnings growth or anomaly.")
         elif peg > 5: flags.append(f"EXTREME PEG: {peg:.2f} — massive overvaluation or negative growth.")
-    if is_valid(debt_eq, 0, 5000) and debt_eq > 500:
-        flags.append(f"EXTREME LEVERAGE: Debt/Equity is {debt_eq:.2f} (>500).")
-    if is_valid(earnings_quality) and ni_yf and ni_yf > 0 and earnings_quality < 0.5:
-        flags.append("RED FLAG: Earnings Quality < 0.5 — cash flow doesn't match reported profits.")
+    if is_valid(debt_eq, 0, 5000) and debt_eq > 500: flags.append(f"EXTREME LEVERAGE: D/E {debt_eq:.2f} (>500).")
+    if is_valid(earnings_quality) and ni_val and ni_val > 0 and earnings_quality < 0.5:
+        flags.append("RED FLAG: Earnings Quality < 0.5 — cash flow doesn't match profits.")
 
     if sec_available:
-        if sec_ni_val is not None and sec_ni_val < 0:
-            flags.append("NET LOSS: Company reported a net loss in the latest 10-K (SEC verified).")
-        if sec_rev_cagr is not None and sec_rev_cagr < 0:
-            flags.append(f"DECLINING TOP LINE: 3Y Revenue CAGR is {sec_rev_cagr:.2%} (SEC verified).")
+        if sec_ni_val is not None and sec_ni_val < 0: flags.append("NET LOSS (SEC 10-K verified).")
+        if sec_rev_cagr is not None and sec_rev_cagr < 0: flags.append(f"DECLINING TOP LINE: 3Y Rev CAGR {sec_rev_cagr:.2%} (SEC).")
         if sec_liab_val and sec_equity_val and sec_equity_val != 0:
             lev = safe_divide(sec_liab_val, sec_equity_val)
-            if lev > 2.0: flags.append(f"HIGH LEVERAGE: Liabilities are {lev:.1f}x Equity (SEC verified).")
-        if filing_signals['insider_buys'] > filing_signals['insider_sells'] > 0:
-            flags.append(f"NET INSIDER BUYING: {filing_signals['insider_buys']} purchases vs {filing_signals['insider_sells']} sales (Form 4, 90D).")
-        elif filing_signals['insider_sells'] >= 5 and filing_signals['insider_sells'] > filing_signals['insider_buys']:
-            flags.append(f"HEAVY INSIDER SELLING: {filing_signals['insider_sells']} sales vs {filing_signals['insider_buys']} purchases (Form 4, 90D).")
-        if filing_signals['activist_13d']:
-            flags.append("ACTIVIST ALERT: New 13D filing — large position being established.")
+            if lev > 2.0: flags.append(f"HIGH LEVERAGE: Liabilities {lev:.1f}x Equity (SEC).")
+        if filing_signals["insider_buys"] > filing_signals["insider_sells"] > 0:
+            flags.append(f"NET INSIDER BUYING: {filing_signals['insider_buys']}B vs {filing_signals['insider_sells']}S (Form 4, 90D).")
+        elif filing_signals["insider_sells"] >= 5 and filing_signals["insider_sells"] > filing_signals["insider_buys"]:
+            flags.append(f"HEAVY INSIDER SELLING: {filing_signals['insider_sells']}S vs {filing_signals['insider_buys']}B (90D).")
+        if filing_signals["activist_13d"]: flags.append("ACTIVIST ALERT: New 13D — large position building.")
 
     if is_valid(peg) and rev_3y is not None:
-        if peg < 1.0 and rev_shrinking:
-            flags.append(f"FAKE VALUE: PEG is {peg:.2f} but 3Y Revenue CAGR is negative ({rev_3y:.2%}).")
-        elif peg < 1.0:
-            flags.append(f"FUNDAMENTAL VALUE: PEG Ratio is {peg:.2f} (< 1.0).")
-        elif peg > 2.0 and rev_3y < 0.05:
-            flags.append(f"EXPENSIVE STABILITY: PEG {peg:.2f} with only {rev_3y:.2%} 3Y growth.")
+        if peg < 1.0 and rev_shrinking: flags.append(f"FAKE VALUE: PEG {peg:.2f} but 3Y Rev CAGR negative ({rev_3y:.2%}).")
+        elif peg < 1.0: flags.append(f"FUNDAMENTAL VALUE: PEG {peg:.2f} (< 1.0).")
+        elif peg > 2.0 and rev_3y < 0.05: flags.append(f"EXPENSIVE STABILITY: PEG {peg:.2f} with {rev_3y:.2%} 3Y growth.")
 
     if latest and ma_50 and ma_200:
         if latest > ma_50 > ma_200:   flags.append("BULLISH ALIGNMENT: Price > 50MA > 200MA.")
@@ -995,239 +929,216 @@ def generate_analysis_payload(ticker):
         elif latest > ma_50 and latest < ma_200: flags.append("RECOVERY MODE: Price > 50MA but < 200MA.")
 
     if rsi_latest > 75:    flags.append("EXTREME OVERBOUGHT: RSI > 75.")
-    elif rsi_latest >= 65: flags.append("MOMENTUM STRETCH: RSI >= 65.")
+    elif rsi_latest >= 65: flags.append("MOMENTUM STRETCH: RSI ≥ 65.")
     elif rsi_latest < 25:  flags.append("EXTREME OVERSOLD: RSI < 25.")
 
-    if daily_change > 0 and volume_ratio < 0.85:
-        flags.append(f"WEAK CONFIRMATION: Rising price on {volume_ratio:.2f}x average volume.")
-    if pct_from_5y_high < -0.50:
-        flags.append(f"CYCLE LOWS: Trading {pct_from_5y_high:.1%} below 5-year high.")
-    if is_valid(spy_vol) and spy_vol > 0 and (annual_vol / spy_vol) > 2.5:
-        flags.append(f"EXTREME IDIOSYNCRATIC RISK: {annual_vol/spy_vol:.1f}x more volatile than SPY.")
-    if is_valid(short_float) and short_float > 0.10:
-        flags.append(f"HIGH SHORT INTEREST: {short_float:.1%} of float shorted.")
+    if daily_change > 0 and volume_ratio < 0.85: flags.append(f"WEAK CONFIRMATION: Up day on {volume_ratio:.2f}x avg vol.")
+    if pct_from_5y_high < -0.50: flags.append(f"CYCLE LOWS: {pct_from_5y_high:.1%} from 5Y high.")
+    if is_valid(spy_vol) and spy_vol > 0 and (annual_vol/spy_vol) > 2.5:
+        flags.append(f"EXTREME RISK: {annual_vol/spy_vol:.1f}x more volatile than SPY.")
+    if is_valid(short_float) and short_float > 0.10: flags.append(f"HIGH SHORT INTEREST: {short_float:.1%} of float.")
     if misses >= 3: flags.append(f"EARNINGS: Missed estimates {misses}/4 recent quarters.")
     if beats == 4:  flags.append("EARNINGS: Beat estimates all 4 recent quarters.")
 
-    # Price-action structure as a headline signal
-    if price_action.get("trend") in ("UPTREND", "DOWNTREND", "RANGE / TRANSITION"):
-        cls = {"UPTREND": "BULLISH STRUCTURE", "DOWNTREND": "BEARISH STRUCTURE",
-               "RANGE / TRANSITION": "STRUCTURE TRANSITION"}[price_action["trend"]]
-        flags.append(f"{cls}: {price_action['trend']} — {price_action['trend_basis']}")
-    for ev in price_action.get("events", []):
-        flags.append(ev)
-    if institutional.get("net_bias") == "ACCUMULATION":
-        flags.append("INSTITUTIONAL ACCUMULATION: volume footprint points to net buying.")
-    elif institutional.get("net_bias") == "DISTRIBUTION":
-        flags.append("INSTITUTIONAL DISTRIBUTION: volume footprint points to net selling.")
+    if price_action.get("trend") in ("UPTREND","DOWNTREND","RANGE / TRANSITION"):
+        cls = {"UPTREND":"BULLISH STRUCTURE","DOWNTREND":"BEARISH STRUCTURE",
+               "RANGE / TRANSITION":"STRUCTURE TRANSITION"}[price_action["trend"]]
+        flags.append(f"{cls}: {price_action['trend_basis']}")
+    for ev in price_action.get("events", []): flags.append(ev)
+    if institutional.get("net_bias") == "ACCUMULATION":  flags.append("INSTITUTIONAL ACCUMULATION: volume footprint → net buying.")
+    elif institutional.get("net_bias") == "DISTRIBUTION": flags.append("INSTITUTIONAL DISTRIBUTION: volume footprint → net selling.")
 
-    # ── BUILD AI PROMPT ───────────────────────────────────────────────────────
-    ai_prompt = f"""⚠️ TODAY'S DATE: {TODAY_STR}. All data below was fetched live on this date. Every expiration date, price level, and recommendation must be evaluated relative to {TODAY_STR}. Do NOT reference any options expiration that has already passed. Do NOT invent strikes, expirations, or prices not listed below.
+    # ══════════════════════════════════════════════════════════════════════════
+    # BUILD OPTIMISED AI PROMPT  (compact — ~40% fewer input tokens than v1)
+    # ══════════════════════════════════════════════════════════════════════════
+    biz_sum = ap.get("longBusinessSummary", "")
+    biz_sum = (biz_sum[:150] + "…") if biz_sum and len(biz_sum) > 150 else biz_sum
 
-You are an expert quantitative financial analyst. Analyze **{company_name} ({ticker})** using the data below.
+    ai_prompt = f"""TODAY: {TODAY_STR}. Analyze {company_name} ({ticker}). Use only data below; do not invent figures.
 
-### 1. COMPANY PROFILE
-- **Sector / Industry**: {info.get('sector','N/A')} / {info.get('industry','N/A')}
-- **Business Summary**: {info.get('longBusinessSummary','N/A')[:500]}...
-- **Next Earnings Date**: {str(next_earnings) if next_earnings else 'N/A'}
+### 1. COMPANY
+Sector/Industry: {ap.get('sector','N/A')} / {ap.get('industry','N/A')} | Next Earnings: {str(next_earnings) if next_earnings else 'N/A'}
+{biz_sum}
 
-### 2. SEC-VERIFIED FUNDAMENTALS (Latest 10-K)
-- **Revenue**: {fmt(sec_rev_val,'usd')} | **Net Income**: {fmt(sec_ni_val,'usd')}
-- **Total Assets**: {fmt(sec_assets_val,'usd')} | **Total Liabilities**: {fmt(sec_liab_val,'usd')} | **Equity**: {fmt(sec_equity_val,'usd')}
-- **Operating Cash Flow**: {fmt(sec_ocf_val,'usd')}
-- **Revenue CAGR (3Y, SEC)**: {fmt(sec_rev_cagr,'pct')}
-{"- ⚠️ SEC data unavailable." if not sec_available else ""}
-
-### 3. VALUATION
-- **Market Cap / EV**: {fmt(mkt_cap,'usd')} / {fmt(info.get('enterpriseValue'),'usd')}
-- **P/E (Trailing / Forward) / PEG**: {fmt(pe_trail,'ratio')} / {fmt(pe_fwd,'ratio')} / {fmt(peg,'ratio')}
-- **Price/Book / Price/Sales / EV/EBITDA**: {fmt(pb,'ratio')} / {fmt(ps,'ratio')} / {fmt(ev_ebitda,'ratio')}
-- **FCF Yield / FCF Margin**: {fmt(fcf_yield,'pct')} / {fmt(fcf_margin,'pct')}
-
-### 4. PROFITABILITY & GROWTH
-- **Gross / Operating / Net Margin**: {fmt(gross_m,'pct')} / {fmt(op_m,'pct')} / {fmt(net_m,'pct')}
-- **ROE / ROA**: {fmt(roe,'pct')} / {fmt(roa,'pct')}
-- **Revenue Growth (1Y / 3Y CAGR / 5Y CAGR)**: {fmt(rev_1y,'pct')} / {fmt(rev_3y,'pct')} / {fmt(rev_5y,'pct')}
-
-### 5. FINANCIAL HEALTH
-- **Current Ratio / Debt/Equity**: {fmt(curr_ratio,'ratio')} / {fmt(debt_eq,'ratio')}
-- **Earnings Quality (OCF/NI)**: {fmt(earnings_quality,'ratio')}
-
-### 6. PRICE, RISK & MOMENTUM (as of {TODAY_STR})
-- **Live Quote (fetched {live_quote.get('fetched_at','N/A')})**: Last {fmt(live_quote.get('last_price'),'usd')} | Open {fmt(live_quote.get('open'),'usd')} | Day Range {fmt(live_quote.get('day_low'),'usd')} — {fmt(live_quote.get('day_high'),'usd')} | Prev Close {fmt(live_quote.get('previous_close'),'usd')} | Bid/Ask {fmt(live_quote.get('bid'),'usd')}/{fmt(live_quote.get('ask'),'usd')} | Market: {live_quote.get('market_state') or 'N/A'}
-- **Current Price**: {fmt(latest,'usd')} ({fmt(daily_change,'pct')} today)
-- **52-Week Range**: {fmt(low_52w,'usd')} — {fmt(high_52w,'usd')} ({fmt(pct_from_52_high,'pct')} from 52W high)
-- **5-Year Range**: {fmt(low_5y,'usd')} — {fmt(high_5y,'usd')} ({fmt(pct_from_5y_high,'pct')} from 5Y high)
-- **50-Day / 200-Day MA**: {fmt(ma_50,'usd')} / {fmt(ma_200,'usd')}
-- **Bollinger Upper / Lower**: {fmt(key_levels.get('bb_upper'),'usd')} / {fmt(key_levels.get('bb_lower'),'usd')} (width: {fmt(key_levels.get('bb_width_pct'),'pct')})
-- **MACD / Signal / Histogram**: {fmt(key_levels.get('macd'),'ratio')} / {fmt(key_levels.get('macd_signal'),'ratio')} / {fmt(key_levels.get('macd_hist'),'ratio')}
-- **RSI (14)**: {fmt(rsi_latest,'ratio')}
-- **5Y CAGR / Max Drawdown**: {fmt(cagr,'pct')} / {fmt(max_drawdown,'pct')}
-- **Sharpe Ratio / Beta**: {fmt(sharpe,'ratio')} / {fmt(beta,'ratio')}
-- **Volume Ratio**: {fmt(volume_ratio,'ratio')}x 20-day avg
-
-### 7. KEY PRICE LEVELS
-- **Resistance levels**: {', '.join([fmt(r,'usd') for r in key_levels.get('resistance',[])]) or 'N/A'}
-- **Support levels**: {', '.join([fmt(s,'usd') for s in key_levels.get('support',[])]) or 'N/A'}
-
-### 8. CHART PATTERNS DETECTED (as of {TODAY_STR})
+### 2. SEC FUNDAMENTALS (Latest 10-K){"" if sec_available else " — ⚠️ UNAVAILABLE"}
+Rev/NI/OCF: {fmt(sec_rev_val,'usd')} / {fmt(sec_ni_val,'usd')} / {fmt(sec_ocf_val,'usd')}
+Assets/Liabilities/Equity: {fmt(sec_assets_val,'usd')} / {fmt(sec_liab_val,'usd')} / {fmt(sec_equity_val,'usd')}
+Rev CAGR 3Y (SEC): {fmt(sec_rev_cagr,'pct')}
 """
-    if chart_patterns:
-        for p in chart_patterns: ai_prompt += f"- {p}\n"
-    else:
-        ai_prompt += "- No strong patterns detected.\n"
+
+    # FMP cross-check (compact block, only if available)
+    if fmp:
+        fmp_rev_ttm = safe_float(fmp_inc.get("revenue"))
+        fmp_ni_ttm  = safe_float(fmp_inc.get("netIncome"))
+        fmp_fcf_ttm = safe_float(fmp_cf.get("freeCashFlow"))
+        ai_prompt += f"""
+### 2b. FMP CROSS-CHECK (TTM)
+Rev/NI/FCF: {fmt(fmp_rev_ttm,'usd')} / {fmt(fmp_ni_ttm,'usd')} / {fmt(fmp_fcf_ttm,'usd')}
+P/E: {fmt(fmp_m.get('peRatioTTM'),'ratio')} | EV/EBITDA: {fmt(fmp_m.get('evToEbitdaTTM'),'ratio')} | ROE: {fmt(fmp_m.get('roeTTM'),'pct')} | D/E: {fmt(fmp_m.get('debtToEquityTTM'),'ratio')}
+"""
 
     ai_prompt += f"""
-### 9. SENTIMENT & OWNERSHIP
-- **Analyst Price Target (Mean / High / Low)**: {fmt(target_mean,'usd')} / {fmt(target_high,'usd')} / {fmt(target_low,'usd')}
-- **Consensus**: {rec_key.replace('-',' ').title()}
-- **Institutional / Insider Ownership**: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')}
-- **Short Interest**: {fmt(short_float,'pct')}
+### 3. VALUATION
+MCap/EV: {fmt(mkt_cap,'usd')} / {fmt(ev,'usd')}
+P/E (Trail/Fwd): {fmt(pe_trail,'ratio')} / {fmt(pe_fwd,'ratio')} | PEG: {fmt(peg,'ratio')} | P/B: {fmt(pb,'ratio')} | P/S: {fmt(ps,'ratio')} | EV/EBITDA: {fmt(ev_ebitda,'ratio')}
+FCF Yield/FCF Margin: {fmt(fcf_yield,'pct')} / {fmt(fcf_margin,'pct')}
 
-### 10. RECENT EARNINGS SURPRISES
+### 4. PROFITABILITY & GROWTH
+Margins (Gross/Op/Net): {fmt(gross_m,'pct')} / {fmt(op_m,'pct')} / {fmt(net_m,'pct')} | ROE/ROA: {fmt(roe,'pct')} / {fmt(roa,'pct')}
+Rev Growth (1Y/3Y/5Y): {fmt(rev_1y,'pct')} / {fmt(rev_3y,'pct')} / {fmt(rev_5y,'pct')}
+
+### 5. FINANCIAL HEALTH
+Current Ratio: {fmt(curr_ratio,'ratio')} | D/E: {fmt(debt_eq,'ratio')} | Earnings Quality (OCF/NI): {fmt(earnings_quality,'ratio')}
+
+### 6. PRICE & MOMENTUM ({TODAY_STR})
+Price: {fmt(latest,'usd')} ({fmt(daily_change,'pct')} today) | Bid/Ask: {fmt(live_quote.get('bid'),'usd')}/{fmt(live_quote.get('ask'),'usd')} | Market: {live_quote.get('market_state','N/A')}
+52W Range: {fmt(low_52w,'usd')}–{fmt(high_52w,'usd')} ({fmt(pct_from_52_high,'pct')} from high)
+MA50/MA200: {fmt(ma_50,'usd')} / {fmt(ma_200,'usd')} | BB: {fmt(key_levels.get('bb_upper'),'usd')}↑ / {fmt(key_levels.get('bb_lower'),'usd')}↓
+RSI(14): {fmt(rsi_latest,'ratio')} | MACD/Signal: {fmt(key_levels.get('macd'),'ratio')}/{fmt(key_levels.get('macd_signal'),'ratio')}
+5Y CAGR/MaxDD/Sharpe/Beta/AnnVol: {fmt(cagr,'pct')} / {fmt(max_drawdown,'pct')} / {fmt(sharpe,'ratio')} / {fmt(beta,'ratio')} / {fmt(annual_vol,'pct')}
+Volume: {fmt(volume_ratio,'ratio')}x 20D avg
+
+### 7. KEY LEVELS
+Resistance: {', '.join([fmt(r,'usd') for r in key_levels.get('resistance',[])]) or 'N/A'}
+Support: {', '.join([fmt(s,'usd') for s in key_levels.get('support',[])]) or 'N/A'}
+
+### 8. CHART PATTERNS
+"""
+    for p in (chart_patterns or ["None detected."]): ai_prompt += f"- {p}\n"
+
+    ai_prompt += f"""
+### 9. SENTIMENT
+Analyst Targets (Mean/Hi/Lo): {fmt(target_mean,'usd')} / {fmt(target_high,'usd')} / {fmt(target_low,'usd')} | Consensus: {rec_key.replace('-',' ').title()}
+Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(short_float,'pct')}
+
+### 10. EARNINGS (Last 4Q)
 """
     if recent_earnings:
         for e in recent_earnings:
-            ai_prompt += f"- {e['date']}: Est ${e['estimate']:.2f} | Rep ${e['reported']:.2f} | Surprise {fmt(e['surprise_pct'],'pct')}\n"
+            ai_prompt += f"- {e['date']}: Est ${e['estimate']:.2f} | Rep ${e['reported']:.2f} | {fmt(e['surprise_pct'],'pct')} surprise\n"
     else:
-        ai_prompt += "- No earnings data available.\n"
+        ai_prompt += "- No earnings data.\n"
 
     if sec_available:
         ai_prompt += f"""
-### 11. SEC FILING SIGNALS (Last 90 Days)
-- **8-K Events**: {', '.join(filing_signals['8k_events']) if filing_signals['8k_events'] else 'None'}
-- **Insider Trading (Form 4)**: {filing_signals['insider_buys']} Buys | {filing_signals['insider_sells']} Sells
-- **Activist (13D)**: {'YES' if filing_signals['activist_13d'] else 'No'}
+### 11. SEC SIGNALS (Last 90D)
+8-K: {', '.join(filing_signals['8k_events']) if filing_signals['8k_events'] else 'None'} | Form 4: {filing_signals['insider_buys']}B/{filing_signals['insider_sells']}S | Activist 13D: {'YES' if filing_signals['activist_13d'] else 'No'}
 """
 
-    ai_prompt += f"\n### 12. ALGORITHMIC SIGNALS\n"
-    for flag in (flags or ["NEUTRAL: No strong signals."]): ai_prompt += f"- {flag}\n"
+    ai_prompt += "\n### 12. ALGORITHMIC SIGNALS\n"
+    for f in (flags or ["NEUTRAL: No strong signals."]): ai_prompt += f"- {f}\n"
 
-    # ── PRICE ACTION & INSTITUTIONAL FOOTPRINT ────────────────────────────
     ai_prompt += f"""
-### 12b. PRICE ACTION & MARKET STRUCTURE (as of {TODAY_STR})
-- **Structural Trend**: {price_action.get('trend','N/A')} — {price_action.get('trend_basis','')}
-- **Most Recent Swing High / Low**: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_action.get('recent_swing_low'),'usd')}
-- **Structure Events**: {('; '.join(price_action.get('events')) if price_action.get('events') else 'None')}
+### 12b. PRICE STRUCTURE & INSTITUTIONAL FOOTPRINT
+Trend: {price_action.get('trend','N/A')} — {price_action.get('trend_basis','')}
+Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_action.get('recent_swing_low'),'usd')} | Events: {'; '.join(price_action.get('events',[])) or 'None'}
 """
     if price_action.get("fib"):
-        ai_prompt += "- **Fibonacci retracement (last swing leg)**: " + \
-            " | ".join(f"{k}={fmt(v,'usd')}" for k, v in price_action["fib"].items()) + "\n"
+        ai_prompt += "Fib: " + " | ".join(f"{k}={fmt(v,'usd')}" for k,v in price_action["fib"].items()) + "\n"
 
-    ai_prompt += f"""
-### 12c. INSTITUTIONAL FOOTPRINT (volume-based proxies)
-- **Net Bias**: {institutional.get('net_bias','NEUTRAL')}
-- **On-Balance Volume Trend**: {institutional.get('obv_trend') or 'N/A'}
-- **Up-Day Volume Share (20D)**: {fmt(institutional.get('up_vol_ratio'),'pct')}
-- **Accumulation / Distribution days (25 sessions)**: {institutional.get('accumulation_days',0)} / {institutional.get('distribution_days',0)}
-"""
-    for s in institutional.get("signals", []):
-        ai_prompt += f"- {s}\n"
+    ai_prompt += f"OBV: {institutional.get('obv_trend','N/A')} | Up-Vol%: {fmt(institutional.get('up_vol_ratio'),'pct')} | Acc/Dist days: {institutional.get('accumulation_days',0)}/{institutional.get('distribution_days',0)} | Bias: {institutional.get('net_bias','NEUTRAL')}\n"
+    for s in institutional.get("signals",[]): ai_prompt += f"- {s}\n"
 
     if data_warnings:
-        ai_prompt += "\n### DATA QUALITY NOTES\n"
+        ai_prompt += "\n### DATA QUALITY\n"
         for w in data_warnings: ai_prompt += f"- {w}\n"
 
-    # Options chain section
-    if options_data['chains']:
-        ai_prompt += f"""
-### 13. LIVE OPTIONS CHAIN (Fetched {TODAY_STR})
-⚠️ Only use the strikes and expirations listed below. Do NOT invent any others.
-Available expirations (future only): {', '.join(options_data['available_expirations'])}
-"""
-        for chain in options_data['chains']:
-            ai_prompt += f"\n**Expiry: {chain['expiration']} ({chain['days_to_exp']} days out) | ATM Strike: {fmt(chain['atm_strike'],'usd')}**\n"
-            ai_prompt += "CALLS:\n"
-            for c in chain['calls']:
-                ai_prompt += (f"  Strike {fmt(c['strike'],'usd')} | Bid/Ask {fmt(c['bid'],'usd')}/{fmt(c['ask'],'usd')} "
-                              f"| IV {fmt(c['iv'],'pct')} | OI {c['open_interest']:,} | Vol {c['volume']:,}"
-                              f"{' [ITM]' if c['in_the_money'] else ''}\n")
-            ai_prompt += "PUTS:\n"
-            for p in chain['puts']:
-                ai_prompt += (f"  Strike {fmt(p['strike'],'usd')} | Bid/Ask {fmt(p['bid'],'usd')}/{fmt(p['ask'],'usd')} "
-                              f"| IV {fmt(p['iv'],'pct')} | OI {p['open_interest']:,} | Vol {p['volume']:,}"
-                              f"{' [ITM]' if p['in_the_money'] else ''}\n")
+    # Options (compact — 2 expirations, 3 strikes each)
+    if options_data["chains"]:
+        ai_prompt += f"\n### 13. OPTIONS CHAIN ({TODAY_STR}) — do not invent strikes or expirations\n"
+        ai_prompt += f"Available expirations: {', '.join(options_data['available_expirations'])}\n"
+        for chain in options_data["chains"]:
+            ai_prompt += f"\nExpiry {chain['expiration']} ({chain['days_to_exp']}d) | ATM {fmt(chain['atm_strike'],'usd')}\n"
+            ai_prompt += "CALLS: " + " | ".join(
+                f"{fmt(c['strike'],'usd')} bid/ask {fmt(c['bid'],'usd')}/{fmt(c['ask'],'usd')} IV {fmt(c['iv'],'pct')} OI {c['open_interest']:,}"
+                + (" [ITM]" if c['in_the_money'] else "")
+                for c in chain["calls"]) + "\n"
+            ai_prompt += "PUTS:  " + " | ".join(
+                f"{fmt(p['strike'],'usd')} bid/ask {fmt(p['bid'],'usd')}/{fmt(p['ask'],'usd')} IV {fmt(p['iv'],'pct')} OI {p['open_interest']:,}"
+                + (" [ITM]" if p['in_the_money'] else "")
+                for p in chain["puts"]) + "\n"
     else:
-        ai_prompt += "\n### 13. OPTIONS DATA\n- Options chain unavailable for this ticker.\n"
+        ai_prompt += "\n### 13. OPTIONS — unavailable for this ticker.\n"
 
     if sec_available and mda_text and "unavailable" not in mda_text and "Failed" not in mda_text:
-        ai_prompt += f"\n### 14. MD&A EXCERPT (Latest 10-K)\n\"{mda_text}\"\n"
+        ai_prompt += f"\n### 14. MD&A EXCERPT (Latest 10-K, ~500 chars)\n{mda_text[:500]}…\n"
 
     ai_prompt += f"""
 ---
-### ANALYSIS INSTRUCTIONS
-Today is {TODAY_STR}. Use this throughout your response.
-
-1. **Trend (define it explicitly)**: State the trend using market structure, not vibes. UPTREND = higher highs AND higher lows; DOWNTREND = lower highs AND lower lows; anything else is a RANGE or transition. Use Section 12b as the source of truth and reconcile it with the moving-average alignment.
-2. **Price action to ride institutions**: Use Sections 12b/12c to read where institutions are likely positioned. Tie breaks of structure, swing levels, Fibonacci retracement zones (Section 12b), and the volume footprint (OBV, up-day volume share, accumulation/distribution days) into a single narrative: are large players accumulating, distributing, or absent? Name the specific levels a buyer would defend and where the thesis is invalidated.
-3. **Options**: Only reference strikes and expirations from Section 13. Give strike + expiry, estimated premium (bid/ask midpoint), breakeven, and max loss.
-4. **Chart Patterns**: Interpret Section 8 as a cohesive picture.
-5. **Cross-Reference SEC vs Yahoo**: Prefer SEC data for fundamentals; flag discrepancies.
-6. **Validate Signals**: Do the algorithmic flags hold up? Call out misleading ones.
-7. **Verdict**: Undervalued / Fairly Valued / Overvalued, with a defined risk/reward and the key invalidation level.
-8. **Format**: Clear headings, bullets, bold key figures. Be direct and analytical. Do not truncate — finish every section you start.
+### INSTRUCTIONS ({TODAY_STR})
+1. TREND: define explicitly (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Use §12b as source of truth.
+2. PRICE ACTION: tie swing levels, Fib zones, and OBV/volume footprint into a single institutional narrative. Name levels a buyer would defend and where the thesis breaks.
+3. OPTIONS: use only strikes/expirations from §13. Give strike, expiry, premium (bid/ask midpoint), breakeven, max loss.
+4. FUNDAMENTALS: cross-reference SEC vs FMP vs Yahoo; flag discrepancies.
+5. SIGNALS: validate algorithmic flags — call out misleading ones.
+6. VERDICT: Undervalued / Fairly Valued / Overvalued + defined risk/reward + key invalidation level.
+Format: headers + bullets for data, analytical prose for synthesis. Complete every section. Do not truncate.
 """
 
-    # ── FINAL PAYLOAD ─────────────────────────────────────────────────────────
     return {
         "ticker":            ticker,
         "cik":               cik,
         "company_name":      company_name,
         "today":             TODAY_STR,
         "sec_available":     sec_available,
+        "fmp_available":     fmp is not None,
         "raw_data": {
-            "valuation":       {"pe_trailing": safe_float(pe_trail), "pe_forward": safe_float(pe_fwd),
-                                "peg_ratio": safe_float(peg), "price_to_book": safe_float(pb),
-                                "price_to_sales": safe_float(ps), "ev_ebitda": safe_float(ev_ebitda),
-                                "fcf_yield": safe_float(fcf_yield)},
-            "profitability":   {"gross_margin": safe_float(gross_m), "operating_margin": safe_float(op_m),
-                                "net_margin": safe_float(net_m), "roe": safe_float(roe),
-                                "roa": safe_float(roa), "fcf_margin": safe_float(fcf_margin)},
-            "financial_health":{"current_ratio": safe_float(curr_ratio), "debt_to_equity": safe_float(debt_eq),
+            "valuation":        {"pe_trailing": safe_float(pe_trail), "pe_forward": safe_float(pe_fwd),
+                                 "peg_ratio": safe_float(peg), "price_to_book": safe_float(pb),
+                                 "price_to_sales": safe_float(ps), "ev_ebitda": safe_float(ev_ebitda),
+                                 "fcf_yield": safe_float(fcf_yield)},
+            "profitability":    {"gross_margin": safe_float(gross_m), "operating_margin": safe_float(op_m),
+                                 "net_margin": safe_float(net_m), "roe": safe_float(roe),
+                                 "roa": safe_float(roa), "fcf_margin": safe_float(fcf_margin)},
+            "financial_health": {"current_ratio": safe_float(curr_ratio), "debt_to_equity": safe_float(debt_eq),
                                  "earnings_quality": safe_float(earnings_quality)},
-            "sec_fundamentals":{"revenue": safe_float(sec_rev_val), "net_income": safe_float(sec_ni_val),
+            "sec_fundamentals": {"revenue": safe_float(sec_rev_val), "net_income": safe_float(sec_ni_val),
                                  "assets": safe_float(sec_assets_val), "liabilities": safe_float(sec_liab_val),
                                  "equity": safe_float(sec_equity_val), "ocf": safe_float(sec_ocf_val),
                                  "rev_cagr_3y": safe_float(sec_rev_cagr)},
-            "technicals":      {"current_price": safe_float(latest), "daily_change": safe_float(daily_change),
+            "technicals":       {"current_price": safe_float(latest), "daily_change": safe_float(daily_change),
                                  "high_52w": safe_float(high_52w), "low_52w": safe_float(low_52w),
                                  "pct_from_52_high": safe_float(pct_from_52_high),
                                  "ma_50": safe_float(ma_50), "ma_200": safe_float(ma_200),
                                  "rsi_14": safe_float(rsi_latest), "volume_ratio": safe_float(volume_ratio),
-                                 "macd": safe_float(key_levels.get('macd')),
-                                 "macd_signal": safe_float(key_levels.get('macd_signal')),
-                                 "bb_upper": safe_float(key_levels.get('bb_upper')),
-                                 "bb_lower": safe_float(key_levels.get('bb_lower'))},
-            "risk_return":     {"cagr": safe_float(cagr), "max_drawdown": safe_float(max_drawdown),
+                                 "macd": safe_float(key_levels.get("macd")),
+                                 "macd_signal": safe_float(key_levels.get("macd_signal")),
+                                 "bb_upper": safe_float(key_levels.get("bb_upper")),
+                                 "bb_lower": safe_float(key_levels.get("bb_lower"))},
+            "risk_return":      {"cagr": safe_float(cagr), "max_drawdown": safe_float(max_drawdown),
                                  "sharpe": safe_float(sharpe), "annual_volatility": safe_float(annual_vol),
                                  "beta": safe_float(beta)},
-            "sentiment":       {"target_mean": safe_float(target_mean), "target_high": safe_float(target_high),
+            "sentiment":        {"target_mean": safe_float(target_mean), "target_high": safe_float(target_high),
                                  "target_low": safe_float(target_low), "rec_key": rec_key,
                                  "inst_ownership": safe_float(inst_own), "short_percent": safe_float(short_float)},
             "earnings_surprises": recent_earnings,
-            "key_levels":     {k: ([safe_float(x) for x in v] if isinstance(v, list) else safe_float(v))
-                               for k, v in key_levels.items()}
+            "key_levels":       {k: ([safe_float(x) for x in v] if isinstance(v, list) else safe_float(v))
+                                 for k, v in key_levels.items()}
         },
         "chart_patterns":    chart_patterns,
         "filing_activity":   filing_signals,
         "options_data":      options_data,
         "mda_excerpt":       mda_text,
         "live_quote":        live_quote,
-        "price_history_1y":  price_history_1y,
+        # price_history contains 5Y of OHLCV data (oldest first).
+        # Frontend: use all bars and filter by selected timeframe (1W/1M/3M/6M/1Y/2Y/5Y).
+        # Backward-compat alias: price_history_1y still present (last 252 bars).
+        "price_history":     price_history,
+        "price_history_1y":  price_history[-252:] if len(price_history) >= 252 else price_history,
         "sec_filing":        sec_filing_attachment,
         "price_action":      price_action,
         "institutional":     institutional,
         "algorithmic_signals": flags,
-        "ai_prompt":         ai_prompt
+        "ai_prompt":         ai_prompt,
     }
 
-# ==========================================
-# 6. ENTRY POINT
-# ==========================================
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    target_ticker = sys.argv[1].upper() if len(sys.argv) > 1 else "AAPL"
+    t = sys.argv[1].upper() if len(sys.argv) > 1 else "AAPL"
     try:
-        result = generate_analysis_payload(target_ticker)
-        print(json.dumps(result, indent=2))
+        print(json.dumps(generate_analysis_payload(t), indent=2))
     except Exception as e:
-        print(json.dumps({"error": str(e), "ticker": target_ticker}))
+        print(json.dumps({"error": str(e), "ticker": t}))

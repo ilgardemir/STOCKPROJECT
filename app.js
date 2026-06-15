@@ -52,13 +52,13 @@ let _es = null;
 function runAnalysis() {
   const ticker = document.getElementById("ticker").value.trim().toUpperCase();
   const btn = document.getElementById("analyzeBtn");
-  if (!ticker) { showProgress(0, 6, "Enter a ticker symbol first", true); hideProgress(2200); return; }
+  if (!ticker) { showProgress(0, 7, "Enter a ticker symbol first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
 
   btn.disabled = true;
   document.getElementById("hero").style.display = "none";
   document.getElementById("workspace").classList.add("show");
-  showProgress(0, 6, "Starting data pipeline for " + ticker);
+  showProgress(0, 7, "Starting data pipeline for " + ticker);
 
   document.getElementById("dataBody").innerHTML =
     `<div class="placeholder"><div class="spinner"></div><span>Collecting filings, prices and quotes for ${esc(ticker)}…</span></div>`;
@@ -68,12 +68,12 @@ function runAnalysis() {
   const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(ticker));
   _es = es;
 
-  es.addEventListener("progress", e => { const d = JSON.parse(e.data); showProgress(d.stage, d.total || 6, d.label); });
+  es.addEventListener("progress", e => { const d = JSON.parse(e.data); showProgress(d.stage, d.total || 7, d.label); });
 
   es.addEventListener("error", e => {
     let msg = "Connection lost. Is the server running? (node server.js)";
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
-    showProgress(1, 6, "Error: " + msg, true);
+    showProgress(0, 7, "Error: " + msg, true);
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
     btn.disabled = false; es.close(); _es = null; hideProgress(3000);
@@ -81,7 +81,7 @@ function runAnalysis() {
 
   es.addEventListener("result", e => {
     const data = JSON.parse(e.data);
-    showProgress(6, 6, "Complete — " + (data.company_name || ticker));
+    showProgress(7, 7, "Complete — " + (data.company_name || ticker));
     sessions[data.ticker] = { data, context: data.ai_prompt || data.aiSummary || "", history: [], range: 252 };
     active = data.ticker;
     renderTickerPills();
@@ -192,7 +192,7 @@ function renderAll(d) {
   html += card("snapshot", I.bolt, "Live Snapshot", snap);
 
   /* Candlestick chart + controls */
-  if (Array.isArray(d.price_history_1y) && d.price_history_1y.length > 10) {
+  if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
     html += card("chart", I.chart, "Candlestick — Price Action", chartCardBody());
   }
 
@@ -384,20 +384,41 @@ function chartCardBody() {
     ${tog("sr", "Support / Resistance", "var(--red)", true, true)}
     ${tog("pct", "% scale", "var(--accent)", false)}
     ${tog("vol", "Volume", "var(--text-dim)", false)}
-    <div id="rangeSel">
-      ${[["1M", 21], ["3M", 63], ["6M", 126], ["1Y", 252]].map(([l, n]) =>
-        `<button data-range="${n}" class="${(sessions[active]?.range || 252) === n ? "active" : ""}">${l}</button>`).join("")}
-    </div></div>
-    <div id="chartBox"><canvas id="priceChart"></canvas><div id="chartTip"></div></div>`;
+    <div id="rangeSel"></div></div>
+    <div id="chartBox">
+      <canvas id="priceChart"></canvas><div id="chartTip"></div>
+      <button class="chart-expand-btn" title="Expand chart">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>
+    </div>`;
 }
+const RANGES = [["1W", 5], ["1M", 21], ["3M", 63], ["6M", 126], ["1Y", 252], ["2Y", 504], ["5Y", 1260]];
+
+function buildRangeSel(container) {
+  if (!container) return;
+  const cur = sessions[active]?.range || 252;
+  container.innerHTML = RANGES.map(([l, n]) =>
+    `<button data-range="${n}" class="${cur === n ? "active" : ""}">${l}</button>`).join("");
+  container.querySelectorAll("button").forEach(b => {
+    b.onclick = () => {
+      const n = Number(b.dataset.range);
+      if (sessions[active]) sessions[active].range = n;
+      // keep both selectors in sync
+      ["#rangeSel", "#chartModalRangeSel"].forEach(sel =>
+        document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", Number(x.dataset.range) === n)));
+      drawChart();
+    };
+  });
+}
+
 function wireChartControls() {
   document.querySelectorAll('#chartControls input[data-opt]').forEach(cb => {
     cb.onchange = () => { chartOpts[cb.dataset.opt] = cb.checked; cb.closest(".toggle").classList.toggle("on", cb.checked); drawChart(); };
   });
-  document.querySelectorAll('#rangeSel button').forEach(b => {
-    b.onclick = () => { if (sessions[active]) sessions[active].range = Number(b.dataset.range);
-      document.querySelectorAll('#rangeSel button').forEach(x => x.classList.toggle("active", x === b)); drawChart(); };
-  });
+  buildRangeSel(document.getElementById("rangeSel"));
+  buildRangeSel(document.getElementById("chartModalRangeSel"));
+  const expandBtn = document.querySelector('.chart-expand-btn');
+  if (expandBtn) expandBtn.onclick = () => window.expandChart(active);
 }
 function movingAvg(arr, n) { const out = new Array(arr.length).fill(null); let sum = 0;
   for (let i = 0; i < arr.length; i++) { sum += arr[i]; if (i >= n) sum -= arr[i - n]; if (i >= n - 1) out[i] = sum / n; } return out; }
@@ -410,8 +431,10 @@ function bollinger(arr, n = 20, k = 2) {
 
 function drawChart() {
   const sess = sessions[active]; if (!sess) return;
-  const d = sess.data, canvas = document.getElementById("priceChart");
-  const all = d.price_history_1y;
+  const d = sess.data;
+  const canvas = window._chartCanvasEl ? window._chartCanvasEl() : document.getElementById("priceChart");
+  const tipEl  = window._chartTipEl   ? window._chartTipEl()   : document.getElementById("chartTip");
+  const all = d.price_history || d.price_history_1y;
   if (!canvas || !Array.isArray(all) || all.length < 5) return;
 
   const full = all.filter(p => isNum(p.close) && isNum(p.open) && isNum(p.high) && isNum(p.low));
@@ -426,7 +449,7 @@ function drawChart() {
   const bb = { up: bbF.up.slice(s0), lo: bbF.lo.slice(s0), mid: bbF.mid.slice(s0) };
 
   const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
-  if (!W) return;
+  if (!W || !H) return;
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
 
@@ -519,13 +542,13 @@ function drawChart() {
     const i = Math.max(0, Math.min(data.length - 1, Math.floor(((e.clientX - rect.left) - padL) / (W - padL - padR) * data.length)));
     const p = data[i]; if (!p) return;
     drawChart._hover = i; drawChart();
-    const tip = document.getElementById("chartTip"); tip.style.display = "block";
+    tipEl.style.display = "block";
     const chg = ((p.close - p.open) / p.open) * 100;
-    tip.innerHTML = `<b>${p.date}</b><br>O ${fUsd(p.open)} · H ${fUsd(p.high)}<br>L ${fUsd(p.low)} · C ${fUsd(p.close)}<br>
+    tipEl.innerHTML = `<b>${p.date}</b><br>O ${fUsd(p.open)} · H ${fUsd(p.high)}<br>L ${fUsd(p.low)} · C ${fUsd(p.close)}<br>
       <span class="${chg >= 0 ? "tg" : "tr"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span> · Vol ${fInt(p.volume)}`;
-    const tx = Math.min(X(i) + 12, W - 160); tip.style.left = Math.max(padL, tx) + "px"; tip.style.top = "10px";
+    const tx = Math.min(X(i) + 12, W - 160); tipEl.style.left = Math.max(padL, tx) + "px"; tipEl.style.top = "10px";
   };
-  canvas.onmouseleave = () => { document.getElementById("chartTip").style.display = "none"; drawChart._hover = null; drawChart(); };
+  canvas.onmouseleave = () => { tipEl.style.display = "none"; drawChart._hover = null; drawChart(); };
 
   // draw crosshair if hovering
   if (isNum(drawChart._hover) && drawChart._hover < data.length) {
@@ -535,6 +558,7 @@ function drawChart() {
   }
 }
 drawChart._hover = null;
+window.chartRedrawCallback = function () { drawChart(); };
 window.addEventListener("resize", () => { clearTimeout(window._rz); window._rz = setTimeout(() => { if (active) drawChart(); }, 120); });
 
 /* ════════════════ MARKDOWN ════════════════ */
@@ -645,3 +669,15 @@ matchMedia("(max-width: 960px)").addEventListener("change", ev => {
   if (active) drawChart();
 });
 if (matchMedia("(max-width: 960px)").matches) document.getElementById("aiPane").setAttribute("data-hidden", "");
+
+/* ════════════════ MODAL OVERLAY TOGGLES (delegation — fires on cloned checkboxes) ════════════════ */
+document.getElementById("chartModalControls").addEventListener("change", function (e) {
+  const opt = e.target.dataset.opt;
+  if (!opt) return;
+  chartOpts[opt] = e.target.checked;
+  e.target.closest(".toggle")?.classList.toggle("on", e.target.checked);
+  // Mirror state back to the source checkbox in #chartControls
+  const src = document.querySelector(`#chartControls input[data-opt="${opt}"]`);
+  if (src) { src.checked = e.target.checked; src.closest(".toggle")?.classList.toggle("on", e.target.checked); }
+  drawChart();
+});
