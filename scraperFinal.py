@@ -1066,18 +1066,21 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
     ai_prompt += f"""
 ---
 ### INSTRUCTIONS ({TODAY_STR})
-You are writing a thorough equity analysis for an investor who sees every raw figure in a live dashboard beside your text. Do NOT restate metrics, rebuild tables, or list numbers for their own sake — interpret them. Cite a specific figure only when it anchors a judgment ("trading at 34x forward earnings against ~12% growth, the multiple is pricing in flawless execution"). Think carefully before writing; reason through the valuation, the balance sheet, the technical structure, and how the pieces corroborate or contradict each other.
+You are writing a thorough equity analysis for an investor who sees every raw figure in a live dashboard beside your text. Do NOT restate metrics, rebuild tables, or list numbers for their own sake — interpret them. Cite a specific figure only when it anchors a judgment ("trading at 34x forward earnings against ~12% growth, the multiple is pricing in flawless execution"). Think carefully before writing; reason through the valuation, the balance sheet, sentiment/positioning, and the technical structure, and how the pieces corroborate or contradict each other.
 
-Write these sections with markdown ## headers. Aim for depth and specificity over length — roughly 600–900 words total. No preamble, no restating the prompt.
+Write these sections with markdown ## headers. Aim for depth and specificity over length — roughly 900–1300 words total. No preamble, no restating the prompt.
 
 ## Verdict
-Undervalued / Fairly Valued / Overvalued, with the core reason in one or two sentences. State a defined risk/reward and the single price level or event that would invalidate the call.
+Lead with one rating from this exact scale: **Strong Buy**, **Buy**, **Hold**, **Sell**, or **Strong Sell** — bold it. This is the TL;DR; make it earn that role. Follow with the core reason in one or two sentences, a defined risk/reward, and the single price level or event that would invalidate the call.
 
 ## Valuation & Quality
 Is the current multiple justified by growth, margins, and returns on capital? Weigh P/E and PEG against the growth rate, FCF yield against the balance sheet, and EV/EBITDA against the sector. Where SEC, FMP, and Yahoo disagree on a number, say which you trust and why a discrepancy matters.
 
 ## Fundamentals & Financial Health
-Read the trajectory, not the snapshot: margin direction, revenue growth durability, earnings quality (OCF vs net income), leverage, and liquidity. Flag anything in the SEC fundamentals or MD&A that changes the thesis. Connect the earnings-surprise history to forward credibility.
+Read the trajectory, not the snapshot: margin direction, revenue growth durability, earnings quality (OCF vs net income), leverage, and liquidity. Flag anything in the SEC fundamentals or MD&A that changes the thesis.
+
+## Sentiment & Positioning
+Does analyst consensus (target mean/high/low, rating) agree with your own read, or are they pricing in something you'd push back on? What does the balance of institutional, insider, and short-interest ownership imply about conviction or crowding? Connect the recent earnings-surprise track record (§earnings history) to how much credibility forward estimates deserve.
 
 ## Price Action & Institutional Footprint
 Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Tie swing levels, Fibonacci zones, and the OBV/accumulation-distribution footprint into one narrative about who is in control. Name the level a buyer defends and the level where the structure breaks. Validate or dismiss the algorithmic signals — call out any that mislead.
