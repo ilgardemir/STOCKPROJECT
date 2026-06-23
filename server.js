@@ -7,14 +7,15 @@ const path = require("path");
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
 const SCRAPER_PATH = "./scraperFinal.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "anthropic/claude-haiku-4.5";   // reasoning-capable Haiku; ~1/3 the output cost of Sonnet
+const AI_MODEL    = "deepseek/deepseek-v4-flash";   // reasoning-capable, ~25x cheaper output than Haiku
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
-// Reasoning config (OpenRouter → Anthropic extended thinking).
-// REASON_BUDGET is the thinking allowance; ANALYSIS_MAX must exceed it (thinking + answer share the budget).
-const REASON_BUDGET = 2000;   // tokens the model may spend thinking
-const ANALYSIS_MAX  = 6000;   // total cap: ~2k thinking + ~4k answer
+// Reasoning config (OpenRouter → DeepSeek reasoning).
+// DeepSeek controls reasoning depth via `effort` ("high" | "xhigh"), not a token budget.
+// ANALYSIS_MAX caps total output (thinking + answer share it).
+const REASON_EFFORT = "high";   // "xhigh" = maximum reasoning depth
+const ANALYSIS_MAX  = 6000;     // total output cap
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -143,9 +144,9 @@ http.createServer(async (req, res) => {
           },
           body: JSON.stringify({
             model:       AI_MODEL,
-            temperature: 1,            // extended thinking requires temperature 1
+            temperature: 0.3,          // DeepSeek allows normal temperature (Anthropic required 1)
             max_tokens:  ANALYSIS_MAX, // covers thinking + answer
-            reasoning:   { max_tokens: REASON_BUDGET },
+            reasoning:   { effort: REASON_EFFORT },
             messages:    buildAiMessages(payload.ai_prompt)
           })
         });
@@ -221,9 +222,9 @@ http.createServer(async (req, res) => {
                 },
                 body: JSON.stringify({
                   model:       AI_MODEL,
-                  temperature: 1,
+                  temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
-                  reasoning:   { max_tokens: REASON_BUDGET },
+                  reasoning:   { effort: REASON_EFFORT },
                   messages:    buildAiMessages(payload.ai_prompt)
                 })
               });
