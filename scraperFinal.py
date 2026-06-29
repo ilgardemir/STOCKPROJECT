@@ -337,6 +337,32 @@ def fetch_fmp_data(ticker: str) -> dict | None:
         return None
 
 
+def fetch_fmp_news(ticker: str, limit: int = 6) -> list[dict]:
+    """Fetch recent company-specific news headlines from FMP (needs FMP_API_KEY env var)."""
+    if not FMP_API_KEY:
+        return []
+    try:
+        url = f"https://financialmodelingprep.com/stable/news/stock?symbols={ticker}&limit={limit}&apikey={FMP_API_KEY}"
+        r = requests.get(url, timeout=6)
+        if r.status_code != 200:
+            return []
+        raw = r.json()
+        if not isinstance(raw, list):
+            return []
+        items = []
+        for a in raw[:limit]:
+            title = (a.get("title") or a.get("headline") or "").strip()
+            if not title:
+                continue
+            date   = str(a.get("publishedDate") or a.get("date") or "")[:10]
+            source = a.get("site") or a.get("source") or a.get("publisher") or ""
+            link   = a.get("url") or a.get("link") or ""
+            items.append({"date": date, "title": title, "source": source, "url": link})
+        return items
+    except:
+        return []
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. OPTIONS CHAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -735,12 +761,13 @@ def generate_analysis_payload(ticker: str) -> dict:
     if current_price is None and not hist.empty:
         current_price = safe_float(hist["Close"].iloc[-1])
 
-    # ── STAGE 4: FMP cross-check ──────────────────────────────────────────────
-    stage(4, "Fetching FMP verification data")
+    # ── STAGE 4: FMP cross-check + recent news ────────────────────────────────
+    stage(4, "Fetching FMP verification data & recent news")
     fmp      = fetch_fmp_data(ticker)
     fmp_m    = fmp["metrics"]  if fmp else {}
     fmp_inc  = fmp["income"]   if fmp else {}
     fmp_cf   = fmp["cashflow"] if fmp else {}
+    recent_news = fetch_fmp_news(ticker, limit=6)
 
     # ── STAGE 5: Live quote, options, intraday ─────────────────────────────────
     stage(5, "Live quote, options & intraday")
@@ -1010,7 +1037,15 @@ Support: {', '.join([fmt(s,'usd') for s in key_levels.get('support',[])]) or 'N/
 ### 9. SENTIMENT
 Analyst Targets (Mean/Hi/Lo): {fmt(target_mean,'usd')} / {fmt(target_high,'usd')} / {fmt(target_low,'usd')} | Consensus: {rec_key.replace('-',' ').title()}
 Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(short_float,'pct')}
+"""
+    if recent_news:
+        ai_prompt += "\n### 9b. RECENT NEWS (most recent first)\n"
+        for n in recent_news:
+            ai_prompt += f"- {n['date']} [{n['source']}]: {n['title'][:140]}\n"
+    else:
+        ai_prompt += "\n### 9b. RECENT NEWS — unavailable (no FMP key or no articles found).\n"
 
+    ai_prompt += f"""
 ### 10. EARNINGS (Last 4Q)
 """
     if recent_earnings:
@@ -1080,13 +1115,13 @@ Is the current multiple justified by growth, margins, and returns on capital? We
 Read the trajectory, not the snapshot: margin direction, revenue growth durability, earnings quality (OCF vs net income), leverage, and liquidity. Flag anything in the SEC fundamentals or MD&A that changes the thesis.
 
 ## Sentiment & Positioning
-Does analyst consensus (target mean/high/low, rating) agree with your own read, or are they pricing in something you'd push back on? What does the balance of institutional, insider, and short-interest ownership imply about conviction or crowding? Connect the recent earnings-surprise track record (§earnings history) to how much credibility forward estimates deserve.
+Does analyst consensus (target mean/high/low, rating) agree with your own read, or are they pricing in something you'd push back on? What does the balance of institutional, insider, and short-interest ownership imply about conviction or crowding? Weigh the recent headlines in §9b — do they corroborate or contradict the price action and fundamentals? Connect the recent earnings-surprise track record (§earnings history) to how much credibility forward estimates deserve.
 
 ## Price Action & Institutional Footprint
 Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Tie swing levels, Fibonacci zones, and the OBV/accumulation-distribution footprint into one narrative about who is in control. Name the level a buyer defends and the level where the structure breaks. Validate or dismiss the algorithmic signals — call out any that mislead.
 
 ## Catalysts & Risks
-The 2–3 catalysts that could re-rate the stock (earnings, 8-K events, insider activity, sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
+The 2–3 catalysts that could re-rate the stock (use §9b recent headlines plus earnings, 8-K events, insider activity, sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
 
 ## Trade Idea
 One actionable options structure using ONLY strikes/expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss, and the thesis it expresses. If nothing in §13 sets up cleanly, say so and explain why in one sentence.
@@ -1099,6 +1134,7 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
         "today":             TODAY_STR,
         "sec_available":     sec_available,
         "fmp_available":     fmp is not None,
+        "recent_news":       recent_news,
         "raw_data": {
             "valuation":        {"pe_trailing": safe_float(pe_trail), "pe_forward": safe_float(pe_fwd),
                                  "peg_ratio": safe_float(peg), "price_to_book": safe_float(pb),
