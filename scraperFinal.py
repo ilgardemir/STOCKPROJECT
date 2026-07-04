@@ -1069,7 +1069,7 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
 ### INSTRUCTIONS ({TODAY_STR})
 You are writing a thorough equity analysis for an investor who sees every raw figure in a live dashboard beside your text. Do NOT restate metrics, rebuild tables, or list numbers for their own sake — interpret them. Cite a specific figure only when it anchors a judgment ("trading at 34x forward earnings against ~12% growth, the multiple is pricing in flawless execution"). Think carefully before writing; reason through the valuation, the balance sheet, sentiment/positioning, and the technical structure, and how the pieces corroborate or contradict each other.
 
-**Before writing anything else, use the web search tool to find the 3–5 most recent news headlines, upcoming events, or catalysts for {ticker}** — earnings dates, product launches, regulatory decisions, M&A rumours, analyst upgrades/downgrades, macro headwinds. Weave what you find into the Sentiment & Positioning and Catalysts & Risks sections.
+**Real-time news and upcoming events for {ticker} have been injected into your context by the search layer above.** Weave what you find there into the Sentiment & Positioning and Catalysts & Risks sections — earnings dates, product launches, regulatory decisions, M&A rumours, analyst upgrades/downgrades, macro headwinds specific to this name.
 
 Write these sections with markdown ## headers. Aim for depth and specificity over length — roughly 900–1300 words total. No preamble, no restating the prompt.
 

@@ -7,7 +7,7 @@ const path = require("path");
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
 const SCRAPER_PATH = "./scraperFinal.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "deepseek/deepseek-v4-flash";   // reasoning-capable, ~25x cheaper output than Haiku
+const AI_MODEL    = "deepseek/deepseek-v4-flash:online";  // :online injects live Exa search into prompt (~$0.005), no tool-call conflict with reasoning
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -17,22 +17,6 @@ const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 const REASON_EFFORT = "high";   // "xhigh" = maximum reasoning depth
 const ANALYSIS_MAX  = 6000;     // total output cap
 
-// OpenRouter server-side web search tool (Exa backend for non-native models; ~$0.005/call).
-// OR handles tool execution transparently — no tool-call loop needed on our side.
-const WEB_SEARCH_TOOL = {
-  type: "function",
-  function: {
-    name: "openrouter:web_search",
-    description: "Search the web for real-time news, upcoming events, and current information.",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "The search query" }
-      },
-      required: ["query"]
-    }
-  }
-};
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -161,11 +145,9 @@ http.createServer(async (req, res) => {
           },
           body: JSON.stringify({
             model:       AI_MODEL,
-            temperature: 0.3,          // DeepSeek allows normal temperature (Anthropic required 1)
-            max_tokens:  ANALYSIS_MAX, // covers thinking + answer
+            temperature: 0.3,
+            max_tokens:  ANALYSIS_MAX,
             reasoning:   { effort: REASON_EFFORT },
-            tools: [WEB_SEARCH_TOOL],
-            tool_choice: "auto",
             messages:    buildAiMessages(payload.ai_prompt)
           })
         });
@@ -244,8 +226,6 @@ http.createServer(async (req, res) => {
                   temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
                   reasoning:   { effort: REASON_EFFORT },
-                  tools:       [WEB_SEARCH_TOOL],
-                  tool_choice: "auto",
                   messages:    buildAiMessages(payload.ai_prompt)
                 })
               });
