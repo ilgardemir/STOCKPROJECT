@@ -45,49 +45,209 @@ function hideProgress(delay = 600) { setTimeout(() => {
   document.getElementById("progressWrap").classList.remove("show");
   document.getElementById("progressFill").style.width = "0%"; }, delay); }
 
-/* ════════════════ ANALYSIS (SSE streaming) ════════════════ */
+/* ════════════════ ANALYSIS (SSE streaming — scraper stages, then live AI tokens) ════════════════ */
 function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); }
 let _es = null;
+let _stream = null;   // { ticker, model, thinking, answer, answerStarted, done, sticky }
+
+function prettyModel(id) {
+  if (!id) return "AI";
+  const online = /:online\b/.test(id);
+  let m = id.split("/").pop().replace(/:online|:free|:nitro/g, "");
+  m = m.split("-").map(w => (w.length <= 2 || /^v?\d/.test(w)) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)).join(" ");
+  m = m.replace(/\bDeepseek\b/i, "DeepSeek").replace(/\bGpt\b/i, "GPT").replace(/\bGlm\b/i, "GLM").replace(/\bQwen(\d)/i, "Qwen $1");
+  m = m.replace(/(\d) (\d)$/, "$1.$2");   // "Sonnet 4 6" → "Sonnet 4.6"
+  return m + (online ? " · live search" : "");
+}
+function setModelTag(id) { const el = document.getElementById("aiModelTag"); if (el && id) el.textContent = prettyModel(id); }
+fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() => {});
+
+function finalizePartialStream() {
+  // A new run (or navigation) interrupts an in-flight stream — keep what arrived.
+  if (_stream && !_stream.done) {
+    const s = sessions[_stream.ticker];
+    if (s) { s.data.aiSummary = _stream.answer; s.data.aiReasoning = _stream.thinking; s.data.model = _stream.model; }
+    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    document.getElementById("aiModelTag")?.classList.remove("live");
+  }
+  _stream = null;
+}
 
 function runAnalysis() {
   const ticker = document.getElementById("ticker").value.trim().toUpperCase();
   const btn = document.getElementById("analyzeBtn");
   if (!ticker) { showProgress(0, 7, "Enter a ticker symbol first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
+  finalizePartialStream();
+
+  // Re-run of a ticker we already hold? Reopen it instantly, no tokens spent.
+  if (sessions[ticker] && sessions[ticker].data.aiSummary) {
+    showWorkspace(); active = ticker; renderTickerPills(); renderAll(sessions[ticker].data); return;
+  }
 
   btn.disabled = true;
-  document.getElementById("hero").style.display = "none";
-  document.getElementById("workspace").classList.add("show");
+  showWorkspace();
   showProgress(0, 7, "Starting data pipeline for " + ticker);
 
   document.getElementById("dataBody").innerHTML =
     `<div class="placeholder"><div class="spinner"></div><span>Collecting filings, prices and quotes for ${esc(ticker)}…</span></div>`;
   const ai = document.getElementById("aiSummary");
-  ai.className = "prose thinking"; ai.innerHTML = `<div class="spinner"></div> Waiting for the data run to finish…`;
+  ai.className = "prose thinking"; ai.innerHTML = `<div class="spinner"></div> Analysis streams in live once the data run completes…`;
 
   const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(ticker));
   _es = es;
+  let gotResult = false;
 
   es.addEventListener("progress", e => { const d = JSON.parse(e.data); showProgress(d.stage, d.total || 7, d.label); });
 
   es.addEventListener("error", e => {
+    if (!e.data && gotResult) {   // natural close (or drop) after data arrived — finalize quietly
+      finalizePartialStream(); es.close(); if (_es === es) _es = null; btn.disabled = false; return;
+    }
     let msg = "Connection lost. Is the server running? (node server.js)";
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
     showProgress(0, 7, "Error: " + msg, true);
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
-    btn.disabled = false; es.close(); _es = null; hideProgress(3000);
+    btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(3000);
   });
 
+  // Scraper finished — dashboard renders now; AI streams on top of it.
   es.addEventListener("result", e => {
     const data = JSON.parse(e.data);
-    showProgress(7, 7, "Complete — " + (data.company_name || ticker));
-    sessions[data.ticker] = { data, context: data.ai_prompt || data.aiSummary || "", history: [], range: 252 };
+    gotResult = true;
+    sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252 };
     active = data.ticker;
     renderTickerPills();
     renderAll(data);
-    btn.disabled = false; es.close(); _es = null; hideProgress(900);
+    btn.disabled = false;
+    // 100% → wind-streak sweep → bar collapses
+    showProgress(7, 7, "Data compiled — " + (data.company_name || data.ticker));
+    const wrap = document.getElementById("progressWrap");
+    wrap.classList.add("done");
+    setTimeout(() => { wrap.classList.remove("show"); setTimeout(() => { wrap.classList.remove("done"); document.getElementById("progressFill").style.width = "0%"; }, 400); }, 850);
   });
+
+  es.addEventListener("ai_start", e => {
+    const d = JSON.parse(e.data);
+    _stream = { ticker, model: d.model, thinking: "", answer: "", answerStarted: false, done: false, sticky: true, raf: null };
+    setModelTag(d.model);
+    document.getElementById("aiModelTag")?.classList.add("live");
+    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.add("streaming");
+    if (active === ticker) buildStreamShell();
+  });
+
+  es.addEventListener("ai_thinking", e => pushStream("thinking", JSON.parse(e.data).t));
+  es.addEventListener("ai_delta",    e => pushStream("answer",   JSON.parse(e.data).t));
+
+  es.addEventListener("ai_done", e => {
+    const d = JSON.parse(e.data);
+    const sess = sessions[ticker];
+    if (sess) { sess.data.aiSummary = d.aiSummary; sess.data.aiReasoning = d.aiReasoning; sess.data.model = d.model; }
+    if (_stream) _stream.done = true;
+    document.getElementById("aiModelTag")?.classList.remove("live");
+    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    if (active === ticker && sess) finalizeAiRender(sess.data);
+    _stream = null;
+    es.close(); if (_es === es) _es = null;
+  });
+
+  es.addEventListener("ai_error", e => {
+    const d = JSON.parse(e.data);
+    const sess = sessions[ticker];
+    if (sess) { sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || ""; }
+    if (_stream) _stream.done = true;
+    document.getElementById("aiModelTag")?.classList.remove("live");
+    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    if (active === ticker && sess) finalizeAiRender(sess.data);
+    _stream = null;
+    es.close(); if (_es === es) _es = null;
+  });
+}
+
+/* ── Streaming render machinery ── */
+function buildStreamShell() {
+  const ai = document.getElementById("aiSummary");
+  ai.className = "prose streaming";
+  const brain = `<svg class="brain" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>`;
+  const chev  = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+  ai.innerHTML = `
+    <div id="genIndicator">
+      <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
+      <span id="genLabel">${esc(prettyModel(_stream.model))} is reading the data…</span>
+    </div>
+    <div id="thinkingWrap">
+      <button id="thinkingToggle" class="open live" onclick="toggleThinking(this)"><span class="live-dot"></span>${brain}<span class="tlabel">Thinking</span>${chev}</button>
+      <div id="thinkingPanel" class="show"><span class="tk-label">Model reasoning · live</span><span id="thinkStream"></span></div>
+    </div>
+    <div id="answerStream"></div>`;
+  flushStream(true);
+}
+function pushStream(kind, t) {
+  if (!_stream || !t) return;
+  _stream[kind] += t;
+  if (kind === "answer" && !_stream.answerStarted) {
+    _stream.answerStarted = true;
+    if (active === _stream.ticker) {
+      document.getElementById("genIndicator")?.remove();
+      const tog = document.getElementById("thinkingToggle"), panel = document.getElementById("thinkingPanel");
+      if (tog) { tog.classList.remove("open", "live"); const l = tog.querySelector(".tlabel"); if (l) l.textContent = "Show thinking"; }
+      panel?.classList.remove("show");
+    }
+  }
+  if (kind === "thinking" && active === _stream.ticker) {
+    const lbl = document.getElementById("genLabel"); if (lbl) lbl.textContent = prettyModel(_stream.model) + " is reasoning…";
+  }
+  if (!_stream.raf) _stream.raf = requestAnimationFrame(flushStream);
+}
+function flushStream(force) {
+  if (!_stream) return;
+  _stream.raf = null;
+  if (active !== _stream.ticker && force !== true) return;   // pane shows another ticker — buffers keep accumulating
+  const think = document.getElementById("thinkStream");
+  if (think) { think.textContent = _stream.thinking;
+    const panel = document.getElementById("thinkingPanel");
+    if (panel && panel.classList.contains("show")) panel.scrollTop = panel.scrollHeight; }
+  const ans = document.getElementById("answerStream");
+  if (ans && _stream.answerStarted) ans.innerHTML = renderMarkdown(_stream.answer);
+  const scroll = document.getElementById("aiScroll");
+  if (_stream.sticky && scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+// If the reader scrolls up mid-stream, stop yanking them to the bottom; resume when they return.
+document.getElementById("aiScroll").addEventListener("scroll", function () {
+  if (!_stream || _stream.done) return;
+  _stream.sticky = (this.scrollHeight - this.scrollTop - this.clientHeight) < 60;
+});
+function finalizeAiRender(d) {
+  const ai = document.getElementById("aiSummary");
+  const scroll = document.getElementById("aiScroll");
+  const keep = scroll.scrollTop;
+  ai.className = "prose";
+  const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
+  ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+  scroll.scrollTop = keep;
+}
+
+/* ════════════════ HOME / WORKSPACE NAVIGATION ════════════════ */
+function goHome() {
+  const ws = document.getElementById("workspace"), hero = document.getElementById("hero"), strip = document.getElementById("summaryStrip");
+  if (!ws.classList.contains("show")) return;
+  ws.classList.add("leaving");
+  setTimeout(() => {
+    ws.classList.remove("show", "leaving");
+    strip.classList.remove("show");
+    hero.style.display = "";
+    hero.style.animation = "none"; void hero.offsetWidth; hero.style.animation = "";   // replay entrance
+    document.getElementById("resumeChip").classList.toggle("show", Object.keys(sessions).length > 0);
+    document.getElementById("ticker").focus();
+  }, 290);
+}
+function showWorkspace(skipAnim) {
+  const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
+  if (ws.classList.contains("show")) { if (hero.style.display !== "none") hero.style.display = "none"; return; }
+  const reveal = () => { hero.style.display = "none"; hero.classList.remove("leaving"); ws.classList.add("show"); if (active) requestAnimationFrame(drawChart); };
+  if (skipAnim || hero.style.display === "none") reveal();
+  else { hero.classList.add("leaving"); setTimeout(reveal, 260); }
 }
 
 /* ════════════════ RENDER HELPERS ════════════════ */
@@ -354,12 +514,24 @@ function renderAll(d) {
   document.getElementById("dataBody").scrollTop = 0;
   wireChartControls();
 
-  /* AI summary */
-  const ai = document.getElementById("aiSummary");
-  ai.className = "prose";
-  const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
-  ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
-  document.getElementById("aiScroll").scrollTop = 0;
+  /* AI summary — live stream shell if this ticker is mid-generation, else the final render */
+  if (d.model) setModelTag(d.model);
+  if (_stream && !_stream.done && _stream.ticker === d.ticker) {
+    buildStreamShell();
+    if (_stream.answerStarted) {
+      document.getElementById("genIndicator")?.remove();
+      const tog = document.getElementById("thinkingToggle");
+      if (tog) { tog.classList.remove("open", "live"); const l = tog.querySelector(".tlabel"); if (l) l.textContent = "Show thinking"; }
+      document.getElementById("thinkingPanel")?.classList.remove("show");
+      flushStream(true);
+    }
+  } else {
+    const ai = document.getElementById("aiSummary");
+    ai.className = "prose";
+    const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
+    ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+    document.getElementById("aiScroll").scrollTop = 0;
+  }
 
   renderChat();
   requestAnimationFrame(drawChart);
@@ -371,7 +543,7 @@ function thinkingBlock(reasoning) {
   const brain = `<svg class="brain" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>`;
   const chev  = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
   return `<div id="thinkingWrap">
-    <button id="thinkingToggle" onclick="toggleThinking(this)">${brain}<span>Show thinking</span>${chev}</button>
+    <button id="thinkingToggle" onclick="toggleThinking(this)">${brain}<span class="tlabel">Show thinking</span>${chev}</button>
     <div id="thinkingPanel"><span class="tk-label">Model reasoning · summarized</span>${esc(reasoning)}</div>
   </div>`;
 }
@@ -379,7 +551,8 @@ function toggleThinking(btn) {
   const panel = document.getElementById("thinkingPanel");
   const open = panel.classList.toggle("show");
   btn.classList.toggle("open", open);
-  btn.querySelector("span").textContent = open ? "Hide thinking" : "Show thinking";
+  const lbl = btn.querySelector(".tlabel");
+  if (lbl && !btn.classList.contains("live")) lbl.textContent = open ? "Hide thinking" : "Show thinking";
 }
 
 function copyPrompt(btn) { navigator.clipboard.writeText(sessions[active]?.data?.ai_prompt || "").then(() => {
@@ -646,31 +819,83 @@ function scrollChat() { const m = document.getElementById("chatMessages"); m.scr
 document.getElementById("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
 document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
 
-/* ════════════════ RESIZERS ════════════════ */
+/* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
 (function () {
-  const rz = document.getElementById("resizer"), split = document.getElementById("split");
+  const rz = document.getElementById("resizer"), split = document.getElementById("split"), badge = document.getElementById("rzBadge");
   try { const saved = localStorage.getItem("squall-split"); if (saved) split.style.setProperty("--left-w", saved); } catch (e) {}
-  let dragging = false;
-  rz.addEventListener("pointerdown", e => { dragging = true; rz.classList.add("dragging"); rz.setPointerCapture(e.pointerId); document.body.style.userSelect = "none"; });
-  rz.addEventListener("pointermove", e => { if (!dragging) return; const rect = split.getBoundingClientRect();
-    let pct = Math.max(30, Math.min(70, (e.clientX - rect.left) / rect.width * 100)); split.style.setProperty("--left-w", pct + "%"); });
-  const stop = () => { if (!dragging) return; dragging = false; rz.classList.remove("dragging"); document.body.style.userSelect = "";
-    try { localStorage.setItem("squall-split", split.style.getPropertyValue("--left-w")); } catch (e) {} if (active) drawChart(); };
+  let dragging = false, pendingX = null, raf = null;
+  const SNAPS = [40, 50, 60];
+
+  function apply() {
+    raf = null;
+    if (pendingX == null) return;
+    const rect = split.getBoundingClientRect();
+    let pct = (pendingX - rect.left) / rect.width * 100;
+    for (const s of SNAPS) if (Math.abs(pct - s) < 1.2) { pct = s; break; }
+    pct = Math.max(30, Math.min(70, pct));
+    split.style.setProperty("--left-w", pct.toFixed(2) + "%");
+    badge.textContent = Math.round(pct) + " / " + Math.round(100 - pct);
+    if (active) drawChart();          // chart follows the drag live
+  }
+  rz.addEventListener("pointerdown", e => {
+    dragging = true; rz.classList.add("dragging"); rz.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing");
+  });
+  rz.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    pendingX = e.clientX;
+    if (!raf) raf = requestAnimationFrame(apply);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false; pendingX = null; rz.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    try { localStorage.setItem("squall-split", split.style.getPropertyValue("--left-w")); } catch (e) {}
+    if (active) drawChart();
+  };
   rz.addEventListener("pointerup", stop); rz.addEventListener("pointercancel", stop);
-  rz.addEventListener("dblclick", () => { split.style.setProperty("--left-w", "50%"); try { localStorage.removeItem("squall-split"); } catch (e) {} if (active) drawChart(); });
+  rz.addEventListener("dblclick", () => {
+    split.style.setProperty("--left-w", "50%");
+    try { localStorage.removeItem("squall-split"); } catch (e) {}
+    if (active) requestAnimationFrame(drawChart);
+  });
 })();
 
 (function () {
   const grip = document.getElementById("chatGrip"), dock = document.getElementById("chatDock");
   try { const saved = localStorage.getItem("squall-chat-h"); if (saved) dock.style.setProperty("--chat-h", saved); } catch (e) {}
-  let dragging = false;
-  grip.addEventListener("pointerdown", e => { dragging = true; grip.classList.add("dragging"); grip.setPointerCapture(e.pointerId); document.body.style.userSelect = "none"; });
-  grip.addEventListener("pointermove", e => { if (!dragging) return;
+  let dragging = false, pendingY = null, raf = null;
+
+  function apply() {
+    raf = null;
+    if (pendingY == null) return;
     const aiPane = document.getElementById("aiPane").getBoundingClientRect();
-    let h = Math.max(120, Math.min(aiPane.height * 0.8, aiPane.bottom - e.clientY)); dock.style.setProperty("--chat-h", h + "px"); });
-  const stop = () => { if (!dragging) return; dragging = false; grip.classList.remove("dragging"); document.body.style.userSelect = "";
-    try { localStorage.setItem("squall-chat-h", dock.style.getPropertyValue("--chat-h")); } catch (e) {} };
+    const h = Math.max(120, Math.min(aiPane.height * 0.8, aiPane.bottom - pendingY));
+    dock.style.setProperty("--chat-h", Math.round(h) + "px");
+  }
+  grip.addEventListener("pointerdown", e => {
+    dragging = true; grip.classList.add("dragging"); grip.setPointerCapture(e.pointerId);
+    dock.classList.remove("animate");
+    document.body.classList.add("resizing-y");
+  });
+  grip.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    pendingY = e.clientY;
+    if (!raf) raf = requestAnimationFrame(apply);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false; pendingY = null; grip.classList.remove("dragging");
+    document.body.classList.remove("resizing-y");
+    try { localStorage.setItem("squall-chat-h", dock.style.getPropertyValue("--chat-h")); } catch (e) {}
+  };
   grip.addEventListener("pointerup", stop); grip.addEventListener("pointercancel", stop);
+  grip.addEventListener("dblclick", () => {
+    dock.classList.add("animate");
+    dock.style.setProperty("--chat-h", "280px");
+    try { localStorage.removeItem("squall-chat-h"); } catch (e) {}
+    setTimeout(() => dock.classList.remove("animate"), 350);
+  });
 })();
 
 /* ════════════════ MOBILE TABS ════════════════ */

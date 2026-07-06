@@ -133,7 +133,9 @@ http.createServer(async (req, res) => {
       catch { send("error", { error: "Failed to parse Python output.", detail: stdout.slice(0,500) }); return res.end(); }
       if (payload.error) { send("error", { error: payload.error }); return res.end(); }
 
-      send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Running AI analysis" });
+      // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
+      send("result", { ...payload, model: AI_MODEL });
+      send("ai_start", { model: AI_MODEL });
       try {
         const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
@@ -148,18 +150,37 @@ http.createServer(async (req, res) => {
             temperature: 0.3,
             max_tokens:  ANALYSIS_MAX,
             reasoning:   { effort: REASON_EFFORT },
+            stream:      true,
             messages:    buildAiMessages(payload.ai_prompt)
           })
         });
-        const aiData = await aiRes.json();
-        if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
-        const aiMsg     = aiData.choices[0].message;
-        const aiSummary = aiMsg.content;
-        const aiReasoning = aiMsg.reasoning || "";   // summarized thinking trace
-        send("result", { ...payload, aiSummary, aiReasoning });
+        if (!aiRes.ok || !aiRes.body) {
+          const errText = await aiRes.text().catch(() => "");
+          throw new Error(`OpenRouter ${aiRes.status}: ${errText.slice(0, 300)}`);
+        }
+
+        let aiSummary = "", aiReasoning = "", sseBuf = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of aiRes.body) {
+          sseBuf += decoder.decode(chunk, { stream: true });
+          let nl;
+          while ((nl = sseBuf.indexOf("\n")) >= 0) {
+            const line = sseBuf.slice(0, nl).trim();
+            sseBuf = sseBuf.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;        // skips ": OPENROUTER PROCESSING" keep-alives
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            let j; try { j = JSON.parse(data); } catch { continue; }
+            if (j.error) throw new Error(j.error.message || "OpenRouter stream error");
+            const d = j.choices?.[0]?.delta || {};
+            if (d.reasoning) { aiReasoning += d.reasoning; send("ai_thinking", { t: d.reasoning }); }
+            if (d.content)   { aiSummary   += d.content;   send("ai_delta",   { t: d.content }); }
+          }
+        }
+        send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL });
       } catch (aiErr) {
-        // Deliver data even if AI fails — user keeps the dashboard
-        send("result", { ...payload, aiSummary: "", aiError: "AI call failed: " + aiErr.message });
+        // Deliver the error without killing the dashboard — data pane stays usable
+        send("ai_error", { error: "AI call failed: " + aiErr.message });
       }
       res.end();
     });
@@ -235,7 +256,7 @@ http.createServer(async (req, res) => {
               const aiSummary = aiMsg.content;
               const aiReasoning = aiMsg.reasoning || "";
               res.writeHead(200, {"Content-Type":"application/json"});
-              res.end(JSON.stringify({ ...payload, aiSummary, aiReasoning }));
+              res.end(JSON.stringify({ ...payload, aiSummary, aiReasoning, model: AI_MODEL }));
             } catch (aiErr) {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: "AI call failed: " + aiErr.message }));
