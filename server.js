@@ -216,52 +216,81 @@ http.createServer(async (req, res) => {
       }
 
       send("ai_start", { model: AI_MODEL });
-      try {
-        const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type":  "application/json",
-            "Authorization": `Bearer ${API_KEY}`,
-            "HTTP-Referer":  "http://localhost",
-            "X-Title":       "Squall"
-          },
-          body: JSON.stringify({
-            model:       AI_MODEL,
-            temperature: 0.3,
-            max_tokens:  ANALYSIS_MAX,
-            reasoning:   { effort: REASON_EFFORT },
-            stream:      true,
-            messages:    buildAiMessages(payload.ai_prompt, research)
-          })
-        });
-        if (!aiRes.ok || !aiRes.body) {
-          const errText = await aiRes.text().catch(() => "");
-          throw new Error(`OpenRouter ${aiRes.status}: ${errText.slice(0, 300)}`);
-        }
 
-        let aiSummary = "", aiReasoning = "", sseBuf = "";
-        const decoder = new TextDecoder();
-        for await (const chunk of aiRes.body) {
-          sseBuf += decoder.decode(chunk, { stream: true });
-          let nl;
-          while ((nl = sseBuf.indexOf("\n")) >= 0) {
-            const line = sseBuf.slice(0, nl).trim();
-            sseBuf = sseBuf.slice(nl + 1);
-            if (!line.startsWith("data:")) continue;        // skips ": OPENROUTER PROCESSING" keep-alives
-            const data = line.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
-            let j; try { j = JSON.parse(data); } catch { continue; }
-            if (j.error) throw new Error(j.error.message || "OpenRouter stream error");
-            const d = j.choices?.[0]?.delta || {};
-            if (d.reasoning) { aiReasoning += d.reasoning; send("ai_thinking", { t: d.reasoning }); }
-            if (d.content)   { aiSummary   += d.content;   send("ai_delta",   { t: d.content }); }
+      // Request body is fixed across retries. `allow_fallbacks` lets OpenRouter reroute
+      // to another provider instead of hard-failing when one drops the connection.
+      const aiReqBody = JSON.stringify({
+        model:       AI_MODEL,
+        temperature: 0.3,
+        max_tokens:  ANALYSIS_MAX,
+        reasoning:   { effort: REASON_EFFORT },
+        stream:      true,
+        provider:    { allow_fallbacks: true },
+        messages:    buildAiMessages(payload.ai_prompt, research)
+      });
+
+      const MAX_ATTEMPTS = 3;
+      let aiSummary = "", aiReasoning = "", emitted = false, lastErr = null;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        aiSummary = ""; aiReasoning = "";   // only ever retried when nothing was emitted yet, so this is safe
+        try {
+          const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type":  "application/json",
+              "Authorization": `Bearer ${API_KEY}`,
+              "HTTP-Referer":  "http://localhost",
+              "X-Title":       "Squall"
+            },
+            body: aiReqBody
+          });
+          if (!aiRes.ok || !aiRes.body) {
+            const errText = await aiRes.text().catch(() => "");
+            const e = new Error(`OpenRouter ${aiRes.status}: ${errText.slice(0, 300)}`);
+            e.httpStatus = aiRes.status;
+            throw e;
           }
+
+          let sseBuf = "";
+          const decoder = new TextDecoder();
+          for await (const chunk of aiRes.body) {
+            sseBuf += decoder.decode(chunk, { stream: true });
+            let nl;
+            while ((nl = sseBuf.indexOf("\n")) >= 0) {
+              const line = sseBuf.slice(0, nl).trim();
+              sseBuf = sseBuf.slice(nl + 1);
+              if (!line.startsWith("data:")) continue;      // skips ": OPENROUTER PROCESSING" keep-alives
+              const data = line.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+              let j; try { j = JSON.parse(data); } catch { continue; }
+              if (j.error) throw new Error(j.error.message || "OpenRouter stream error");
+              const d = j.choices?.[0]?.delta || {};
+              if (d.reasoning) { aiReasoning += d.reasoning; emitted = true; send("ai_thinking", { t: d.reasoning }); }
+              if (d.content)   { aiSummary   += d.content;   emitted = true; send("ai_delta",   { t: d.content }); }
+            }
+          }
+          send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL });
+          lastErr = null;
+          break;
+        } catch (aiErr) {
+          lastErr = aiErr;
+          const transient = /terminated|idle timeout|ECONNRESET|ETIMEDOUT|EPIPE|socket|network|fetch failed/i.test(aiErr.message || "")
+                            || aiErr.httpStatus >= 500 || aiErr.httpStatus === 429;
+          // Only safe to retry before any token reached the client — re-streaming
+          // after that would duplicate text in the browser.
+          if (transient && !emitted && attempt < MAX_ATTEMPTS) {
+            console.warn(`AI stream ${aiErr.message} — retry ${attempt + 1}/${MAX_ATTEMPTS}`);
+            await new Promise(r => setTimeout(r, 600 * attempt));
+            continue;
+          }
+          // Partial answer already on screen? Keep it rather than wiping it to an error.
+          if (aiSummary.trim()) { send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL }); lastErr = null; }
+          break;
         }
-        send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL });
-      } catch (aiErr) {
-        // Deliver the error without killing the dashboard — data pane stays usable
-        send("ai_error", { error: "AI call failed: " + aiErr.message });
       }
+      // Deliver the error without killing the dashboard — data pane stays usable
+      if (lastErr) send("ai_error", { error: "AI call failed: " + lastErr.message });
       res.end();
     });
 
@@ -385,6 +414,7 @@ http.createServer(async (req, res) => {
         temperature: 0.3,
         max_tokens:  think ? 4000 : 2048,   // reasoning shares the output budget → give it more room
         stream:      true,
+        provider:    { allow_fallbacks: true },   // reroute instead of hard-failing when a provider drops
         messages: [
           {
             role: "system",
