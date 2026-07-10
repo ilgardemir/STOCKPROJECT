@@ -434,6 +434,34 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #chatSend:hover { filter: brightness(1.08); } #chatSend:active { transform: scale(.93); } #chatSend:disabled { opacity: .45; cursor: progress; }
 #chatSend svg { width: 15px; height: 15px; }
 
+/* Reasoning toggle in the chat row */
+.chat-think-btn { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  padding: 0 10px; transition: color .15s, border-color .15s, background .15s; }
+.chat-think-btn svg { width: 13px; height: 13px; stroke: currentColor; }
+.chat-think-btn:hover { color: var(--bright); border-color: var(--text-dim); }
+.chat-think-btn.on { color: var(--violet); border-color: var(--violet); background: rgba(157,140,240,.10); }
+@media (max-width: 520px) { .chat-think-btn span { display: none; } .chat-think-btn { padding: 0 9px; } }
+
+/* Streaming chat: typing indicator, error text, collapsible reasoning */
+.chat-typing { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: 13px; }
+.msg.ai .prose.chat-err { color: var(--red); white-space: pre-wrap; }
+.chat-think { margin-bottom: 8px; }
+.chat-think-toggle { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-3); border: 1px solid var(--border-soft);
+  border-radius: 99px; color: var(--text-dim); font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: .03em;
+  padding: 3px 10px 3px 8px; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.chat-think-toggle:hover { color: var(--bright); border-color: var(--text-dim); }
+.chat-think.open .chat-think-toggle { color: var(--violet); border-color: var(--violet); background: rgba(157,140,240,.10); }
+.chat-think-toggle .brain { width: 12px; height: 12px; stroke: var(--violet); }
+.chat-think-toggle .chev { width: 11px; height: 11px; stroke: currentColor; transition: transform .25s var(--ease); }
+.chat-think.open .chat-think-toggle .chev { transform: rotate(180deg); }
+.chat-think-toggle .live-dot { display: none; width: 6px; height: 6px; border-radius: 50%; background: var(--violet); animation: dotPulse 1.2s ease-in-out infinite; }
+.chat-think.live .chat-think-toggle .live-dot { display: inline-block; }
+.chat-think-panel { display: none; margin-top: 7px; border: 1px solid var(--border-soft); border-left: 3px solid var(--violet);
+  border-radius: var(--radius-sm); background: var(--bg-deep); padding: 10px 12px; max-height: 240px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.65; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
+.chat-think.open .chat-think-panel { display: block; animation: bodyIn .25s var(--ease); }
+
 .spinner { width: 15px; height: 15px; flex-shrink: 0; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .placeholder { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 60px 20px; color: var(--text-dim); font-size: 13px; text-align: center; }
@@ -524,6 +552,10 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
           <div id="chatTickers"></div>
           <div id="chatMessages"></div>
           <div id="chatRow">
+            <button id="chatThinkBtn" type="button" class="chat-think-btn" title="Toggle model reasoning (off by default)" onclick="toggleChatThink()">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>
+              <span>Think</span>
+            </button>
             <input id="chatInput" type="text" placeholder="Ask a follow-up — risks, peers, options ideas…" />
             <button id="chatSend" onclick="sendChat()" aria-label="Send">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>

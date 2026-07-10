@@ -798,7 +798,36 @@ function renderMarkdown(text) {
     .replace(/^(?!\s*<[hpuoldbt])(.+)$/gm, "<p>$1</p>").replace(/<p>\s*<\/p>/g, "");
 }
 
-/* ════════════════ CHAT (per-ticker) ════════════════ */
+/* ════════════════ CHAT (per-ticker, streaming) ════════════════ */
+let chatThink = false;   // model reasoning — OFF by default
+try { chatThink = localStorage.getItem("squall-chat-think") === "1"; } catch (e) {}
+let chatSticky = true;   // auto-scroll unless the reader scrolls up mid-stream
+
+function syncChatThinkBtn() { document.getElementById("chatThinkBtn")?.classList.toggle("on", chatThink); }
+function toggleChatThink() {
+  chatThink = !chatThink;
+  try { localStorage.setItem("squall-chat-think", chatThink ? "1" : "0"); } catch (e) {}
+  syncChatThinkBtn();
+}
+
+const _brainSvg = `<svg class="brain" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>`;
+const _chevSvg  = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+
+function chatThinkingBlock(reasoning, live) {
+  if (!reasoning || !reasoning.trim()) return "";
+  return `<div class="chat-think ${live ? "open live" : ""}">
+    <button class="chat-think-toggle" onclick="this.closest('.chat-think').classList.toggle('open')"><span class="live-dot"></span>${_brainSvg}<span>${live ? "Thinking" : "Show thinking"}</span>${_chevSvg}</button>
+    <div class="chat-think-panel">${esc(reasoning)}</div>
+  </div>`;
+}
+function chatMsgInner(msg) {
+  const thinkingLive = !!msg.streaming && !msg.content;   // still reasoning, not yet answering
+  const think = chatThinkingBlock(msg.reasoning, thinkingLive);
+  if (msg.content) return think + `<div class="prose${msg.error ? " chat-err" : ""}">${renderMarkdown(msg.content)}</div>`;
+  if (msg.streaming) return think + (msg.reasoning ? "" : `<div class="chat-typing"><div class="spinner"></div> Thinking…</div>`);
+  return think + `<div class="prose${msg.error ? " chat-err" : ""}">${esc(msg.content || "")}</div>`;
+}
+
 function renderChat() {
   const m = document.getElementById("chatMessages"); const sess = sessions[active];
   if (!sess) { m.innerHTML = ""; return; }
@@ -806,43 +835,88 @@ function renderChat() {
     m.innerHTML = `<div class="chat-empty">Ask anything about <b>${esc(active)}</b> — risks, peers, options ideas, or how institutions are positioned. Each ticker keeps its own thread.</div>`;
     return;
   }
-  m.innerHTML = sess.history.map(msg => msg.role === "user"
+  m.innerHTML = sess.history.map((msg, i) => msg.role === "user"
     ? `<div class="msg user">${esc(msg.content)}</div>`
-    : `<div class="msg ai"><div class="prose">${renderMarkdown(msg.content)}</div></div>`).join("");
+    : `<div class="msg ai" data-i="${i}">${chatMsgInner(msg)}</div>`).join("");
   scrollChat();
 }
+// Repaint just the streaming message node — avoids rebuilding the whole thread on every token.
+function paintChatStream(sess, idx) {
+  const node = document.querySelector(`#chatMessages .msg.ai[data-i="${idx}"]`);
+  if (!node) return;
+  const wasOpen = node.querySelector(".chat-think")?.classList.contains("open");
+  node.innerHTML = chatMsgInner(sess.history[idx]);
+  const think = node.querySelector(".chat-think");
+  if (think && wasOpen) think.classList.add("open");                       // keep the reader's manual toggle
+  const livePanel = think?.classList.contains("live") ? think.querySelector(".chat-think-panel") : null;
+  if (livePanel) livePanel.scrollTop = livePanel.scrollHeight;             // follow the reasoning as it streams
+  const wrap = document.getElementById("chatMessages");
+  if (chatSticky) wrap.scrollTop = wrap.scrollHeight;
+}
+
 async function sendChat() {
   const input = document.getElementById("chatInput"), btn = document.getElementById("chatSend");
   const sess = sessions[active]; const msg = input.value.trim();
-  if (!msg || !sess) return;
-  input.value = ""; btn.disabled = true;
+  if (!msg || !sess || sess._chatBusy) return;
 
   let content = msg;
   if (chartOpts.instWindow) content = "[Focus on institutional positioning and price-action evidence] " + msg;
 
+  input.value = ""; btn.disabled = true; sess._chatBusy = true; chatSticky = true;
   sess.history.push({ role: "user", content });
+  const aiMsg = { role: "assistant", content: "", reasoning: "", streaming: true };
+  sess.history.push(aiMsg);
+  const aiIdx = sess.history.length - 1;
   renderChat();
-  const m = document.getElementById("chatMessages");
-  const typingId = "typing_" + Date.now();
-  m.insertAdjacentHTML("beforeend", `<div class="msg ai" id="${typingId}" style="display:flex;align-items:center;gap:8px"><div class="spinner"></div> Thinking…</div>`);
-  scrollChat();
+
+  // Only role + content go to the server (drop the in-flight msg and any prior errored replies).
+  const outbound = sess.history
+    .filter(x => !x.streaming && !(x.role === "assistant" && x.error))
+    .map(({ role, content }) => ({ role, content }));
+
+  let raf = null;
+  const schedulePaint = () => { if (!raf) raf = requestAnimationFrame(() => { raf = null; if (sessions[active] === sess) paintChatStream(sess, aiIdx); }); };
 
   try {
     const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: sess.history, context: sess.context }) });
-    const data = await res.json();
-    document.getElementById(typingId)?.remove();
-    if (data.error) { sess.history.push({ role: "assistant", content: "Error: " + data.error }); }
-    else sess.history.push({ role: "assistant", content: data.reply });
-    renderChat();
+      body: JSON.stringify({ messages: outbound, context: sess.context, think: chatThink }) });
+    if (!res.ok || !res.body) throw new Error("server responded " + res.status);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "", evt = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const l = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (l.startsWith("event:")) { evt = l.slice(6).trim(); continue; }
+        if (!l.startsWith("data:")) continue;
+        let j; try { j = JSON.parse(l.slice(5).trim()); } catch { continue; }
+        if      (evt === "think") { aiMsg.reasoning += j.t; schedulePaint(); }
+        else if (evt === "delta") { aiMsg.content   += j.t; schedulePaint(); }
+        else if (evt === "done")  { if (j.reply) aiMsg.content = j.reply; if (j.reasoning) aiMsg.reasoning = j.reasoning; }
+        else if (evt === "error") { aiMsg.error = true; aiMsg.content = (aiMsg.content ? aiMsg.content + "\n\n" : "") + "⚠️ " + j.error; }
+      }
+    }
   } catch (e) {
-    document.getElementById(typingId)?.remove();
-    sess.history.push({ role: "assistant", content: "Connection error: " + e.message }); renderChat();
+    aiMsg.error = true;
+    if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + " — please try again.";
   }
+
+  aiMsg.streaming = false;
+  sess._chatBusy = false;
+  if (sessions[active] === sess) renderChat();
   btn.disabled = false; input.focus();
 }
 function scrollChat() { const m = document.getElementById("chatMessages"); m.scrollTop = m.scrollHeight; }
+document.getElementById("chatMessages").addEventListener("scroll", function () {
+  chatSticky = (this.scrollHeight - this.scrollTop - this.clientHeight) < 60;
+});
 document.getElementById("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+syncChatThinkBtn();
 document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
 
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */

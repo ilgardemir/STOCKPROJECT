@@ -355,44 +355,87 @@ http.createServer(async (req, res) => {
     return;
   }
 
-  // ── FOLLOW-UP CHAT ───────────────────────────────────────────────────────────
+  // ── FOLLOW-UP CHAT (SSE streaming over POST) ─────────────────────────────────
   if (req.method === "POST" && req.url === "/chat") {
     let body = "";
     req.on("data", chunk => (body += chunk));
     req.on("end", async () => {
+      res.writeHead(200, {
+        "Content-Type":  "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection":    "keep-alive",
+        "X-Accel-Buffering": "no"
+      });
+      const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+      let parsed;
+      try { parsed = JSON.parse(body); }
+      catch { send("error", { error: "Malformed request." }); return res.end(); }
+      const { messages, context, think } = parsed;   // think: request model reasoning
+
+      const ctrl = new AbortController();
+      req.on("close", () => { try { ctrl.abort(); } catch (_) {} });
+
+      const reqBody = {
+        model:       AI_MODEL,
+        temperature: 0.3,
+        max_tokens:  think ? 4000 : 2048,   // reasoning shares the output budget → give it more room
+        stream:      true,
+        messages: [
+          {
+            role: "system",
+            content: `You are a quantitative financial analyst answering follow-up questions.\n`
+                   + `Reference the stock data below when relevant. Be concise and precise.\n\n`
+                   + `--- STOCK DATA ---\n${context}`
+          },
+          ...(Array.isArray(messages) ? messages : [])
+        ]
+      };
+      if (think) reqBody.reasoning = { effort: REASON_EFFORT };
+
       try {
-        const { messages, context } = JSON.parse(body);
-        // messages: [{role, content}, …]   context: original ai_prompt
         const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
+          signal: ctrl.signal,
           headers: {
             "Content-Type":  "application/json",
             "Authorization": `Bearer ${API_KEY}`,
             "HTTP-Referer":  "http://localhost",
             "X-Title":       "Squall Chat"
           },
-          body: JSON.stringify({
-            model:       AI_MODEL,
-            temperature: 0.3,
-            max_tokens:  2048,   // follow-ups are shorter; saves tokens
-            messages: [
-              {
-                role: "system",
-                content: `You are a quantitative financial analyst answering follow-up questions.\n`
-                       + `Reference the stock data below when relevant. Be concise and precise.\n\n`
-                       + `--- STOCK DATA ---\n${context}`
-              },
-              ...messages
-            ]
-          })
+          body: JSON.stringify(reqBody)
         });
-        const aiData = await aiRes.json();
-        if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
-        res.writeHead(200, {"Content-Type":"application/json"});
-        res.end(JSON.stringify({ reply: aiData.choices[0].message.content }));
+        // Non-2xx (or non-JSON "upstream error" bodies) surface as a clean message instead of crashing a JSON.parse.
+        if (!aiRes.ok || !aiRes.body) {
+          const errText = await aiRes.text().catch(() => "");
+          send("error", { error: `The model provider returned an error (HTTP ${aiRes.status}). ${errText.slice(0, 200)}`.trim() });
+          return res.end();
+        }
+
+        let sseBuf = "", reply = "", reasoning = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of aiRes.body) {
+          sseBuf += decoder.decode(chunk, { stream: true });
+          let nl;
+          while ((nl = sseBuf.indexOf("\n")) >= 0) {
+            const line = sseBuf.slice(0, nl).trim();
+            sseBuf = sseBuf.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;      // skips ": OPENROUTER PROCESSING" keep-alives
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            let j; try { j = JSON.parse(data); } catch { continue; }   // ignore any non-JSON noise mid-stream
+            if (j.error) { send("error", { error: j.error.message || "The model stream errored." }); return res.end(); }
+            const d = j.choices?.[0]?.delta || {};
+            if (d.reasoning) { reasoning += d.reasoning; send("think", { t: d.reasoning }); }
+            if (d.content)   { reply     += d.content;   send("delta", { t: d.content }); }
+          }
+        }
+        if (!reply.trim()) { send("error", { error: "The model returned an empty response — please try again." }); return res.end(); }
+        send("done", { reply, reasoning });
+        res.end();
       } catch (e) {
-        res.writeHead(500, {"Content-Type":"application/json"});
-        res.end(JSON.stringify({ error: e.message }));
+        if (e.name !== "AbortError") send("error", { error: "Chat request failed: " + e.message });
+        try { res.end(); } catch (_) {}
       }
     });
     return;
