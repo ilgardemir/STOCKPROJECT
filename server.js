@@ -284,13 +284,18 @@ http.createServer(async (req, res) => {
             await new Promise(r => setTimeout(r, 600 * attempt));
             continue;
           }
-          // Partial answer already on screen? Keep it rather than wiping it to an error.
-          if (aiSummary.trim()) { send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL }); lastErr = null; }
-          break;
+          break;   // can't safely retry mid-stream — surface it below
         }
       }
-      // Deliver the error without killing the dashboard — data pane stays usable
-      if (lastErr) send("ai_error", { error: "AI call failed: " + lastErr.message });
+      // Failure surfaces as ai_error (never ai_done) so an interrupted stream is never
+      // mistaken for a finished answer. The client keeps whatever partial text streamed
+      // and shows a Retry button — the dashboard is untouched either way.
+      if (lastErr) {
+        const msg = emitted
+          ? `Response was interrupted before finishing (${lastErr.message}). Hit Retry to regenerate the full analysis.`
+          : `AI call failed: ${lastErr.message}`;
+        send("ai_error", { error: msg });
+      }
       res.end();
     });
 
