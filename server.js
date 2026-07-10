@@ -373,8 +373,12 @@ http.createServer(async (req, res) => {
       catch { send("error", { error: "Malformed request." }); return res.end(); }
       const { messages, context, think } = parsed;   // think: request model reasoning
 
+      // Abort the upstream ONLY if the client actually drops the response.
+      // NOTE: do NOT listen on `req` here — in Node 16+ the POST request stream auto-destroys
+      // and emits 'close' the instant its body is consumed, which would abort us before a single
+      // token streams back (→ silent blank replies). `res` 'close' fires on real disconnect.
       const ctrl = new AbortController();
-      req.on("close", () => { try { ctrl.abort(); } catch (_) {} });
+      res.on("close", () => { if (!res.writableEnded) { try { ctrl.abort(); } catch (_) {} } });
 
       const reqBody = {
         model:       AI_MODEL,
