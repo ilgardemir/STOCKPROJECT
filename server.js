@@ -62,29 +62,39 @@ const RESEARCH_TOPICS = [
 ];
 
 async function webSearch(query) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${API_KEY}`,
-      "HTTP-Referer":  "http://localhost",
-      "X-Title":       "Squall Research"
-    },
-    body: JSON.stringify({
-      model:       SEARCH_MODEL,
-      temperature: 0.1,
-      max_tokens:  600,
-      plugins:     [{ id: "web", max_results: 6 }],   // explicit web plugin → we control results count; query stays this focused topic
-      messages: [
-        { role: "system", content: "You are a financial news researcher. Using ONLY the live web results attached to this request, extract concrete, recent, dated facts. Reply as terse bullet points, each ending with '(date — source)'. If nothing relevant is found, reply with exactly: None found." },
-        { role: "user", content: query }
-      ]
-    })
-  });
-  if (!res.ok) return null;
-  const j = await res.json().catch(() => null);
-  const txt = j?.choices?.[0]?.message?.content?.trim();
-  return (txt && !/^none found\.?$/i.test(txt)) ? txt : null;
+  // Hard timeout: a slow or hanging web-plugin call must NEVER stall the analysis.
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${API_KEY}`,
+        "HTTP-Referer":  "http://localhost",
+        "X-Title":       "Squall Research"
+      },
+      body: JSON.stringify({
+        model:       SEARCH_MODEL,
+        temperature: 0.1,
+        max_tokens:  600,
+        plugins:     [{ id: "web", max_results: 6 }],   // explicit web plugin → we control results count; query stays this focused topic
+        messages: [
+          { role: "system", content: "You are a financial news researcher. Using ONLY the live web results attached to this request, extract concrete, recent, dated facts. Reply as terse bullet points, each ending with '(date — source)'. If nothing relevant is found, reply with exactly: None found." },
+          { role: "user", content: query }
+        ]
+      })
+    });
+    if (!res.ok) return null;
+    const j = await res.json().catch(() => null);
+    const txt = j?.choices?.[0]?.message?.content?.trim();
+    return (txt && !/^none found\.?$/i.test(txt)) ? txt : null;
+  } catch {
+    return null;   // aborted / network error → just no research for this topic
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Runs the topic searches in parallel; returns a markdown block (or "" if nothing surfaced).
