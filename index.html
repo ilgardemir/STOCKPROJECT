@@ -380,8 +380,8 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #genIndicator span { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--text-dim);
   background: linear-gradient(90deg, var(--text-dim) 30%, var(--bright) 50%, var(--text-dim) 70%);
   background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-  animation: shimmer 1.8s linear infinite; }
-@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  animation: textSheen 1.8s linear infinite; }
+@keyframes textSheen { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 /* blinking caret rides the last streamed element */
 #aiSummary.streaming #answerStream > :last-child::after { content: ""; display: inline-block; width: 3px; height: 1.05em;
   background: var(--accent); margin-left: 3px; vertical-align: -0.15em; border-radius: 1px; animation: caretBlink 1s steps(2) infinite; }
@@ -486,6 +486,111 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .sk-prose .sk-h:first-child { margin-top: 4px; }
 .sk-para { margin-bottom: 16px; }
 .sk-para .sk-line { height: 11px; margin-bottom: 10px; }
+
+/* ═══ MOTION SYSTEM — entrance choreography, ambient wind, micro-interactions ═══ */
+@keyframes riseIn { from { opacity: 0; transform: translateY(8px); } }
+@keyframes slideGust { from { opacity: 0; transform: translateX(-14px); } }
+@keyframes popIn { from { opacity: 0; transform: scale(.55); } }
+@keyframes rowIn { from { opacity: 0; } }
+@keyframes growX { from { transform: scaleX(0); } }
+@keyframes markerPop { from { opacity: 0; transform: translate(-50%,-50%) scale(0); } }
+
+/* Hero — orchestrated page-load sequence: icon → title → copy → chips */
+#hero > .wind { animation: riseIn .6s var(--ease-out) backwards .05s; }
+#hero h2 { animation: heroTitle .8s var(--ease-out) backwards .14s; }
+@keyframes heroTitle { from { opacity: 0; letter-spacing: .4em; filter: blur(5px); } }
+#hero p { animation: riseIn .6s var(--ease-out) backwards .3s; }
+#hero .examples { animation: riseIn .6s var(--ease-out) backwards .4s; }
+#hero .examples .chip { animation: popIn .45s var(--ease-spring) backwards; }
+#hero .examples .chip:nth-child(1) { animation-delay: .48s; }
+#hero .examples .chip:nth-child(2) { animation-delay: .54s; }
+#hero .examples .chip:nth-child(3) { animation-delay: .60s; }
+#hero .examples .chip:nth-child(4) { animation-delay: .66s; }
+#hero .examples .chip:nth-child(5) { animation-delay: .72s; }
+.chip:active { transform: translateY(0) scale(.95); }
+
+/* Hero ambience — dot grid drifts like wind-blown drizzle; streaks pass through */
+#hero::before { animation: dotDrift 70s linear infinite; }
+@keyframes dotDrift { to { background-position: 210px -30px; } }
+#hero .hero-streaks { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.hero-streaks i { position: absolute; left: -220px; top: 20%; height: 2px; width: 150px; border-radius: 99px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: 0; animation: streakBy 9s linear infinite 1.2s; }
+.hero-streaks i:nth-child(2) { top: 58%; width: 90px; animation-duration: 12s; animation-delay: 4s; }
+.hero-streaks i:nth-child(3) { top: 80%; width: 200px; animation-duration: 7.5s; animation-delay: 6.5s; }
+@keyframes streakBy { 0% { left: -220px; opacity: 0; } 5% { opacity: .3; } 18% { left: 104%; opacity: .12; } 18.5%, 100% { left: 104%; opacity: 0; } }
+
+/* Wordmark — ambient gust every ~11s (hover still triggers the fast one) */
+.wordmark .wind path { animation: gustIdle 11s var(--ease) infinite; }
+@keyframes gustIdle { 0% { stroke-dashoffset: 0; opacity: 1; } 5% { stroke-dashoffset: 60; opacity: 0; }
+  5.5% { stroke-dashoffset: -60; } 12% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: 1; } }
+
+/* Header controls */
+#analyzeBtn { transition: filter .15s, transform .18s var(--ease), opacity .2s, box-shadow .25s var(--ease); }
+#analyzeBtn:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 6px 18px -8px var(--accent); }
+#analyzeBtn:active { transform: translateY(0) scale(.96); box-shadow: none; }
+#themeBtn svg { animation: themePop .45s var(--ease-spring); }
+@keyframes themePop { from { transform: scale(.3) rotate(-110deg); opacity: 0; } }
+
+/* Progress — sheen sweeps the fill while the pipeline runs */
+#progressFill { overflow: hidden; }
+#progressFill::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.28), transparent); animation: fillSheen 1.5s ease-in-out infinite; }
+@keyframes fillSheen { to { transform: translateX(100%); } }
+
+/* Summary strip — company → ticker → price → pill cascade */
+#summaryStrip.show > * { animation: riseIn .45s var(--ease-out) backwards; }
+#summaryStrip.show > :nth-child(1) { animation-delay: .03s; }
+#summaryStrip.show > :nth-child(2) { animation-delay: .08s; }
+#summaryStrip.show > :nth-child(3) { animation-delay: .13s; }
+#summaryStrip.show > :nth-child(4) { animation-delay: .19s; }
+#summaryStrip.show > :nth-child(5) { animation-delay: .25s; }
+#summaryStrip.show > :nth-child(6) { animation-delay: .3s; }
+#summaryStrip.show > :nth-child(7) { animation-delay: .35s; }
+#summaryStrip.show > .pill { animation: popIn .5s var(--ease-spring) backwards .22s; }
+
+/* Data pane choreography — inherits each card's stagger via --d */
+#dataBody .mgrid .metric { animation: riseIn .45s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .1s + var(--mi, 11) * .03s); }
+#dataBody .mgrid .metric:nth-child(1) { --mi: 0; } #dataBody .mgrid .metric:nth-child(2) { --mi: 1; }
+#dataBody .mgrid .metric:nth-child(3) { --mi: 2; } #dataBody .mgrid .metric:nth-child(4) { --mi: 3; }
+#dataBody .mgrid .metric:nth-child(5) { --mi: 4; } #dataBody .mgrid .metric:nth-child(6) { --mi: 5; }
+#dataBody .mgrid .metric:nth-child(7) { --mi: 6; } #dataBody .mgrid .metric:nth-child(8) { --mi: 7; }
+#dataBody .mgrid .metric:nth-child(9) { --mi: 8; } #dataBody .mgrid .metric:nth-child(10) { --mi: 9; }
+#dataBody .mgrid .metric:nth-child(11) { --mi: 10; }
+#dataBody .signal { animation: slideGust .4s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .08s + var(--si, 6) * .06s); }
+#dataBody .signal:nth-child(1) { --si: 0; } #dataBody .signal:nth-child(2) { --si: 1; }
+#dataBody .signal:nth-child(3) { --si: 2; } #dataBody .signal:nth-child(4) { --si: 3; }
+#dataBody .signal:nth-child(5) { --si: 4; } #dataBody .signal:nth-child(6) { --si: 5; }
+#dataBody .rb-fill { transform-origin: left center; animation: growX .8s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .3s); }
+#dataBody .rb-marker { animation: markerPop .55s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .75s); }
+#dataBody .lvl { animation: popIn .4s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .12s + var(--li, 9) * .04s); }
+#dataBody .lvl:nth-child(1) { --li: 0; } #dataBody .lvl:nth-child(2) { --li: 1; }
+#dataBody .lvl:nth-child(3) { --li: 2; } #dataBody .lvl:nth-child(4) { --li: 3; }
+#dataBody .lvl:nth-child(5) { --li: 4; } #dataBody .lvl:nth-child(6) { --li: 5; }
+#dataBody .lvl:nth-child(7) { --li: 6; } #dataBody .lvl:nth-child(8) { --li: 7; }
+#dataBody .lvl:nth-child(9) { --li: 8; }
+#dataBody tbody tr { animation: rowIn .35s ease backwards; animation-delay: calc(var(--d, 0s) + .12s + var(--ri, 10) * .035s); }
+#dataBody tbody tr:nth-child(1) { --ri: 0; } #dataBody tbody tr:nth-child(2) { --ri: 1; }
+#dataBody tbody tr:nth-child(3) { --ri: 2; } #dataBody tbody tr:nth-child(4) { --ri: 3; }
+#dataBody tbody tr:nth-child(5) { --ri: 4; } #dataBody tbody tr:nth-child(6) { --ri: 5; }
+#dataBody tbody tr:nth-child(7) { --ri: 6; } #dataBody tbody tr:nth-child(8) { --ri: 7; }
+#dataBody tbody tr:nth-child(9) { --ri: 8; } #dataBody tbody tr:nth-child(10) { --ri: 9; }
+
+/* Card micro-interactions */
+.sec-icon { transition: transform .35s var(--ease-spring); }
+.card > summary:hover .sec-icon { transform: scale(1.18) rotate(-6deg); }
+.card > summary .chev { transition: transform .4s var(--ease-spring); }
+
+/* Live model tag pulses while streaming */
+.pane-head .tag.live { animation: livePulse 1.8s ease-in-out infinite; }
+@keyframes livePulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(157,140,240,.4); } 55% { box-shadow: 0 0 0 6px rgba(157,140,240,0); } }
+
+/* Chat — wind-dot typing indicator + empty-state entrance */
+.chat-empty { animation: riseIn .5s var(--ease-out) backwards .05s; }
+.gust-dots { display: inline-flex; gap: 4px; align-items: center; }
+.gust-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: gustDot 1.1s ease-in-out infinite; }
+.gust-dots i:nth-child(2) { animation-delay: .14s; }
+.gust-dots i:nth-child(3) { animation-delay: .28s; }
+@keyframes gustDot { 0%, 100% { opacity: .25; transform: translateX(-2px); } 50% { opacity: 1; transform: translateX(2px); } }
 </style>
 </head>
 <body>
@@ -517,6 +622,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 </div>
 
 <div id="hero">
+  <div class="hero-streaks" aria-hidden="true"><i></i><i></i><i></i></div>
   <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
   <h2>Squall</h2>
   <p>Enter a ticker to run the full pipeline: <b>SEC EDGAR fundamentals</b>, <b>live quote &amp; options chains</b>, <b>candlestick price action</b>, <b>institutional volume footprints</b>, and an <b>AI read</b> on top of every number.</p>

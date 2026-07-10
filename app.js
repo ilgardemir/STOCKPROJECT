@@ -4,6 +4,7 @@
 const sessions = {};   // { TICKER: { data, context, history, range } }
 let active = null;     // active ticker for the chat/AI/data panes
 const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false, sr: true, pct: false, vol: true, instWindow: false };
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 
 /* ════════════════ THEME ════════════════ */
 const SUN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
@@ -350,6 +351,20 @@ function renderStrip(d) {
     ${q.market_state ? `<span class="meta-dot">Market <b>${esc(q.market_state)}</b></span>` : ""}
     ${q.fetched_at ? `<span class="meta-dot">Fetched <b>${esc(q.fetched_at)}</b></span>` : ""}`;
   strip.classList.add("show");
+
+  // price ticks up into place
+  const pe = document.getElementById("sPrice");
+  if (!REDUCED && isNum(price) && pe) {
+    const t0 = performance.now(), dur = 700, from = price * 0.96;
+    const tick = now => {
+      if (!pe.isConnected) return;   // strip re-rendered mid-animation — stop
+      const k = Math.min(1, (now - t0) / dur);
+      const e = 1 - Math.pow(1 - k, 3);
+      pe.textContent = fUsd(from + (price - from) * e);
+      if (k < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
 }
 
 /* ════════════════ RENDER: EVERYTHING ════════════════ */
@@ -670,6 +685,19 @@ function drawChart() {
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
 
+  // Wind-front reveal — sweep the plot in on ticker / range / expand changes.
+  // Key excludes canvas size so split-drags and window resizes don't retrigger it.
+  const revealKey = active + "|" + N + "|" + (window.chartExpanded ? "x" : "i");
+  if (drawChart._revealKey !== revealKey) {
+    drawChart._revealKey = revealKey;
+    drawChart._revealT0 = REDUCED ? 0 : performance.now();
+  }
+  let reveal = 1;
+  if (drawChart._revealT0) {
+    const rt = (performance.now() - drawChart._revealT0) / 650;
+    if (rt >= 1) drawChart._revealT0 = 0; else reveal = 1 - Math.pow(1 - rt, 3);
+  }
+
   const kl = d.raw_data?.key_levels || {};
   const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(isNum).map(x => [x, cssVar("--red")]),
                                    ...(kl.support || []).filter(isNum).map(x => [x, cssVar("--green")])] : [];
@@ -702,6 +730,10 @@ function drawChart() {
   // x axis (dates)
   ctx.textAlign = "center"; ctx.fillStyle = cssVar("--text-dim");
   for (let g = 0; g <= 4; g++) { const i = Math.round(g / 4 * (data.length - 1)); ctx.fillText(data[i].date.slice(2), X(i), H - 8); }
+
+  // everything painted after the axes is clipped to the reveal front
+  const frontX = reveal >= 1 ? W : padL + reveal * (W - padL - padR);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, frontX, H); ctx.clip();
 
   // volume
   if (chartOpts.vol) {
@@ -753,6 +785,15 @@ function drawChart() {
     else { ctx.fillRect(x - bodyW / 2, top, bodyW, hgt); }
   });
 
+  ctx.restore();   // lift the reveal clip
+  if (reveal < 1) {
+    // glowing accent edge riding the reveal front — the "wind" doing the drawing
+    const ac = cssVar("--accent");
+    const grad = ctx.createLinearGradient(frontX - 34, 0, frontX, 0);
+    grad.addColorStop(0, ac + "00"); grad.addColorStop(1, ac + "55");
+    ctx.fillStyle = grad; ctx.fillRect(frontX - 34, padT, 34, plotB - padT);
+  }
+
   // crosshair / tooltip
   canvas.onmousemove = e => {
     const rect = canvas.getBoundingClientRect();
@@ -772,6 +813,11 @@ function drawChart() {
     const x = X(drawChart._hover);
     ctx.strokeStyle = cssVar("--text-dim"); ctx.globalAlpha = .4; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, plotB); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+
+  // keep sweeping until the reveal completes
+  if (drawChart._revealT0 && !drawChart._revealRaf) {
+    drawChart._revealRaf = requestAnimationFrame(() => { drawChart._revealRaf = null; drawChart(); });
   }
 }
 drawChart._hover = null;
@@ -824,7 +870,7 @@ function chatMsgInner(msg) {
   const thinkingLive = !!msg.streaming && !msg.content;   // still reasoning, not yet answering
   const think = chatThinkingBlock(msg.reasoning, thinkingLive);
   if (msg.content) return think + `<div class="prose${msg.error ? " chat-err" : ""}">${renderMarkdown(msg.content)}</div>`;
-  if (msg.streaming) return think + (msg.reasoning ? "" : `<div class="chat-typing"><div class="spinner"></div> Thinking…</div>`);
+  if (msg.streaming) return think + (msg.reasoning ? "" : `<div class="chat-typing"><span class="gust-dots"><i></i><i></i><i></i></span> Thinking…</div>`);
   return think + `<div class="prose${msg.error ? " chat-err" : ""}">${esc(msg.content || "")}</div>`;
 }
 
