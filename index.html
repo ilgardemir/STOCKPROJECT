@@ -433,6 +433,20 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #chatSend { display: grid; place-items: center; width: 38px; background: var(--accent); border: none; border-radius: var(--radius-sm); color: var(--accent-ink); cursor: pointer; transition: filter .15s, transform .12s; }
 #chatSend:hover { filter: brightness(1.08); } #chatSend:active { transform: scale(.93); } #chatSend:disabled { opacity: .45; cursor: progress; }
 #chatSend svg { width: 15px; height: 15px; }
+/* stop mode — send button turns into a stop control while a reply streams */
+#chatSend.stopping { background: var(--red); animation: stopPulse 1.6s ease-in-out infinite; }
+#chatSend.stopping:hover { filter: brightness(1.06); }
+@keyframes stopPulse { 0%, 100% { box-shadow: 0 0 0 0 var(--red-soft); } 55% { box-shadow: 0 0 0 5px rgba(240,113,107,0); } }
+
+/* retry affordance — appears under a failed analysis or chat reply */
+.retry-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text); font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  padding: 5px 12px; margin-top: 10px; cursor: pointer; transition: color .15s, border-color .15s, background .15s, transform .12s var(--ease); }
+.retry-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.retry-btn:active { transform: scale(.95); }
+.retry-btn svg { width: 13px; height: 13px; }
+.ai-warn .retry-btn { margin-top: 8px; }
+.ai-warn { display: flex; flex-direction: column; align-items: flex-start; }
 
 /* Reasoning toggle in the chat row */
 .chat-think-btn { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; background: var(--surface-2); border: 1px solid var(--border);
@@ -663,7 +677,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
               <span>Think</span>
             </button>
             <input id="chatInput" type="text" placeholder="Ask a follow-up — risks, peers, options ideas…" />
-            <button id="chatSend" onclick="sendChat()" aria-label="Send">
+            <button id="chatSend" onclick="onChatSend()" aria-label="Send">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>
             </button>
           </div>

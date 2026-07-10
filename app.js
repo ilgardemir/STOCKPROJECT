@@ -13,7 +13,9 @@ function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   document.getElementById("themeBtn").innerHTML = t === "dark" ? SUN : MOON;
   try { localStorage.setItem("squall-theme", t); } catch (e) {}
-  if (active && sessions[active]) drawChart();
+  // Defer the canvas repaint to the next frame so the CSS color transition starts
+  // immediately — redrawing synchronously here blocks paint and makes the toggle stutter.
+  if (active && sessions[active]) requestAnimationFrame(() => { if (active && sessions[active]) drawChart(); });
 }
 (function () { let t; try { t = localStorage.getItem("squall-theme"); } catch (e) {}
   if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; applyTheme(t); })();
@@ -134,7 +136,8 @@ function runAnalysis() {
     let msg = "Connection lost. Is the server running? (node server.js)";
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
     showProgress(0, 7, "Error: " + msg, true);
-    document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span></div>`;
+    document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
+      <button class="retry-btn" onclick="retryAnalysis('${esc(ticker)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
     btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(3000);
   });
@@ -147,6 +150,7 @@ function runAnalysis() {
     active = data.ticker;
     renderTickerPills();
     renderAll(data);
+    if (active === data.ticker) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
     btn.disabled = false;
     // 100% → wind-streak sweep → bar collapses
     showProgress(7, 7, "Data compiled — " + (data.company_name || data.ticker));
@@ -190,6 +194,34 @@ function runAnalysis() {
     _stream = null;
     es.close(); if (_es === es) _es = null;
   });
+}
+
+/* Bridges the gap between "dashboard ready" and the first AI token — shows the
+   wind indicator immediately so the AI pane never flashes blank. */
+const WIND_SVG = `<svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>`;
+const RETRY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>`;
+
+// Re-run the full pipeline for a ticker after a failure. Clears any partial AI text
+// so runAnalysis doesn't short-circuit to the cached-result path.
+function retryAnalysis(t) {
+  if (!t) return;
+  if (sessions[t]) sessions[t].data.aiSummary = "";
+  document.getElementById("ticker").value = t;
+  runAnalysis();
+}
+// Shared AI-error banner (with a retry affordance) used by both the live stream and final render.
+function aiWarnHtml(d) {
+  if (!d || !d.aiError) return "";
+  return `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.
+    <button class="retry-btn" onclick="retryAnalysis('${esc(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
+}
+function showAiThinking(modelId) {
+  const ai = document.getElementById("aiSummary");
+  if (!ai) return;
+  ai.className = "prose streaming";
+  ai.innerHTML = `<div id="genIndicator">${WIND_SVG}<span id="genLabel">${esc(prettyModel(modelId))} is reading the data…</span></div>`;
+  const scroll = document.getElementById("aiScroll");
+  if (scroll) scroll.scrollTop = 0;
 }
 
 /* ── Streaming render machinery ── */
@@ -250,8 +282,7 @@ function finalizeAiRender(d) {
   const scroll = document.getElementById("aiScroll");
   const keep = scroll.scrollTop;
   ai.className = "prose";
-  const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
-  ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
   scroll.scrollTop = keep;
 }
 
@@ -335,6 +366,7 @@ function switchTicker(t) {
   active = t;
   renderTickerPills();
   renderAll(sessions[t].data);
+  syncChatSendMode();   // reflect whether this ticker's thread is mid-stream
 }
 
 /* ════════════════ RENDER: SUMMARY STRIP ════════════════ */
@@ -569,8 +601,7 @@ function renderAll(d) {
   } else {
     const ai = document.getElementById("aiSummary");
     ai.className = "prose";
-    const warnHtml = d.aiError ? `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.</div>` : "";
-    ai.innerHTML = warnHtml + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
     document.getElementById("aiScroll").scrollTop = 0;
   }
 
@@ -859,6 +890,36 @@ function toggleChatThink() {
 const _brainSvg = `<svg class="brain" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>`;
 const _chevSvg  = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 
+// Send button doubles as a stop control while a reply streams.
+const SEND_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>`;
+const STOP_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>`;
+function setChatSendMode(streaming) {
+  const btn = document.getElementById("chatSend");
+  if (!btn) return;
+  btn.classList.toggle("stopping", streaming);
+  btn.innerHTML = streaming ? STOP_SVG : SEND_SVG;
+  btn.setAttribute("aria-label", streaming ? "Stop response" : "Send");
+  btn.disabled = false;
+}
+function syncChatSendMode() { setChatSendMode(!!sessions[active]?._chatBusy); }
+// One click handler: stop if a reply is streaming, otherwise send.
+function onChatSend() {
+  const sess = sessions[active];
+  if (sess && sess._chatBusy) stopChat(); else sendChat();
+}
+function stopChat() {
+  const sess = sessions[active];
+  if (sess && sess._chatAbort) { try { sess._chatAbort.abort(); } catch (e) {} }
+}
+// Retry a follow-up: drop the failed reply and re-stream from the last question.
+function retryChat() {
+  const sess = sessions[active];
+  if (!sess || sess._chatBusy) return;
+  while (sess.history.length && sess.history[sess.history.length - 1].role === "assistant") sess.history.pop();
+  if (!sess.history.length) return;
+  streamChatReply(sess);
+}
+
 function chatThinkingBlock(reasoning, live) {
   if (!reasoning || !reasoning.trim()) return "";
   return `<div class="chat-think ${live ? "open live" : ""}">
@@ -869,9 +930,10 @@ function chatThinkingBlock(reasoning, live) {
 function chatMsgInner(msg) {
   const thinkingLive = !!msg.streaming && !msg.content;   // still reasoning, not yet answering
   const think = chatThinkingBlock(msg.reasoning, thinkingLive);
-  if (msg.content) return think + `<div class="prose${msg.error ? " chat-err" : ""}">${renderMarkdown(msg.content)}</div>`;
+  const retry = msg.error ? `<button class="retry-btn" onclick="retryChat()">${RETRY_SVG}<span>Retry</span></button>` : "";
+  if (msg.content) return think + `<div class="prose${msg.error ? " chat-err" : ""}">${renderMarkdown(msg.content)}</div>` + retry;
   if (msg.streaming) return think + (msg.reasoning ? "" : `<div class="chat-typing"><span class="gust-dots"><i></i><i></i><i></i></span> Thinking…</div>`);
-  return think + `<div class="prose${msg.error ? " chat-err" : ""}">${esc(msg.content || "")}</div>`;
+  return think + `<div class="prose${msg.error ? " chat-err" : ""}">${esc(msg.content || "")}</div>` + retry;
 }
 
 function renderChat() {
@@ -900,20 +962,29 @@ function paintChatStream(sess, idx) {
   if (chatSticky) wrap.scrollTop = wrap.scrollHeight;
 }
 
-async function sendChat() {
-  const input = document.getElementById("chatInput"), btn = document.getElementById("chatSend");
+function sendChat() {
+  const input = document.getElementById("chatInput");
   const sess = sessions[active]; const msg = input.value.trim();
   if (!msg || !sess || sess._chatBusy) return;
 
   let content = msg;
   if (chartOpts.instWindow) content = "[Focus on institutional positioning and price-action evidence] " + msg;
 
-  input.value = ""; btn.disabled = true; sess._chatBusy = true; chatSticky = true;
+  input.value = "";
   sess.history.push({ role: "user", content });
+  streamChatReply(sess);
+}
+
+// Streams one assistant reply into `sess` using the current history. Reusable by
+// sendChat (new question) and retryChat (re-run the last question after a failure).
+async function streamChatReply(sess) {
   const aiMsg = { role: "assistant", content: "", reasoning: "", streaming: true };
   sess.history.push(aiMsg);
   const aiIdx = sess.history.length - 1;
-  renderChat();
+  sess._chatBusy = true; chatSticky = true;
+  const ctrl = new AbortController();
+  sess._chatAbort = ctrl;
+  if (sessions[active] === sess) { renderChat(); setChatSendMode(true); }
 
   // Only role + content go to the server (drop the in-flight msg and any prior errored replies).
   const outbound = sess.history
@@ -924,8 +995,8 @@ async function sendChat() {
   const schedulePaint = () => { if (!raf) raf = requestAnimationFrame(() => { raf = null; if (sessions[active] === sess) paintChatStream(sess, aiIdx); }); };
 
   try {
-    const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: outbound, context: sess.context, think: chatThink }) });
+    const res = await fetch("/chat", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: outbound, context: sess.context, analysis: sess.data.aiSummary || "", think: chatThink }) });
     if (!res.ok || !res.body) throw new Error("server responded " + res.status);
 
     const reader = res.body.getReader();
@@ -948,14 +1019,19 @@ async function sendChat() {
       }
     }
   } catch (e) {
-    aiMsg.error = true;
-    if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + " — please try again.";
+    if (e.name === "AbortError") {
+      // User stopped it — keep whatever streamed; note it if nothing arrived.
+      if (!aiMsg.content.trim()) aiMsg.content = "_Stopped._";
+    } else {
+      aiMsg.error = true;
+      if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + " — please try again.";
+    }
   }
 
   aiMsg.streaming = false;
-  sess._chatBusy = false;
-  if (sessions[active] === sess) renderChat();
-  btn.disabled = false; input.focus();
+  sess._chatBusy = false; sess._chatAbort = null;
+  if (sessions[active] === sess) { renderChat(); setChatSendMode(false); }
+  document.getElementById("chatInput").focus();
 }
 function scrollChat() { const m = document.getElementById("chatMessages"); m.scrollTop = m.scrollHeight; }
 document.getElementById("chatMessages").addEventListener("scroll", function () {

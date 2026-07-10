@@ -9,14 +9,14 @@ const SCRAPER_PATH = "./scraperFinal.py";
 const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = "deepseek/deepseek-v4-flash";         // main analysis — live search is now a separate focused step (below), NOT bolted onto this prompt
 const SEARCH_MODEL = "deepseek/deepseek-v4-flash";       // cheap model for the web-research pass; used with an explicit web plugin, one clean query per topic
-const RESEARCH_ON  = process.env.WEB_RESEARCH !== "off"; // set WEB_RESEARCH=off to skip live news (saves ~1-2¢/analysis)
+const RESEARCH_ON  = false; // DISABLED for now — live web search is unfunctional and stalls the AI stream. Re-enable when fixed (set to: process.env.WEB_RESEARCH !== "off").
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
 // Reasoning config (OpenRouter → DeepSeek reasoning).
-// DeepSeek controls reasoning depth via `effort` ("high" | "xhigh"), not a token budget.
+// `effort` accepts "low" | "medium" | "high" | "xhigh" — higher = deeper thinking but much slower to first token.
 // ANALYSIS_MAX caps total output (thinking + answer share it).
-const REASON_EFFORT = "high";   // "xhigh" = maximum reasoning depth
+const REASON_EFFORT = "medium"; // was "high" — dropped to cut how long the model spends before writing
 const ANALYSIS_MAX  = 6000;     // total output cap
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ http.createServer(async (req, res) => {
       let parsed;
       try { parsed = JSON.parse(body); }
       catch { send("error", { error: "Malformed request." }); return res.end(); }
-      const { messages, context, think } = parsed;   // think: request model reasoning
+      const { messages, context, analysis, think } = parsed;   // analysis: the initial AI write-up so follow-ups have continuity; think: request model reasoning
 
       // Abort the upstream ONLY if the client actually drops the response.
       // NOTE: do NOT listen on `req` here — in Node 16+ the POST request stream auto-destroys
@@ -389,8 +389,10 @@ http.createServer(async (req, res) => {
           {
             role: "system",
             content: `You are a quantitative financial analyst answering follow-up questions.\n`
-                   + `Reference the stock data below when relevant. Be concise and precise.\n\n`
+                   + `Reference the stock data below when relevant. Be concise and precise.\n`
+                   + `The user has already read your initial analysis (included below) — build on it, stay consistent with it, and don't repeat it wholesale.\n\n`
                    + `--- STOCK DATA ---\n${context}`
+                   + (analysis && analysis.trim() ? `\n\n--- YOUR INITIAL ANALYSIS (already shown to the user) ---\n${analysis}` : "")
           },
           ...(Array.isArray(messages) ? messages : [])
         ]
