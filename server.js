@@ -7,7 +7,9 @@ const path = require("path");
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
 const SCRAPER_PATH = "./scraperFinal.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "deepseek/deepseek-v4-flash:online";  // :online injects live Exa search into prompt (~$0.005), no tool-call conflict with reasoning
+const AI_MODEL    = "deepseek/deepseek-v4-flash";         // main analysis — live search is now a separate focused step (below), NOT bolted onto this prompt
+const SEARCH_MODEL = "deepseek/deepseek-v4-flash";       // cheap model for the web-research pass; used with an explicit web plugin, one clean query per topic
+const RESEARCH_ON  = process.env.WEB_RESEARCH !== "off"; // set WEB_RESEARCH=off to skip live news (saves ~1-2¢/analysis)
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -23,18 +25,78 @@ const ANALYSIS_MAX  = 6000;     // total output cap
  * System prompt: authoritative, terse — keeps the model focused without
  * burning tokens on roleplay preamble.  The user-side prompt carries all data.
  */
-function buildAiMessages(prompt) {
+function buildAiMessages(prompt, research) {
+  let userContent = prompt;
+  if (research && research.trim()) {
+    userContent +=
+      "\n\n---\n### REAL-TIME WEB INTELLIGENCE (live search — recent product launches, congressional/politician trades, geopolitical events)\n" +
+      "Gathered just now via live web search. Weave the relevant items into the Sentiment & Positioning and Catalysts & Risks sections and always cite their dates. " +
+      "This is qualitative context only — never let it override the audited financial figures above, and skip items that don't bear on the thesis.\n\n" +
+      research;
+  }
   return [
     {
       role: "system",
       content: [
         "You are a quantitative financial analyst writing a thorough, multi-section read for an investor who can already see all the underlying data.",
         "Reason carefully before answering, then interpret — connect valuation, fundamentals, technicals, and institutional positioning into judgments. Never restate figures, rebuild tables, or list metrics for their own sake; cite a number only when it anchors a specific conclusion.",
-        "Be specific to this company, not generic. Use only the data supplied; never invent figures, strikes, or expirations.",
+        "Be specific to this company, not generic. Use only the data and live-search intelligence supplied; never invent figures, strikes, expirations, or news events.",
       ].join(" ")
     },
-    { role: "user", content: prompt }
+    { role: "user", content: userContent }
   ];
+}
+
+// ─── LIVE WEB RESEARCH ──────────────────────────────────────────────────────
+// The old `:online` bolted a single auto-generated query onto the giant financial
+// prompt → a diluted query that surfaced nothing usable. Instead we run one clean,
+// single-topic search per category so Exa gets a focused query each time, then feed
+// the findings into the analysis prompt above.
+const RESEARCH_TOPICS = [
+  { label: "Product launches & announcements",
+    q: (n, t) => `Recent product launches, product announcements, major partnerships, or notable business developments for ${n} (${t}) in the last 90 days. List each as a bullet with its date and source.` },
+  { label: "Congressional / politician trades",
+    q: (n, t) => `US congressional, senator, or representative stock trades (buys or sells) of ${n} (${t}) disclosed in the last 6 months — per trackers like Capitol Trades, Quiver Quantitative, Unusual Whales, or the news. List politician, buy or sell, amount range, and date.` },
+  { label: "Geopolitical & political events",
+    q: (n, t) => `Geopolitical or political events in the last 90 days that materially affect ${n} (${t}) — wars, sanctions, tariffs, export controls, regulation, antitrust, or government contracts. List each with its date and source.` },
+];
+
+async function webSearch(query) {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${API_KEY}`,
+      "HTTP-Referer":  "http://localhost",
+      "X-Title":       "Squall Research"
+    },
+    body: JSON.stringify({
+      model:       SEARCH_MODEL,
+      temperature: 0.1,
+      max_tokens:  600,
+      plugins:     [{ id: "web", max_results: 6 }],   // explicit web plugin → we control results count; query stays this focused topic
+      messages: [
+        { role: "system", content: "You are a financial news researcher. Using ONLY the live web results attached to this request, extract concrete, recent, dated facts. Reply as terse bullet points, each ending with '(date — source)'. If nothing relevant is found, reply with exactly: None found." },
+        { role: "user", content: query }
+      ]
+    })
+  });
+  if (!res.ok) return null;
+  const j = await res.json().catch(() => null);
+  const txt = j?.choices?.[0]?.message?.content?.trim();
+  return (txt && !/^none found\.?$/i.test(txt)) ? txt : null;
+}
+
+// Runs the topic searches in parallel; returns a markdown block (or "" if nothing surfaced).
+async function gatherResearch(ticker, companyName) {
+  const name = companyName || ticker;
+  const settled = await Promise.all(
+    RESEARCH_TOPICS.map(topic =>
+      webSearch(topic.q(name, ticker))
+        .then(txt => (txt ? { label: topic.label, txt } : null))
+        .catch(() => null))
+  );
+  return settled.filter(Boolean).map(r => `**${r.label}**\n${r.txt}`).join("\n\n");
 }
 
 /**
@@ -135,6 +197,14 @@ http.createServer(async (req, res) => {
 
       // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
       send("result", { ...payload, model: AI_MODEL });
+
+      // Focused live-web research (clean per-topic queries) → injected into the analysis.
+      // Runs while the AI pane still shows its loading skeleton; adds a few seconds.
+      let research = "";
+      if (RESEARCH_ON) {
+        try { research = await gatherResearch(payload.ticker, payload.company_name); } catch (_) {}
+      }
+
       send("ai_start", { model: AI_MODEL });
       try {
         const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -151,7 +221,7 @@ http.createServer(async (req, res) => {
             max_tokens:  ANALYSIS_MAX,
             reasoning:   { effort: REASON_EFFORT },
             stream:      true,
-            messages:    buildAiMessages(payload.ai_prompt)
+            messages:    buildAiMessages(payload.ai_prompt, research)
           })
         });
         if (!aiRes.ok || !aiRes.body) {
@@ -234,6 +304,10 @@ http.createServer(async (req, res) => {
               res.end(JSON.stringify({ error: payload.error })); return;
             }
             try {
+              let research = "";
+              if (RESEARCH_ON) {
+                try { research = await gatherResearch(payload.ticker, payload.company_name); } catch (_) {}
+              }
               const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
                 headers: {
@@ -247,7 +321,7 @@ http.createServer(async (req, res) => {
                   temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
                   reasoning:   { effort: REASON_EFFORT },
-                  messages:    buildAiMessages(payload.ai_prompt)
+                  messages:    buildAiMessages(payload.ai_prompt, research)
                 })
               });
               const aiData   = await aiRes.json();
