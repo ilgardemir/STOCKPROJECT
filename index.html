@@ -29,6 +29,7 @@
   --green:#3dcb82; --green-soft:rgba(61,203,130,.10); --red:#f0716b; --red-soft:rgba(240,113,107,.10);
   --amber:#e9b44c; --amber-soft:rgba(233,180,76,.10); --violet:#9d8cf0;
   --chart-fill-top:rgba(63,208,182,.22); --chart-fill-bot:rgba(63,208,182,0);
+  --skeleton-shine:rgba(255,255,255,.06);
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -39,6 +40,7 @@
   --amber:#a2740e; --amber-soft:rgba(162,116,14,.10); --violet:#6b54c8;
   --chart-fill-top:rgba(11,138,120,.16); --chart-fill-bot:rgba(11,138,120,0);
   --shadow:0 1px 2px rgba(19,32,46,.06), 0 8px 24px -12px rgba(19,32,46,.14);
+  --skeleton-shine:rgba(255,255,255,.65);
   color-scheme: light;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -436,6 +438,26 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 @keyframes spin { to { transform: rotate(360deg); } }
 .placeholder { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 60px 20px; color: var(--text-dim); font-size: 13px; text-align: center; }
 .placeholder svg { width: 34px; height: 34px; stroke: var(--border); }
+
+/* SKELETON LOADING */
+.skeleton { position: relative; overflow: hidden; background: var(--surface-2); border-radius: var(--radius-sm); }
+.skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--skeleton-shine), transparent); animation: shimmer 1.5s ease-in-out infinite; }
+@keyframes shimmer { to { transform: translateX(100%); } }
+.sk-card { pointer-events: none; }
+.sk-summary { display: flex; align-items: center; gap: 9px; padding: 12px 16px; }
+.sk-icon { width: 15px; height: 15px; border-radius: 4px; flex-shrink: 0; }
+.sk-line { height: 10px; border-radius: 4px; }
+.sk-title { width: 42%; max-width: 200px; }
+.sk-metric { background: var(--surface-2); border-radius: var(--radius-sm); padding: 9px 11px; }
+.sk-metric .sk-k { width: 62%; height: 8px; margin-bottom: 8px; background: var(--surface-3); }
+.sk-metric .sk-v { width: 84%; height: 13px; background: var(--surface-3); }
+.sk-chart { height: 220px; width: 100%; border-radius: var(--radius-sm); }
+.sk-prose { padding: 4px 2px; }
+.sk-prose .sk-h { width: 34%; height: 12px; margin: 20px 0 12px; background: var(--surface-3); }
+.sk-prose .sk-h:first-child { margin-top: 4px; }
+.sk-para { margin-bottom: 16px; }
+.sk-para .sk-line { height: 11px; margin-bottom: 10px; }
 </style>
 </head>
 <body>

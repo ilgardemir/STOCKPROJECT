@@ -73,6 +73,33 @@ function finalizePartialStream() {
   _stream = null;
 }
 
+/* ── Skeleton loaders — mirror the real card/metric/prose shapes while data loads ── */
+function skMetric() {
+  return `<div class="sk-metric"><div class="skeleton sk-line sk-k"></div><div class="skeleton sk-line sk-v"></div></div>`;
+}
+function skCard(n, { chart = false, delay = 0 } = {}) {
+  const body = chart
+    ? `<div class="skeleton sk-chart"></div>`
+    : `<div class="mgrid">${Array.from({ length: n }, skMetric).join("")}</div>`;
+  return `<div class="card sk-card" style="--d:${delay}s">
+    <div class="sk-summary"><div class="skeleton sk-icon"></div><div class="skeleton sk-line sk-title"></div></div>
+    <div class="card-body">${body}</div></div>`;
+}
+function dataSkeleton() {
+  return skCard(8, { delay: 0 }) + skCard(0, { chart: true, delay: .05 }) + skCard(6, { delay: .1 }) + skCard(6, { delay: .15 });
+}
+function aiSkeleton() {
+  const line = w => `<div class="skeleton sk-line" style="width:${w}"></div>`;
+  const para = ws => `<div class="sk-para">${ws.map(line).join("")}</div>`;
+  return `<div class="sk-prose">
+    <div class="skeleton sk-line sk-h"></div>
+    ${para(["100%", "96%", "88%", "70%"])}
+    <div class="skeleton sk-line sk-h"></div>
+    ${para(["94%", "100%", "82%"])}
+    ${para(["98%", "90%", "76%", "58%"])}
+  </div>`;
+}
+
 function runAnalysis() {
   const ticker = document.getElementById("ticker").value.trim().toUpperCase();
   const btn = document.getElementById("analyzeBtn");
@@ -89,10 +116,9 @@ function runAnalysis() {
   showWorkspace();
   showProgress(0, 7, "Starting data pipeline for " + ticker);
 
-  document.getElementById("dataBody").innerHTML =
-    `<div class="placeholder"><div class="spinner"></div><span>Collecting filings, prices and quotes for ${esc(ticker)}…</span></div>`;
+  document.getElementById("dataBody").innerHTML = dataSkeleton();
   const ai = document.getElementById("aiSummary");
-  ai.className = "prose thinking"; ai.innerHTML = `<div class="spinner"></div> Analysis streams in live once the data run completes…`;
+  ai.className = "prose"; ai.innerHTML = aiSkeleton();
 
   const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(ticker));
   _es = es;
