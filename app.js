@@ -1172,9 +1172,9 @@ document.getElementById("chartModalControls").addEventListener("change", functio
   hero.insertBefore(canvas, hero.firstChild);           // first child → paints above the dot grid, below the copy
   const ctx = canvas.getContext("2d");
 
-  const BASE_WIND = 0.55;    // ambient rightward drift (px/frame @60fps)
-  const R = 150, R2 = R * R; // cursor influence radius
-  const MAX_V = 7;           // per-particle speed cap → keeps gusts tasteful, never flings
+  const BASE_WIND = 0.9;     // ambient rightward drift (px/frame @60fps)
+  const R = 170, R2 = R * R; // cursor influence radius
+  const MAX_V = 10;          // per-particle speed cap → keeps gusts tasteful, never flings
 
   let W = 0, H = 0, particles = [];
   // Cursor: position + the movement velocity that becomes the "gust".
@@ -1192,8 +1192,9 @@ document.getElementById("chartModalControls").addEventListener("change", functio
       vy: 0,
       sway: 0.15 + Math.random() * 0.35,                // gentle idle breathing so it's alive at rest
       phase: Math.random() * Math.PI * 2,
-      len: 8 + Math.random() * 26,
-      a: 0.05 + Math.random() * 0.16                     // base alpha
+      len: 12 + Math.random() * 30,
+      a: 0.12 + Math.random() * 0.22,                    // base alpha
+      heat: 0                                            // rises near the cursor, decays → a lingering wind wake
     };
   }
 
@@ -1204,7 +1205,7 @@ document.getElementById("chartModalControls").addEventListener("change", functio
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const target = Math.min(150, Math.round((W * H) / 13000));
+    const target = Math.min(220, Math.round((W * H) / 9000));
     particles = Array.from({ length: target }, () => spawn(false));
   }
 
@@ -1213,7 +1214,7 @@ document.getElementById("chartModalControls").addEventListener("change", functio
 
     ctx.clearRect(0, 0, W, H);
     ctx.lineCap = "round";
-    ctx.lineWidth = 1.1;
+    ctx.lineWidth = 1.4;
     ctx.strokeStyle = strokeColor;
 
     for (const p of particles) {
@@ -1225,11 +1226,13 @@ document.getElementById("chartModalControls").addEventListener("change", functio
         if (d2 < R2) {
           const dist = Math.sqrt(d2) + 0.001;
           const f = 1 - dist / R;                         // 1 at cursor → 0 at edge
-          const push = f * 2.2;                           // radial: part the air around the pointer
-          ax += (dx / dist) * push + cur.vx * 0.10 * f;   // + drag air along the cursor's motion
-          ay += (dy / dist) * push + cur.vy * 0.10 * f;
+          const push = f * 3.0;                           // radial: part the air around the pointer
+          ax += (dx / dist) * push + cur.vx * 0.18 * f;   // + drag air along the cursor's motion
+          ay += (dy / dist) * push + cur.vy * 0.18 * f;
+          if (f > p.heat) p.heat = f;                     // light up; lingers via the decay below
         }
       }
+      p.heat *= 0.93;                                     // wake fades a beat after the cursor passes
 
       p.vx += ax; p.vy += ay;
       // relax back toward ambient wind so the field settles when idle
@@ -1240,9 +1243,9 @@ document.getElementById("chartModalControls").addEventListener("change", functio
       if (sp > MAX_V) { p.vx *= MAX_V / sp; p.vy *= MAX_V / sp; }
 
       const nx = p.x + p.vx, ny = p.y + p.vy;
-      const tail = Math.min(p.len, 4 + sp * 6);           // faster → longer motion-blur streak
+      const tail = Math.min(p.len + p.heat * 22, 6 + sp * 7 + p.heat * 22);  // faster/gusted → longer streak
       const ang = Math.atan2(p.vy, p.vx);
-      ctx.globalAlpha = Math.min(0.5, p.a + sp * 0.06);
+      ctx.globalAlpha = Math.min(0.8, p.a + sp * 0.05 + p.heat * 0.4);
       ctx.beginPath();
       ctx.moveTo(nx - Math.cos(ang) * tail, ny - Math.sin(ang) * tail);
       ctx.lineTo(nx, ny);
