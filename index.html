@@ -55,6 +55,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 button { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
+/* Theme crossfade: only a few elements transition color by default, so a raw toggle
+   makes most of the UI snap while those few fade — reads as choppy. During a switch we
+   add .theme-anim to <html> for one transition, so every element changes color together,
+   then JS removes it so hovers/interactions aren't affected the rest of the time. */
+:root.theme-anim *, :root.theme-anim *::before, :root.theme-anim *::after {
+  transition: background-color .35s var(--ease), border-color .35s var(--ease),
+              color .35s var(--ease), fill .35s var(--ease), stroke .35s var(--ease),
+              box-shadow .35s var(--ease) !important;
+}
 
 /* HEADER */
 header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding: 0 22px; height: 58px;

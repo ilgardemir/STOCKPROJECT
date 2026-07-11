@@ -19,7 +19,17 @@ function applyTheme(t) {
 }
 (function () { let t; try { t = localStorage.getItem("squall-theme"); } catch (e) {}
   if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; applyTheme(t); })();
-document.getElementById("themeBtn").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+document.getElementById("themeBtn").onclick = () => {
+  const root = document.documentElement;
+  // Enable the one-shot uniform color crossfade only for user toggles (not initial load,
+  // which would fade in from the markup default). Removed after the transition window.
+  if (!REDUCED) {
+    root.classList.add("theme-anim");
+    clearTimeout(root._themeAnimT);
+    root._themeAnimT = setTimeout(() => root.classList.remove("theme-anim"), 420);
+  }
+  applyTheme(root.dataset.theme === "dark" ? "light" : "dark");
+};
 
 /* ════════════════ FORMATTERS ════════════════ */
 const isNum = v => v !== null && v !== undefined && typeof v === "number" && isFinite(v);
