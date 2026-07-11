@@ -42,6 +42,10 @@ function fUsd(v) { if (!isNum(v)) return "N/A"; const a = Math.abs(v);
 const fInt = v => isNum(v) ? Math.round(v).toLocaleString("en-US") : "N/A";
 const signCls = (v, inv = false) => (!isNum(v) || v === 0) ? "" : ((inv ? v < 0 : v > 0) ? "green" : "red");
 const esc = t => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Escape for a single-quoted JS string sitting inside a double-quoted HTML attribute
+// (e.g. onclick="retryAnalysis('…')") — company names may contain ' or &.
+const jsAttr = s => String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 /* ════════════════ PROGRESS ════════════════ */
@@ -60,6 +64,12 @@ function hideProgress(delay = 600) { setTimeout(() => {
 
 /* ════════════════ ANALYSIS (SSE streaming — scraper stages, then live AI tokens) ════════════════ */
 function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); }
+// Pick a random S&P 500 constituent and analyze it (list in sp500.js → window.SP500).
+function randomAnalysis() {
+  const list = window.SP500;
+  if (!Array.isArray(list) || !list.length) { quick("AAPL"); return; }
+  quick(list[Math.floor(Math.random() * list.length)]);
+}
 let _es = null;
 let _stream = null;   // { ticker, model, thinking, answer, answerStarted, done, sticky }
 
@@ -114,26 +124,30 @@ function aiSkeleton() {
 }
 
 function runAnalysis() {
-  const ticker = document.getElementById("ticker").value.trim().toUpperCase();
+  // The input now accepts a ticker OR a company name; the server resolves it and the
+  // real symbol comes back on the `result` event, at which point we re-key the session.
+  const query = document.getElementById("ticker").value.trim();
   const btn = document.getElementById("analyzeBtn");
-  if (!ticker) { showProgress(0, 7, "Enter a ticker symbol first", true); hideProgress(2200); return; }
+  if (!query) { showProgress(0, 7, "Enter a ticker or company name first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
   finalizePartialStream();
 
-  // Re-run of a ticker we already hold? Reopen it instantly, no tokens spent.
-  if (sessions[ticker] && sessions[ticker].data.aiSummary) {
-    showWorkspace(); active = ticker; renderTickerPills(); renderAll(sessions[ticker].data); return;
+  // Re-run of something we already hold (matched by ticker)? Reopen instantly, no tokens spent.
+  const direct = query.toUpperCase();
+  if (sessions[direct] && sessions[direct].data.aiSummary) {
+    showWorkspace(); active = direct; renderTickerPills(); renderAll(sessions[direct].data); return;
   }
 
+  let key = direct;   // session key; updated to the resolved ticker on `result`
   btn.disabled = true;
   showWorkspace();
-  showProgress(0, 7, "Starting data pipeline for " + ticker);
+  showProgress(0, 7, "Starting analysis for " + query);
 
   document.getElementById("dataBody").innerHTML = dataSkeleton();
   const ai = document.getElementById("aiSummary");
   ai.className = "prose"; ai.innerHTML = aiSkeleton();
 
-  const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(ticker));
+  const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(query));
   _es = es;
   let gotResult = false;
 
@@ -147,7 +161,7 @@ function runAnalysis() {
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
     showProgress(0, 7, "Error: " + msg, true);
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
-      <button class="retry-btn" onclick="retryAnalysis('${esc(ticker)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
+      <button class="retry-btn" onclick="retryAnalysis('${jsAttr(query)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
     btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(3000);
   });
@@ -156,6 +170,7 @@ function runAnalysis() {
   es.addEventListener("result", e => {
     const data = JSON.parse(e.data);
     gotResult = true;
+    key = data.ticker;   // resolved symbol — re-key so the AI-stream handlers below find the session
     sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252 };
     active = data.ticker;
     renderTickerPills();
@@ -171,11 +186,11 @@ function runAnalysis() {
 
   es.addEventListener("ai_start", e => {
     const d = JSON.parse(e.data);
-    _stream = { ticker, model: d.model, thinking: "", answer: "", answerStarted: false, done: false, sticky: true, raf: null };
+    _stream = { ticker: key, model: d.model, thinking: "", answer: "", answerStarted: false, done: false, sticky: true, raf: null };
     setModelTag(d.model);
     document.getElementById("aiModelTag")?.classList.add("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.add("streaming");
-    if (active === ticker) buildStreamShell();
+    if (active === key) buildStreamShell();
   });
 
   es.addEventListener("ai_thinking", e => pushStream("thinking", JSON.parse(e.data).t));
@@ -183,24 +198,24 @@ function runAnalysis() {
 
   es.addEventListener("ai_done", e => {
     const d = JSON.parse(e.data);
-    const sess = sessions[ticker];
+    const sess = sessions[key];
     if (sess) { sess.data.aiSummary = d.aiSummary; sess.data.aiReasoning = d.aiReasoning; sess.data.model = d.model; }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
-    if (active === ticker && sess) finalizeAiRender(sess.data);
+    if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
     es.close(); if (_es === es) _es = null;
   });
 
   es.addEventListener("ai_error", e => {
     const d = JSON.parse(e.data);
-    const sess = sessions[ticker];
+    const sess = sessions[key];
     if (sess) { sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || ""; }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
-    if (active === ticker && sess) finalizeAiRender(sess.data);
+    if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
     es.close(); if (_es === es) _es = null;
   });
@@ -223,7 +238,7 @@ function retryAnalysis(t) {
 function aiWarnHtml(d) {
   if (!d || !d.aiError) return "";
   return `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.
-    <button class="retry-btn" onclick="retryAnalysis('${esc(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
+    <button class="retry-btn" onclick="retryAnalysis('${jsAttr(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
 }
 function showAiThinking(modelId) {
   const ai = document.getElementById("aiSummary");

@@ -121,6 +121,27 @@ function validateTickerFormat(t) {
   return { ok: true };
 }
 
+/**
+ * Accepts a ticker OR a company name. Ticker-shaped input is normalized and format-checked
+ * here (fast reject); a name is sanitized to a shell-safe charset and passed through for the
+ * Python scraper to resolve. Returns { ok, query } or { ok:false, reason, invalid_ticker }.
+ */
+function sanitizeQuery(raw) {
+  const q = (raw || "").trim();
+  if (!q) return { ok: false, reason: "Enter a ticker symbol or company name." };
+
+  if (!/\s/.test(q) && /^\^?[A-Za-z][A-Za-z0-9]{0,5}([.\-][A-Za-z0-9]{1,4})?$/.test(q)) {
+    const t = q.toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
+    const fmt = validateTickerFormat(t);
+    return fmt.ok ? { ok: true, query: t } : { ok: false, reason: fmt.reason, invalid_ticker: true };
+  }
+  // Name query: keep letters/digits/space + a few name chars; drop shell-unsafe chars.
+  const name = q.replace(/[^A-Za-z0-9 .,&'-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  if (name.replace(/[^A-Za-z0-9]/g, "").length < 2)
+    return { ok: false, reason: `"${q}" isn't a valid ticker or company name.`, invalid_ticker: true };
+  return { ok: true, query: name };
+}
+
 // Static file serving
 const PUBLIC_DIR = __dirname;
 const MIME = {
@@ -156,9 +177,8 @@ http.createServer(async (req, res) => {
 
   // ── STREAMING ANALYSIS (Server-Sent Events) ─────────────────────────────────
   if (req.method === "GET" && req.url.startsWith("/analyze-stream")) {
-    const url    = new URL(req.url, `http://${req.headers.host}`);
-    const raw    = url.searchParams.get("ticker") || "";
-    const ticker = raw.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const raw = url.searchParams.get("ticker") || "";
 
     res.writeHead(200, {
       "Content-Type":  "text/event-stream",
@@ -169,13 +189,14 @@ http.createServer(async (req, res) => {
     const send = (event, data) =>
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-    if (!ticker) { send("error", { error: "ticker is required." }); res.end(); return; }
-    const fmt = validateTickerFormat(ticker);
-    if (!fmt.ok) { send("error", { error: fmt.reason, invalid_ticker: true }); res.end(); return; }
+    const s = sanitizeQuery(raw);
+    if (!s.ok) { send("error", { error: s.reason, invalid_ticker: s.invalid_ticker }); res.end(); return; }
+    const query = s.query;
 
     send("progress", { stage: 0, total: STAGE_TOTAL, label: "Starting data pipeline" });
 
-    const py = spawn(PYTHON, [SCRAPER_PATH, ticker], { env: process.env });
+    // spawn() with an args array runs without a shell, so a multi-word name is one safe argv.
+    const py = spawn(PYTHON, [SCRAPER_PATH, query], { env: process.env });
     let stdout = "", stderrTail = "", buf = "";
 
     py.stderr.on("data", chunk => {
@@ -315,19 +336,15 @@ http.createServer(async (req, res) => {
     req.on("end", async () => {
       try {
         const { ticker } = JSON.parse(body);
-        if (!ticker) {
+        const s = sanitizeQuery(ticker);
+        if (!s.ok) {
           res.writeHead(400, {"Content-Type":"application/json"});
-          res.end(JSON.stringify({ error: "ticker is required." })); return;
+          res.end(JSON.stringify({ error: s.reason, invalid_ticker: s.invalid_ticker })); return;
         }
-        const cleanTicker = ticker.toUpperCase().trim().replace(/[^A-Z0-9.^-]/g, "");
-        const fmt = validateTickerFormat(cleanTicker);
-        if (!fmt.ok) {
-          res.writeHead(400, {"Content-Type":"application/json"});
-          res.end(JSON.stringify({ error: fmt.reason, invalid_ticker: true })); return;
-        }
-
+        // Quoted so a multi-word name stays one argument; sanitizeQuery already stripped
+        // shell-unsafe characters (no quotes/backticks/$), so this cannot break out.
         exec(
-          `${PYTHON} "${SCRAPER_PATH}" ${cleanTicker}`,
+          `${PYTHON} "${SCRAPER_PATH}" "${s.query}"`,
           { timeout: 150000, maxBuffer: 1024 * 1024 * 10 },
           async (err, stdout, stderr) => {
             if (!stdout || !stdout.trim()) {

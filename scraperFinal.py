@@ -204,16 +204,136 @@ def _stmt_series(df: pd.DataFrame, *cols, n=5) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. SEC EDGAR  (unchanged from v1)
 # ══════════════════════════════════════════════════════════════════════════════
-def get_cik_from_ticker(ticker):
+_SEC_TICKERS_CACHE = None
+def _load_sec_tickers():
+    """SEC's ticker↔name↔CIK directory (all ~10k SEC-registered filers), fetched once."""
+    global _SEC_TICKERS_CACHE
+    if _SEC_TICKERS_CACHE is not None:
+        return _SEC_TICKERS_CACHE
     try:
         r = requests.get("https://www.sec.gov/files/company_tickers.json",
                          headers={"User-Agent": USER_AGENT}, timeout=10)
         r.raise_for_status()
-        for val in r.json().values():
-            if val["ticker"].lower() == ticker.lower():
-                return str(val["cik_str"]).zfill(10)
+        _SEC_TICKERS_CACHE = list(r.json().values())
+    except:
+        _SEC_TICKERS_CACHE = []
+    return _SEC_TICKERS_CACHE
+
+def get_cik_from_ticker(ticker):
+    for val in _load_sec_tickers():
+        if str(val.get("ticker", "")).lower() == ticker.lower():
+            return str(val["cik_str"]).zfill(10)
+    return None
+
+# Corporate suffixes stripped before name matching so "Apple" ≈ "Apple Inc."
+_NAME_STOP = re.compile(
+    r"\b(inc|incorporated|corp|corporation|co|company|companies|ltd|limited|plc|"
+    r"holdings|holding|group|the|sa|nv|ag|lp|llc|class|cl|common|stock|new)\b", re.I)
+def _norm_name(s):
+    s = _NAME_STOP.sub(" ", (s or "").lower())
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+_TICKER_RE = re.compile(r"^\^?[A-Za-z][A-Za-z0-9]{0,5}([.\-][A-Za-z0-9]{1,4})?$")
+
+_SEC_SET_CACHE = None
+def _sec_ticker_set():
+    """Set of known SEC symbols (upper, dot→hyphen) for fast membership tests."""
+    global _SEC_SET_CACHE
+    if _SEC_SET_CACHE is None:
+        _SEC_SET_CACHE = {str(v.get("ticker", "")).upper().replace(".", "-")
+                          for v in _load_sec_tickers() if v.get("ticker")}
+    return _SEC_SET_CACHE
+
+def _best_name_match(query, up=None):
+    """Best company-name match in the SEC directory. Returns (ticker, kind) where
+    kind is 'exact' | 'prefix' | 'token', or None. Prefix rules require len>=4 so
+    2–3 char inputs match only exactly/by token."""
+    nq = _norm_name(query)
+    if not nq:
         return None
-    except: return None
+    qset = set(nq.split())
+    best, best_score, best_kind = None, 0.0, None
+    for val in _load_sec_tickers():
+        title = _norm_name(val.get("title", ""))
+        if not title:
+            continue
+        if title == nq:                                    score, kind = 100, "exact"
+        elif len(nq) >= 4 and title.startswith(nq):        score, kind = 84 - len(title) * 0.02, "prefix"   # "micro"→microsoft
+        elif len(title) >= 4 and len(nq) >= 4 and nq.startswith(title):
+                                                           score, kind = 80 - len(nq) * 0.02, "prefix"      # "tesla motors"→tesla
+        elif qset and qset.issubset(set(title.split())):   score, kind = 55 + len(qset) * 3, "token"        # all query words present
+        else:                                              score, kind = 0, None
+        if score > 0:
+            score -= len(str(val.get("ticker", ""))) * 0.05   # tie-break: prefer simpler symbols
+            # If this company's ticker is exactly what was typed, it's almost certainly the
+            # intended one — lifts the famous filer over an obscure same-prefix name
+            # (e.g. "Meta"→META not a shorter "meta…" microcap).
+            if up and str(val.get("ticker", "")).upper().replace(".", "-") == up:
+                score += 10
+        if score > best_score:
+            best, best_score, best_kind = val, score, kind
+    if best and best_score >= 30:
+        return str(best["ticker"]).upper().replace(".", "-"), best_kind
+    return None
+
+def _yahoo_search_symbol(query):
+    """Yahoo's search knows brand/colloquial names the SEC registrant list doesn't
+    (e.g. 'Google'→GOOGL, 'Facebook'→META). Best-effort; never raises."""
+    try:
+        from yahooquery import search
+        res = search(query)
+        quotes = res.get("quotes", []) if isinstance(res, dict) else []
+        for q in quotes:
+            if q.get("symbol") and (q.get("quoteType") or "").upper() in ("EQUITY", "ETF", "INDEX", "MUTUALFUND"):
+                return str(q["symbol"]).upper()
+        if quotes and quotes[0].get("symbol"):
+            return str(quotes[0]["symbol"]).upper()
+    except Exception:
+        pass
+    return None
+
+def resolve_query(query):
+    """Turn a user query (ticker OR company name) into a ticker symbol.
+    Returns (ticker, None) on success or (None, message) if nothing matches."""
+    q = (query or "").strip()
+    if not q:
+        return None, "Enter a ticker symbol or company name."
+    tickerish = " " not in q and bool(_TICKER_RE.match(q))
+    up = q.upper().replace(".", "-")
+    is_symbol = tickerish and up in _sec_ticker_set()
+
+    # 1) All-caps input that is a real known symbol → trust it (AAPL, GM, GOOGL).
+    if is_symbol and q == q.upper():
+        return up, None
+
+    nm = _best_name_match(q, up)   # (ticker, kind) or None
+
+    # 2) A strong name *prefix* match is the real company (Ford→F, Amazon→AMZN) — even
+    #    when the typed string happens to be another company's ticker (FORD=Forward Ind.).
+    if nm and nm[1] == "prefix":
+        return nm[0], None
+
+    # 3) A known symbol beats an *exact/obscure* short-name match (Meta→META not MTVA,
+    #    cat→CAT not TC, ge→GE) and covers bare lowercase symbols (aapl, ibm).
+    if is_symbol:
+        return up, None
+
+    # 4) Otherwise take the exact/token name match (Apple→AAPL, Alphabet→GOOG, Visa→V).
+    if nm:
+        return nm[0], None
+
+    # 5) Colloquial/brand names absent from SEC registrant titles (Google→GOOGL, Facebook→META).
+    sym = _yahoo_search_symbol(q)
+    if sym:
+        return sym, None
+
+    # 6) Last resort: a ticker-shaped string not in the SEC list (ETFs/indices: SPY, QQQ).
+    if tickerish:
+        return up, None
+
+    return None, (f"Couldn't find a company matching '{query}'. "
+                  "Try its ticker symbol, or check the spelling.")
 
 def get_company_facts(cik):
     try:
@@ -648,9 +768,15 @@ def fetch_intraday_data(yqdata: YQData) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 # 10. MAIN ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
-def generate_analysis_payload(ticker: str) -> dict:
+def generate_analysis_payload(query: str) -> dict:
     def stage(k: int, label: str):
         print(f"STAGE|{k}|7|{label}", file=sys.stderr, flush=True)
+
+    # ── STAGE 0: resolve ticker-or-name to a symbol ──────────────────────────
+    stage(0, "Resolving company")
+    ticker, resolve_err = resolve_query(query)
+    if resolve_err:
+        return {"error": resolve_err, "invalid_ticker": True, "ticker": query}
 
     # ── STAGE 1: SEC EDGAR ───────────────────────────────────────────────────
     stage(1, "Querying SEC EDGAR filings")
@@ -1159,8 +1285,9 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    t = sys.argv[1].upper() if len(sys.argv) > 1 else "AAPL"
+    # argv[1] may be a ticker OR a company name (possibly multi-word / quoted).
+    q = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else "AAPL"
     try:
-        print(json.dumps(generate_analysis_payload(t), indent=2))
+        print(json.dumps(generate_analysis_payload(q), indent=2))
     except Exception as e:
-        print(json.dumps({"error": str(e), "ticker": t}))
+        print(json.dumps({"error": str(e), "ticker": q}))
