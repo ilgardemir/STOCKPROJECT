@@ -1156,3 +1156,129 @@ document.getElementById("chartModalControls").addEventListener("change", functio
   if (src) { src.checked = e.target.checked; src.closest(".toggle")?.classList.toggle("on", e.target.checked); }
   drawChart();
 });
+
+/* ════════════════ HERO WIND FIELD ════════════════
+   Passive, cursor-reactive wind behind the landing hero. Short accent-colored streaks
+   drift left→right (matching .hero-streaks); moving the cursor drags nearby streaks along
+   its path and parts them around it, then the field relaxes back to ambient drift. */
+(function () {
+  if (REDUCED) return;                                  // honor prefers-reduced-motion — no ambient motion
+  const hero = document.getElementById("hero");
+  if (!hero || !window.requestAnimationFrame) return;
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "wind-field";
+  canvas.setAttribute("aria-hidden", "true");
+  hero.insertBefore(canvas, hero.firstChild);           // first child → paints above the dot grid, below the copy
+  const ctx = canvas.getContext("2d");
+
+  const BASE_WIND = 0.55;    // ambient rightward drift (px/frame @60fps)
+  const R = 150, R2 = R * R; // cursor influence radius
+  const MAX_V = 7;           // per-particle speed cap → keeps gusts tasteful, never flings
+
+  let W = 0, H = 0, particles = [];
+  // Cursor: position + the movement velocity that becomes the "gust".
+  const cur = { x: -9999, y: -9999, vx: 0, vy: 0, active: false };
+
+  const readAccent = () =>
+    getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#3fd0b6";
+  let strokeColor = readAccent();
+
+  function spawn(fromLeft) {
+    return {
+      x: fromLeft ? -20 : Math.random() * W,
+      y: Math.random() * H,
+      vx: BASE_WIND * (0.6 + Math.random() * 0.9),
+      vy: 0,
+      sway: 0.15 + Math.random() * 0.35,                // gentle idle breathing so it's alive at rest
+      phase: Math.random() * Math.PI * 2,
+      len: 8 + Math.random() * 26,
+      a: 0.05 + Math.random() * 0.16                     // base alpha
+    };
+  }
+
+  function resize() {
+    const r = hero.getBoundingClientRect();
+    W = r.width; H = r.height;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const target = Math.min(150, Math.round((W * H) / 13000));
+    particles = Array.from({ length: target }, () => spawn(false));
+  }
+
+  function step() {
+    cur.vx *= 0.86; cur.vy *= 0.86;                      // gusts fade once the cursor stops moving
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = strokeColor;
+
+    for (const p of particles) {
+      p.phase += 0.01;
+      let ax = 0, ay = Math.sin(p.phase) * p.sway * 0.15;
+
+      if (cur.active) {
+        const dx = p.x - cur.x, dy = p.y - cur.y, d2 = dx * dx + dy * dy;
+        if (d2 < R2) {
+          const dist = Math.sqrt(d2) + 0.001;
+          const f = 1 - dist / R;                         // 1 at cursor → 0 at edge
+          const push = f * 2.2;                           // radial: part the air around the pointer
+          ax += (dx / dist) * push + cur.vx * 0.10 * f;   // + drag air along the cursor's motion
+          ay += (dy / dist) * push + cur.vy * 0.10 * f;
+        }
+      }
+
+      p.vx += ax; p.vy += ay;
+      // relax back toward ambient wind so the field settles when idle
+      p.vx += (BASE_WIND * (0.6 + p.sway) - p.vx) * 0.04;
+      p.vy += -p.vy * 0.06;
+
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > MAX_V) { p.vx *= MAX_V / sp; p.vy *= MAX_V / sp; }
+
+      const nx = p.x + p.vx, ny = p.y + p.vy;
+      const tail = Math.min(p.len, 4 + sp * 6);           // faster → longer motion-blur streak
+      const ang = Math.atan2(p.vy, p.vx);
+      ctx.globalAlpha = Math.min(0.5, p.a + sp * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(nx - Math.cos(ang) * tail, ny - Math.sin(ang) * tail);
+      ctx.lineTo(nx, ny);
+      ctx.stroke();
+
+      p.x = nx; p.y = ny;
+      if (p.x > W + 30 || p.y < -40 || p.y > H + 40) Object.assign(p, spawn(true));
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  let running = false;
+  function loop() {
+    if (hero.style.display === "none") { running = false; return; }   // paused while workspace is up
+    step();
+    requestAnimationFrame(loop);
+  }
+  function start() { if (!running) { running = true; strokeColor = readAccent(); requestAnimationFrame(loop); } }
+
+  hero.addEventListener("pointermove", e => {
+    const r = hero.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    if (cur.active) {                                     // derive gust from movement, clamped so fast flicks don't explode
+      cur.vx = Math.max(-40, Math.min(40, x - cur.x));
+      cur.vy = Math.max(-40, Math.min(40, y - cur.y));
+    }
+    cur.x = x; cur.y = y; cur.active = true;
+  });
+  hero.addEventListener("pointerleave", () => { cur.active = false; });
+
+  window.addEventListener("resize", resize);
+  document.getElementById("themeBtn").addEventListener("click", () => { strokeColor = readAccent(); });
+  // Resume when the hero is shown again (goHome flips display back on).
+  new MutationObserver(() => { if (hero.style.display !== "none") start(); })
+    .observe(hero, { attributes: true, attributeFilter: ["style"] });
+
+  resize();
+  start();
+})();

@@ -541,6 +541,9 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .hero-streaks i:nth-child(2) { top: 58%; width: 90px; animation-duration: 12s; animation-delay: 4s; }
 .hero-streaks i:nth-child(3) { top: 80%; width: 200px; animation-duration: 7.5s; animation-delay: 6.5s; }
 @keyframes streakBy { 0% { left: -220px; opacity: 0; } 5% { opacity: .3; } 18% { left: 104%; opacity: .12; } 18.5%, 100% { left: 104%; opacity: 0; } }
+/* Cursor-reactive wind field (canvas, injected by app.js). Ambient streaks drift like
+   .hero-streaks and part around the cursor as it moves. Above the dot grid, below the copy. */
+#hero .wind-field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
 /* Wordmark — ambient gust every ~11s (hover still triggers the fast one) */
 .wordmark .wind path { animation: gustIdle 11s var(--ease) infinite; }
