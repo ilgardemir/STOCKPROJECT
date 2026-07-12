@@ -5,7 +5,9 @@ Sources: yahooquery (market data) · SEC EDGAR (filings) · FMP (optional cross-
 """
 
 from yahooquery import Ticker as YQTicker
-import requests, json, re, sys, os, math
+import requests, json, re, sys, os, math, time
+from html import unescape
+from html.parser import HTMLParser
 import pandas as pd
 import numpy as np
 import warnings
@@ -19,7 +21,7 @@ TODAY_ISO = TODAY.strftime("%Y-%m-%d")
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 USER_AGENT  = os.getenv("SEC_USER_AGENT", "BasementQuantProject ilgardemir2@gmail.com")
-SEC_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+SEC_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")   # optional; set to enable FMP cross-checks
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -204,19 +206,52 @@ def _stmt_series(df: pd.DataFrame, *cols, n=5) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. SEC EDGAR  (unchanged from v1)
 # ══════════════════════════════════════════════════════════════════════════════
+SEC_DIAGNOSTICS = []
+
+def _sec_diag(step, url, ok, status=None, error=None):
+    """Record actionable EDGAR status without corrupting the JSON on stdout."""
+    item = {"step": step, "ok": bool(ok), "url": url}
+    if status is not None: item["status"] = status
+    if error: item["error"] = str(error)[:300]
+    SEC_DIAGNOSTICS.append(item)
+    if not ok:
+        print(f"SEC_ERROR|{step}|{status or 'request'}|{item.get('error', '')}",
+              file=sys.stderr, flush=True)
+
+def _sec_get(url, step, timeout=15, as_json=False):
+    """GET an SEC resource with bounded retries for transient failures only."""
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=SEC_HEADERS, timeout=timeout)
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                if attempt < 2:
+                    time.sleep(0.75 * (2 ** attempt))
+                    continue
+            r.raise_for_status()
+            result = r.json() if as_json else r.text
+            _sec_diag(step, url, True, r.status_code)
+            return result
+        except (requests.RequestException, ValueError) as exc:
+            if attempt < 2 and isinstance(exc, requests.RequestException):
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                if status == 429 or (status is not None and 500 <= status < 600):
+                    time.sleep(0.75 * (2 ** attempt))
+                    continue
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            _sec_diag(step, url, False, status, exc)
+            return None
+    return None
+
 _SEC_TICKERS_CACHE = None
 def _load_sec_tickers():
     """SEC's ticker↔name↔CIK directory (all ~10k SEC-registered filers), fetched once."""
     global _SEC_TICKERS_CACHE
     if _SEC_TICKERS_CACHE is not None:
         return _SEC_TICKERS_CACHE
-    try:
-        r = requests.get("https://www.sec.gov/files/company_tickers.json",
-                         headers={"User-Agent": USER_AGENT}, timeout=10)
-        r.raise_for_status()
-        _SEC_TICKERS_CACHE = list(r.json().values())
-    except:
-        _SEC_TICKERS_CACHE = []
+    url = "https://www.sec.gov/files/company_tickers.json"
+    payload = _sec_get(url, "ticker_directory", timeout=10, as_json=True)
+    _SEC_TICKERS_CACHE = list(payload.values()) if isinstance(payload, dict) else []
     return _SEC_TICKERS_CACHE
 
 def get_cik_from_ticker(ticker):
@@ -336,41 +371,80 @@ def resolve_query(query):
                   "Try its ticker symbol, or check the spelling.")
 
 def get_company_facts(cik):
-    try:
-        r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
-                         headers=SEC_HEADERS, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except: return None
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    payload = _sec_get(url, "companyfacts", timeout=15, as_json=True)
+    return payload if isinstance(payload, dict) else None
 
 def get_recent_filings(cik, limit=50):
     try:
-        r = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
-                         headers={"User-Agent": USER_AGENT}, timeout=10)
-        r.raise_for_status()
-        recent = r.json().get("filings", {}).get("recent", {})
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        payload = _sec_get(url, "submissions", timeout=10, as_json=True)
+        recent = (payload or {}).get("filings", {}).get("recent", {})
         pdocs  = recent.get("primaryDocument", [])
         return [{"form": recent["form"][i], "filing_date": recent["filingDate"][i],
                  "accession_number": recent["accessionNumber"][i],
                  "primary_document": pdocs[i] if i < len(pdocs) else None}
                 for i in range(min(limit, len(recent.get("accessionNumber", []))))]
-    except: return []
+    except (KeyError, TypeError, IndexError, ValueError) as exc:
+        _sec_diag("submissions_parse", f"CIK{cik}", False, error=exc)
+        return []
 
-def extract_mda_text(cik, accession_number):
-    try:
-        clean_acc = accession_number.replace("-", "")
-        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
-               f"{clean_acc}/{accession_number}.txt")
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-        r.raise_for_status()
-        match = re.search(
-            r"(?:ITEM\s+7\.|ITEM\s+2\.)\s*MANAGEMENT[\s\S]*?DISCUSSION AND ANALYSIS.*?(?=ITEM\s+\d+\.)",
-            r.text, re.IGNORECASE)
-        if match:
-            clean = re.sub(r"<[^>]+>", " ", match.group(0))
-            return re.sub(r"\s+", " ", clean).strip()[:3000]
-        return "MD&A section not found."
-    except: return "Failed to fetch MD&A."
+class _VisibleTextParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self._skip = [], 0
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in ("script", "style", "noscript"): self._skip += 1
+        elif not self._skip and tag.lower() in ("p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4"):
+            self.parts.append("\n")
+    def handle_endtag(self, tag):
+        if tag.lower() in ("script", "style", "noscript") and self._skip: self._skip -= 1
+        elif not self._skip and tag.lower() in ("p", "div", "tr", "li"):
+            self.parts.append("\n")
+    def handle_data(self, data):
+        if not self._skip: self.parts.append(data)
+
+def extract_mda_text(cik, accession_number, primary_document=None):
+    """Extract the real Item 7 from the primary 10-K, avoiding TOC matches."""
+    clean_acc = accession_number.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{clean_acc}"
+    urls = []
+    if primary_document:
+        urls.append((f"{base}/{primary_document}", "mda_primary_document"))
+    urls.append((f"{base}/{accession_number}.txt", "mda_submission_fallback"))
+
+    start_re = re.compile(
+        r"\bitem\s+7\s*[.\-:–—]?\s*management(?:['’]s)?\s+discussion\s+and\s+analysis",
+        re.IGNORECASE)
+    end_re = re.compile(r"\bitem\s+(?:7a|8)\s*[.\-:–—]", re.IGNORECASE)
+
+    for url, step in urls:
+        raw = _sec_get(url, step, timeout=25)
+        if not raw: continue
+        if "<" in raw and ">" in raw:
+            parser = _VisibleTextParser()
+            try:
+                parser.feed(raw)
+                text = " ".join(unescape("".join(parser.parts)).split())
+            except (ValueError, TypeError) as exc:
+                _sec_diag("mda_html_parse", url, False, error=exc)
+                text = " ".join(unescape(re.sub(r"<[^>]+>", " ", raw)).split())
+        else:
+            text = " ".join(unescape(raw).split())
+
+        candidates = []
+        for start in start_re.finditer(text):
+            end = end_re.search(text, start.end())
+            if end:
+                section = text[start.start():end.start()].strip()
+                if 1000 <= len(section) <= 250000:
+                    candidates.append(section)
+        if candidates:
+            section = max(candidates, key=len)
+            _sec_diag("mda_extract", url, True, 200)
+            return section[:3000]
+        _sec_diag("mda_extract", url, False, error="No plausible Item 7 section found")
+    return "MD&A section not found."
 
 def parse_8k_items(cik, accession_number):
     try:
@@ -405,11 +479,39 @@ def safe_extract_sec(facts, namespace, concept):
         units    = facts["facts"][namespace][concept]["units"]
         unit_key = "USD" if "USD" in units else (list(units.keys())[0] if units else None)
         if not unit_key: return None, []
-        annual = sorted([x for x in units[unit_key] if x.get("form") == "10-K"],
-                        key=lambda x: x.get("end", ""), reverse=True)
-        if not annual: return None, []
-        return annual[0].get("val"), [x.get("val") for x in annual[:5]]
-    except: return None, []
+        annual = [x for x in units[unit_key]
+                  if x.get("form") in ("10-K", "10-K/A")
+                  and x.get("end") and x.get("val") is not None]
+        fy = [x for x in annual if x.get("fp") == "FY"]
+        if fy: annual = fy
+
+        # Duration concepts can include a Q4-only context inside a 10-K. Keep
+        # contexts matching the SEC's annual frame definition (365 days ±30).
+        durations = []
+        for x in annual:
+            if not x.get("start"):
+                durations.append(x); continue
+            try:
+                days = (datetime.strptime(x["end"], "%Y-%m-%d") -
+                        datetime.strptime(x["start"], "%Y-%m-%d")).days
+                if 335 <= days <= 395: durations.append(x)
+            except (TypeError, ValueError):
+                continue
+        if durations: annual = durations
+
+        # One period may appear in several later filings. Deduplicate by period
+        # end and prefer the latest filed value so restatements win.
+        by_end = {}
+        for x in annual:
+            current = by_end.get(x["end"])
+            if current is None or x.get("filed", "") > current.get("filed", ""):
+                by_end[x["end"]] = x
+        distinct = sorted(by_end.values(), key=lambda x: x["end"], reverse=True)
+        if not distinct: return None, []
+        return distinct[0].get("val"), [x.get("val") for x in distinct[:5]]
+    except (KeyError, TypeError, ValueError) as exc:
+        _sec_diag("xbrl_select", f"{namespace}:{concept}", False, error=exc)
+        return None, []
 
 def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs"):
     if not filings: return None
@@ -769,6 +871,8 @@ def fetch_intraday_data(yqdata: YQData) -> pd.DataFrame:
 # 10. MAIN ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_analysis_payload(query: str) -> dict:
+    SEC_DIAGNOSTICS.clear()
+
     def stage(k: int, label: str):
         print(f"STAGE|{k}|7|{label}", file=sys.stderr, flush=True)
 
@@ -795,20 +899,25 @@ def generate_analysis_payload(query: str) -> dict:
         def sec_val(ns, concept):
             return safe_extract_sec(facts, ns, concept) if facts else (None, [])
 
-        sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
-        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
+        sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
+        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
+        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "SalesRevenueNet")
         sec_ni_val,     _  = sec_val("us-gaap", "NetIncomeLoss")
         sec_assets_val, _  = sec_val("us-gaap", "Assets")
         sec_liab_val,   _  = sec_val("us-gaap", "Liabilities")
         sec_equity_val, _  = sec_val("us-gaap", "StockholdersEquity")
+        if sec_equity_val is None:
+            sec_equity_val, _ = sec_val("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
         sec_ocf_val,    _  = sec_val("us-gaap", "NetCashProvidedByUsedInOperatingActivities")
 
         if len(sec_rev_hist) >= 3 and sec_rev_hist[2] and sec_rev_hist[2] > 0:
             try: sec_rev_cagr = ((sec_rev_hist[0] / sec_rev_hist[2]) ** 0.5) - 1
             except: pass
 
-        latest_10k = next((f["accession_number"] for f in filings if f["form"] == "10-K"), None)
-        if latest_10k: mda_text = extract_mda_text(cik, latest_10k)
+        latest_10k = next((f for f in filings if f["form"] in ("10-K", "10-K/A")), None)
+        if latest_10k:
+            mda_text = extract_mda_text(cik, latest_10k["accession_number"],
+                                        latest_10k.get("primary_document"))
 
         cutoff = TODAY - timedelta(days=90)
         for f in filings:
@@ -1022,6 +1131,11 @@ def generate_analysis_payload(query: str) -> dict:
 
     # ── Algorithmic flags ─────────────────────────────────────────────────────
     flags, data_warnings = [], []
+    for item in SEC_DIAGNOSTICS:
+        if not item.get("ok"):
+            data_warnings.append(
+                f"SEC {item.get('step', 'request')} unavailable"
+                + (f" (HTTP {item['status']})" if item.get("status") else ""))
 
     if is_valid(pe_trail, -1000, 10000):
         if pe_trail <= 0: data_warnings.append("P/E ≤ 0: unprofitable or large one-time item.")
@@ -1229,6 +1343,7 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
         "company_name":      company_name,
         "today":             TODAY_STR,
         "sec_available":     sec_available,
+        "sec_diagnostics":   SEC_DIAGNOSTICS,
         "fmp_available":     fmp is not None,
         "raw_data": {
             "valuation":        {"pe_trailing": safe_float(pe_trail), "pe_forward": safe_float(pe_fwd),
@@ -1283,11 +1398,3 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    # argv[1] may be a ticker OR a company name (possibly multi-word / quoted).
-    q = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else "AAPL"
-    try:
-        print(json.dumps(generate_analysis_payload(q), indent=2))
-    except Exception as e:
-        print(json.dumps({"error": str(e), "ticker": q}))
