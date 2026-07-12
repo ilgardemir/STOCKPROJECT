@@ -1188,7 +1188,7 @@ document.getElementById("chartModalControls").addEventListener("change", functio
   const ctx = canvas.getContext("2d");
 
   const BASE_WIND = 0.9;     // ambient rightward drift (px/frame @60fps)
-  const R = 170, R2 = R * R; // cursor influence radius
+  const R = 110, R2 = R * R; // cursor influence radius
   const MAX_V = 10;          // per-particle speed cap → keeps gusts tasteful, never flings
 
   let W = 0, H = 0, particles = [];
@@ -1241,7 +1241,7 @@ document.getElementById("chartModalControls").addEventListener("change", functio
         if (d2 < R2) {
           const dist = Math.sqrt(d2) + 0.001;
           const f = 1 - dist / R;                         // 1 at cursor → 0 at edge
-          const push = f * 3.0;                           // radial: part the air around the pointer
+          const push = f * 1.5;                           // radial: part the air around the pointer
           ax += (dx / dist) * push + cur.vx * 0.18 * f;   // + drag air along the cursor's motion
           ay += (dy / dist) * push + cur.vy * 0.18 * f;
           if (f > p.heat) p.heat = f;                     // light up; lingers via the decay below
