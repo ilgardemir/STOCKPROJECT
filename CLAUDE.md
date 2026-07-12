@@ -71,3 +71,4 @@ No framework. `index.html` is markup + CSS; `app.js` is all behavior. Key struct
 - **stdout is sacred in the scraper** — any stray `print()` to stdout corrupts the JSON the server parses. Diagnostic output must go to stderr.
 - The product is branded "Squall" in code/UI even though the repo/dir is "STOCKPROJECT".
 - Deploys to Railway via the Dockerfile (single image running Node + Python 3).
+- **Commit and push each completed change automatically** — don't wait to be asked. After finishing a discrete change, `git add` + `git commit` (descriptive message + Co-Authored-By trailer) then `git push`. Committing directly to `main` is fine; a collaborator shares the repo, so prompt pushes keep both clones and Railway in sync.
