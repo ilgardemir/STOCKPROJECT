@@ -85,13 +85,99 @@ function prettyModel(id) {
 function setModelTag(id) { const el = document.getElementById("aiModelTag"); if (el && id) el.textContent = prettyModel(id); }
 fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() => {});
 
-// Search typeahead — fill the native <datalist> from the S&P 500 list (sp500.js).
-// Typing "app" surfaces "AAPL — Apple Inc."; picking a suggestion inserts the ticker.
+/* ── Search typeahead — custom in-site dropdown over the S&P 500 list (sp500.js) ──
+   Records are lowercased once at boot; each keystroke is a single linear scan over
+   503 entries with ranked buckets (ticker prefix → name prefix → substring), capped
+   at 8 rows and painted with one innerHTML write — no per-item DOM churn. */
 (function () {
-  const dl = document.getElementById("tickerList"), names = window.SP500_NAMES;
-  if (!dl || !names) return;
-  dl.innerHTML = Object.keys(names)
-    .map(sym => `<option value="${sym}" label="${esc(names[sym])}"></option>`).join("");
+  const input = document.getElementById("ticker"), box = document.getElementById("tickerSuggest");
+  const names = window.SP500_NAMES;
+  if (!input || !box || !names) return;
+
+  const REC = Object.keys(names).map(sym =>
+    ({ sym, name: names[sym], s: sym.toLowerCase(), n: names[sym].toLowerCase() }));
+  const MAX = 8;
+  let items = [], activeI = -1;
+
+  function search(q) {
+    const symPre = [], namePre = [], sub = [];
+    for (const r of REC) {
+      if (r.s.startsWith(q)) { if (symPre.length < MAX) symPre.push(r); }
+      else if (r.n.startsWith(q) || r.n.includes(" " + q)) { if (namePre.length < MAX) namePre.push(r); }
+      else if (r.s.includes(q) || r.n.includes(q)) { if (sub.length < MAX) sub.push(r); }
+      if (symPre.length >= MAX) break;   // top bucket full — nothing below can outrank it
+    }
+    return symPre.concat(namePre, sub).slice(0, MAX);
+  }
+
+  // Bold the matched run (search is case-insensitive; render from the original casing).
+  function hi(text, lower, q) {
+    const i = lower.indexOf(q);
+    if (i < 0) return esc(text);
+    return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + q.length)) + "</mark>" + esc(text.slice(i + q.length));
+  }
+
+  function close() {
+    box.classList.remove("open"); box.innerHTML = "";
+    input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant");
+    items = []; activeI = -1;
+  }
+
+  function render(q) {
+    items = search(q); activeI = -1;
+    if (!items.length) { close(); return; }
+    box.innerHTML = items.map((r, i) =>
+      `<div class="sug" id="sug-${i}" role="option" data-i="${i}">
+        <span class="sym">${hi(r.sym, r.s, q)}</span><span class="nm">${hi(r.name, r.n, q)}</span>
+      </div>`).join("");
+    box.classList.add("open");
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  function setActive(i) {
+    activeI = i;
+    box.querySelectorAll(".sug").forEach((el, j) => el.classList.toggle("active", j === i));
+    if (i >= 0) {
+      input.setAttribute("aria-activedescendant", "sug-" + i);
+      box.children[i].scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  }
+
+  function pick(i) {
+    if (i < 0 || i >= items.length) return;
+    input.value = items[i].sym;
+    close();
+    runAnalysis();
+  }
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    if (q.length < 1) { close(); return; }
+    render(q);
+  });
+
+  input.addEventListener("keydown", e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!items.length) { const q = input.value.trim().toLowerCase(); if (q) render(q); if (!items.length) return; }
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setActive((activeI + d + items.length) % items.length);
+    } else if (e.key === "Enter") {
+      // With a highlighted row, Enter adopts that ticker; the form submit then runs it.
+      if (activeI >= 0) input.value = items[activeI].sym;
+      close();
+    } else if (e.key === "Escape") {
+      if (items.length) { e.preventDefault(); close(); }
+    } else if (e.key === "Tab") close();
+  });
+
+  // pointerdown + preventDefault keeps focus in the input (no blur) while still firing click.
+  box.addEventListener("pointerdown", e => e.preventDefault());
+  box.addEventListener("click", e => {
+    const el = e.target.closest(".sug");
+    if (el) pick(+el.dataset.i);
+  });
+  input.addEventListener("blur", close);
 })();
 
 function finalizePartialStream() {
