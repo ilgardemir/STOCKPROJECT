@@ -85,6 +85,15 @@ function prettyModel(id) {
 function setModelTag(id) { const el = document.getElementById("aiModelTag"); if (el && id) el.textContent = prettyModel(id); }
 fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() => {});
 
+// Search typeahead — fill the native <datalist> from the S&P 500 list (sp500.js).
+// Typing "app" surfaces "AAPL — Apple Inc."; picking a suggestion inserts the ticker.
+(function () {
+  const dl = document.getElementById("tickerList"), names = window.SP500_NAMES;
+  if (!dl || !names) return;
+  dl.innerHTML = Object.keys(names)
+    .map(sym => `<option value="${sym}" label="${esc(names[sym])}"></option>`).join("");
+})();
+
 function finalizePartialStream() {
   // A new run (or navigation) interrupts an in-flight stream — keep what arrived.
   if (_stream && !_stream.done) {
@@ -240,6 +249,11 @@ function aiWarnHtml(d) {
   return `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.
     <button class="retry-btn" onclick="retryAnalysis('${jsAttr(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
 }
+// Rendered under every completed analysis — trust/compliance footer.
+function aiDisclaimerHtml(d) {
+  if (!d || !d.aiSummary) return "";
+  return `<div class="ai-disclaimer">AI-generated analysis for informational purposes only — not financial advice. Verify figures against the source filings before acting.</div>`;
+}
 function showAiThinking(modelId) {
   const ai = document.getElementById("aiSummary");
   if (!ai) return;
@@ -307,7 +321,7 @@ function finalizeAiRender(d) {
   const scroll = document.getElementById("aiScroll");
   const keep = scroll.scrollTop;
   ai.className = "prose";
-  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "") + aiDisclaimerHtml(d);
   scroll.scrollTop = keep;
 }
 
@@ -337,7 +351,7 @@ function showWorkspace(skipAnim) {
 let _cardN = 0;
 function card(id, icon, title, bodyHtml, { open = true, count = null } = {}) {
   _cardN++;
-  return `<details class="card" id="card-${id}" ${open ? "open" : ""} style="--d:${Math.min(_cardN * 0.05, 0.5)}s">
+  return `<details class="card" id="card-${id}" ${open ? "open" : ""} style="--d:${Math.min(_cardN * 0.03, 0.3)}s">
     <summary>${icon}<span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </summary><div class="card-body">${bodyHtml}</div></details>`;
@@ -626,7 +640,7 @@ function renderAll(d) {
   } else {
     const ai = document.getElementById("aiSummary");
     ai.className = "prose";
-    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "");
+    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "") + aiDisclaimerHtml(d);
     document.getElementById("aiScroll").scrollTop = 0;
   }
 
@@ -674,7 +688,7 @@ function chartCardBody() {
     ${tog("vol", "Volume", "var(--text-dim)", false)}
     <div id="rangeSel"></div></div>
     <div id="chartBox">
-      <canvas id="priceChart"></canvas><div id="chartTip"></div>
+      <canvas id="priceChart" role="img" aria-label="Candlestick price chart with volume"></canvas><div id="chartTip"></div>
       <button class="chart-expand-btn" title="Expand chart">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
@@ -1106,6 +1120,19 @@ document.getElementById("ticker").addEventListener("keydown", e => { if (e.key =
     try { localStorage.removeItem("squall-split"); } catch (e) {}
     if (active) requestAnimationFrame(drawChart);
   });
+  // Keyboard: arrows nudge the split, Enter resets — mirrors drag/double-click.
+  rz.addEventListener("keydown", e => {
+    if (e.key === "Enter") { rz.dispatchEvent(new Event("dblclick")); e.preventDefault(); return; }
+    const dir = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    const cur = parseFloat(split.style.getPropertyValue("--left-w")) || 50;
+    const pct = Math.max(30, Math.min(70, cur + dir * 2));
+    split.style.setProperty("--left-w", pct + "%");
+    badge.textContent = Math.round(pct) + " / " + Math.round(100 - pct);
+    try { localStorage.setItem("squall-split", pct + "%"); } catch (err) {}
+    if (active) requestAnimationFrame(drawChart);
+  });
 })();
 
 (function () {
@@ -1142,6 +1169,18 @@ document.getElementById("ticker").addEventListener("keydown", e => { if (e.key =
     dock.style.setProperty("--chat-h", "280px");
     try { localStorage.removeItem("squall-chat-h"); } catch (e) {}
     setTimeout(() => dock.classList.remove("animate"), 350);
+  });
+  // Keyboard: up/down arrows resize the chat dock, Enter resets.
+  grip.addEventListener("keydown", e => {
+    if (e.key === "Enter") { grip.dispatchEvent(new Event("dblclick")); e.preventDefault(); return; }
+    const dir = e.key === "ArrowUp" ? 1 : e.key === "ArrowDown" ? -1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    const cur = parseFloat(dock.style.getPropertyValue("--chat-h")) || 280;
+    const aiPane = document.getElementById("aiPane").getBoundingClientRect();
+    const h = Math.max(120, Math.min(aiPane.height * 0.8, cur + dir * 24));
+    dock.style.setProperty("--chat-h", Math.round(h) + "px");
+    try { localStorage.setItem("squall-chat-h", Math.round(h) + "px"); } catch (err) {}
   });
 })();
 
