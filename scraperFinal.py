@@ -1398,3 +1398,11 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    # argv[1] may be a ticker OR a company name (possibly multi-word / quoted).
+    q = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else "AAPL"
+    try:
+        print(json.dumps(generate_analysis_payload(q), indent=2))
+    except Exception as e:
+        print(json.dumps({"error": str(e), "ticker": q}))
