@@ -381,10 +381,24 @@ def get_recent_filings(cik, limit=50):
         payload = _sec_get(url, "submissions", timeout=10, as_json=True)
         recent = (payload or {}).get("filings", {}).get("recent", {})
         pdocs  = recent.get("primaryDocument", [])
-        return [{"form": recent["form"][i], "filing_date": recent["filingDate"][i],
-                 "accession_number": recent["accessionNumber"][i],
-                 "primary_document": pdocs[i] if i < len(pdocs) else None}
-                for i in range(min(limit, len(recent.get("accessionNumber", []))))]
+        forms = recent.get("form", [])
+        total = len(recent.get("accessionNumber", []))
+
+        def filing_at(i):
+            return {"form": forms[i], "filing_date": recent["filingDate"][i],
+                    "accession_number": recent["accessionNumber"][i],
+                    "primary_document": pdocs[i] if i < len(pdocs) else None}
+
+        # Keep the newest filings for 90-day event/insider signals, but scan the
+        # full in-memory form list for the annual report. Financial institutions
+        # can have 10,000+ securities filings between 10-Ks (JPM's latest 10-K is
+        # currently at index 11,245), so applying `limit` before this search loses it.
+        selected = [filing_at(i) for i in range(min(limit, total))]
+        annual_i = next((i for i, form in enumerate(forms)
+                         if form in ("10-K", "10-K/A")), None)
+        if annual_i is not None and annual_i >= len(selected):
+            selected.append(filing_at(annual_i))
+        return selected
     except (KeyError, TypeError, IndexError, ValueError) as exc:
         _sec_diag("submissions_parse", f"CIK{cik}", False, error=exc)
         return []
@@ -417,6 +431,9 @@ def extract_mda_text(cik, accession_number, primary_document=None):
         r"\bitem\s+7\s*[.\-:–—]?\s*management(?:['’]s)?\s+discussion\s+and\s+analysis",
         re.IGNORECASE)
     end_re = re.compile(r"\bitem\s+(?:7a|8)\s*[.\-:–—]", re.IGNORECASE)
+    incorporated_re = re.compile(
+        r"\bmanagement(?:['’]s)?\s+discussion\s+and\s+analysis\s+"
+        r"(?:the\s+following\s+is|introduction\b)", re.IGNORECASE)
 
     for url, step in urls:
         raw = _sec_get(url, step, timeout=25)
@@ -443,6 +460,18 @@ def extract_mda_text(cik, accession_number, primary_document=None):
             section = max(candidates, key=len)
             _sec_diag("mda_extract", url, True, 200)
             return section[:3000]
+
+        # Some financial institutions make Item 7 a short incorporation-by-
+        # reference sentence, then place the actual MD&A later in the same 10-K
+        # without another "Item 7" label. Anchor on the substantive opening
+        # instead (e.g. JPMorgan: "Management's discussion and analysis — The
+        # following is ...") and return the same bounded excerpt.
+        incorporated = incorporated_re.search(text)
+        if incorporated:
+            section = text[incorporated.start():incorporated.start() + 3000].strip()
+            if len(section) >= 1000:
+                _sec_diag("mda_extract_incorporated", url, True, 200)
+                return section
         _sec_diag("mda_extract", url, False, error="No plausible Item 7 section found")
     return "MD&A section not found."
 
@@ -515,7 +544,9 @@ def safe_extract_sec(facts, namespace, concept):
 
 def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs"):
     if not filings: return None
-    target = next((f for f in filings if f["form"] == "10-K"), None) or filings[0]
+    target = next((f for f in filings if f["form"] in ("10-K", "10-K/A")), None)
+    if not target:
+        return {"error": "No 10-K found in the recent SEC submission history."}
     if not target.get("primary_document"):
         return {"form": target["form"], "filing_date": target["filing_date"], "error": "No primary document listed."}
     try:
@@ -893,7 +924,10 @@ def generate_analysis_payload(query: str) -> dict:
 
     if sec_available:
         facts   = get_company_facts(cik)
-        filings = get_recent_filings(cik, limit=50)
+        # High-insider-activity issuers can file 50+ Form 4s between annual
+        # reports (AAPL's latest 10-K is currently row 51). Keep enough of the
+        # SEC's in-memory recent history to reliably reach the annual report.
+        filings = get_recent_filings(cik, limit=200)
         company_name = (facts or {}).get("entityName", ticker)
 
         def sec_val(ns, concept):
@@ -918,6 +952,12 @@ def generate_analysis_payload(query: str) -> dict:
         if latest_10k:
             mda_text = extract_mda_text(cik, latest_10k["accession_number"],
                                         latest_10k.get("primary_document"))
+
+        # A CIK alone does not mean the 10-K pipeline is available (funds such
+        # as SPY have a CIK but no companyfacts/10-K). Keep the dashboard alive,
+        # but label SEC fundamentals unavailable instead of presenting N/A as a
+        # successful "Latest 10-K" read.
+        sec_available = bool(facts) and latest_10k is not None
 
         cutoff = TODAY - timedelta(days=90)
         for f in filings:
