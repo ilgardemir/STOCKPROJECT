@@ -31,6 +31,123 @@ document.getElementById("themeBtn").onclick = () => {
   applyTheme(root.dataset.theme === "dark" ? "light" : "dark");
 };
 
+/* ════════════════ MYSQUALL PROFILE ════════════════ */
+const PROFILE_STORAGE_KEY = "squall-profile-v1";
+const PROFILE_DEFAULTS = { risk: 3, horizon: 4, experience: 2, depth: 3, style: "balanced", priorities: [], custom: "" };
+const PROFILE_STYLES = new Set(["balanced", "long-term", "swing", "value", "growth", "income", "options"]);
+const PROFILE_PRIORITIES = new Set(["downside", "growth", "valuation", "income", "momentum", "options"]);
+let mySquallProfile = loadMySquall();
+let profileReturnFocus = null;
+
+function clampProfileScore(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : fallback;
+}
+function normalizeMySquall(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return {
+    risk: clampProfileScore(raw.risk, PROFILE_DEFAULTS.risk),
+    horizon: clampProfileScore(raw.horizon, PROFILE_DEFAULTS.horizon),
+    experience: clampProfileScore(raw.experience, PROFILE_DEFAULTS.experience),
+    depth: clampProfileScore(raw.depth, PROFILE_DEFAULTS.depth),
+    style: PROFILE_STYLES.has(raw.style) ? raw.style : PROFILE_DEFAULTS.style,
+    priorities: Array.isArray(raw.priorities) ? [...new Set(raw.priorities.filter(p => PROFILE_PRIORITIES.has(p)))].slice(0, 4) : [],
+    custom: String(raw.custom || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 600)
+  };
+}
+function loadMySquall() {
+  try { return normalizeMySquall(JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY))); }
+  catch (_) { return null; }
+}
+function getMySquallProfile() {
+  return mySquallProfile ? { ...mySquallProfile, priorities: [...mySquallProfile.priorities] } : null;
+}
+function mySquallKey(profile) { return profile ? JSON.stringify(profile) : "none"; }
+function syncProfileButton() {
+  const btn = document.getElementById("profileBtn");
+  btn?.classList.toggle("configured", Boolean(mySquallProfile));
+  if (btn) btn.title = mySquallProfile ? "MySquall profile saved — click to edit" : "Personalize analysis with MySquall";
+}
+function updateProfileLabels() {
+  ["Risk", "Horizon", "Experience", "Depth"].forEach(name => {
+    const input = document.getElementById("profile" + name);
+    const output = document.getElementById("profile" + name + "Value");
+    const labels = input?.dataset.labels?.split("|") || [];
+    if (input && output) output.textContent = labels[Number(input.value) - 1] || input.value;
+  });
+  const custom = document.getElementById("profileCustom");
+  const count = document.getElementById("profileCustomCount");
+  if (custom && count) count.textContent = String(custom.value.length);
+}
+function fillMySquallForm(profile = mySquallProfile || PROFILE_DEFAULTS) {
+  document.getElementById("profileRisk").value = profile.risk;
+  document.getElementById("profileHorizon").value = profile.horizon;
+  document.getElementById("profileExperience").value = profile.experience;
+  document.getElementById("profileDepth").value = profile.depth;
+  document.getElementById("profileStyle").value = profile.style;
+  document.getElementById("profileCustom").value = profile.custom || "";
+  document.querySelectorAll("#profilePriorities input").forEach(input => { input.checked = profile.priorities.includes(input.value); });
+  updateProfileLabels();
+}
+function readMySquallForm() {
+  return normalizeMySquall({
+    risk: document.getElementById("profileRisk").value,
+    horizon: document.getElementById("profileHorizon").value,
+    experience: document.getElementById("profileExperience").value,
+    depth: document.getElementById("profileDepth").value,
+    style: document.getElementById("profileStyle").value,
+    priorities: [...document.querySelectorAll("#profilePriorities input:checked")].map(input => input.value),
+    custom: document.getElementById("profileCustom").value
+  });
+}
+function openMySquall() {
+  profileReturnFocus = document.activeElement;
+  fillMySquallForm();
+  const modal = document.getElementById("profileModal");
+  modal.classList.add("open"); modal.setAttribute("aria-hidden", "false");
+  document.getElementById("profileSaveStatus").textContent = "";
+  document.body.style.overflow = "hidden";
+  requestAnimationFrame(() => document.getElementById("profileRisk").focus());
+}
+function closeMySquall() {
+  const modal = document.getElementById("profileModal");
+  modal.classList.remove("open"); modal.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  if (profileReturnFocus?.focus) profileReturnFocus.focus();
+}
+function saveMySquall() {
+  mySquallProfile = readMySquallForm();
+  try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(mySquallProfile)); }
+  catch (_) { document.getElementById("profileSaveStatus").textContent = "Could not save in this browser"; return; }
+  syncProfileButton();
+  document.getElementById("profileSaveStatus").textContent = "Saved locally ✓";
+  setTimeout(closeMySquall, 450);
+}
+function resetMySquall() {
+  mySquallProfile = null;
+  try { localStorage.removeItem(PROFILE_STORAGE_KEY); } catch (_) {}
+  fillMySquallForm(PROFILE_DEFAULTS); syncProfileButton();
+  document.getElementById("profileSaveStatus").textContent = "Profile cleared";
+}
+
+document.querySelectorAll('#profileForm input[type="range"]').forEach(input => input.addEventListener("input", updateProfileLabels));
+document.getElementById("profileCustom").addEventListener("input", updateProfileLabels);
+document.getElementById("profilePriorities").addEventListener("change", e => {
+  const checked = document.querySelectorAll("#profilePriorities input:checked");
+  if (checked.length > 4 && e.target.matches("input")) {
+    e.target.checked = false;
+    document.getElementById("profileSaveStatus").textContent = "Choose up to four focus areas";
+  }
+});
+document.querySelectorAll("[data-profile-prompt]").forEach(button => button.addEventListener("click", () => {
+  const field = document.getElementById("profileCustom");
+  const next = (field.value.trim() ? field.value.trim() + " " : "") + button.dataset.profilePrompt;
+  field.value = next.slice(0, 600); updateProfileLabels(); field.focus();
+}));
+document.getElementById("profileModal").addEventListener("click", e => { if (e.target.id === "profileModal") closeMySquall(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && document.getElementById("profileModal").classList.contains("open")) closeMySquall(); });
+syncProfileButton();
+
 /* ════════════════ FORMATTERS ════════════════ */
 const isNum = v => v !== null && v !== undefined && typeof v === "number" && isFinite(v);
 const fPct = (v, dp = 2) => isNum(v) ? (v * 100).toFixed(dp) + "%" : "N/A";
@@ -223,13 +340,15 @@ function runAnalysis() {
   // real symbol comes back on the `result` event, at which point we re-key the session.
   const query = document.getElementById("ticker").value.trim();
   const btn = document.getElementById("analyzeBtn");
+  const profileSnapshot = getMySquallProfile();
+  const profileKey = mySquallKey(profileSnapshot);
   if (!query) { showProgress(0, 7, "Enter a ticker or company name first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
   finalizePartialStream();
 
   // Re-run of something we already hold (matched by ticker)? Reopen instantly, no tokens spent.
   const direct = query.toUpperCase();
-  if (sessions[direct] && sessions[direct].data.aiSummary) {
+  if (sessions[direct] && sessions[direct].data.aiSummary && sessions[direct].profileKey === profileKey) {
     showWorkspace(); active = direct; renderTickerPills(); renderAll(sessions[direct].data); return;
   }
 
@@ -242,7 +361,9 @@ function runAnalysis() {
   const ai = document.getElementById("aiSummary");
   ai.className = "prose"; ai.innerHTML = aiSkeleton();
 
-  const es = new EventSource("/analyze-stream?ticker=" + encodeURIComponent(query));
+  let streamUrl = "/analyze-stream?ticker=" + encodeURIComponent(query);
+  if (profileSnapshot) streamUrl += "&profile=" + encodeURIComponent(JSON.stringify(profileSnapshot));
+  const es = new EventSource(streamUrl);
   _es = es;
   let gotResult = false;
 
@@ -266,7 +387,8 @@ function runAnalysis() {
     const data = JSON.parse(e.data);
     gotResult = true;
     key = data.ticker;   // resolved symbol — re-key so the AI-stream handlers below find the session
-    sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252 };
+    sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252,
+      profile: profileSnapshot, profileKey };
     active = data.ticker;
     renderTickerPills();
     renderAll(data);
@@ -1121,7 +1243,8 @@ async function streamChatReply(sess) {
 
   try {
     const res = await fetch("/chat", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: outbound, context: sess.context, analysis: sess.data.aiSummary || "", think: chatThink }) });
+      body: JSON.stringify({ messages: outbound, context: sess.context, analysis: sess.data.aiSummary || "",
+        think: chatThink, profile: sess.profile || null }) });
     if (!res.ok || !res.body) throw new Error("server responded " + res.status);
 
     const reader = res.body.getReader();
