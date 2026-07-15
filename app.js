@@ -742,12 +742,32 @@ function renderScreenResults(result) {
   const rows = result.results || [];
   const spec = result.spec || {};
   if (!rows.length) return `<div class="screen-empty"><b>No stocks cleared every rule.</b><span>Try loosening one requirement or using broader wording. Squall will never invent a match just to fill the page.</span></div>`;
-  const cards = rows.map(r => `<article class="screen-result"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" title="Match score — how well this stock fits your recipe, not a rating of the company">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
+  const cards = rows.map((r, i) => `<article class="screen-result" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Match score — how well this stock fits your recipe, not a rating of the company">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
   return `<div class="screen-results-head"><h2>${rows.length} measurable matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} S&P 500 companies scored${result.cache_hit ? " · cached market data" : ""}</span></div><div class="screen-grid">${cards}</div>`;
+}
+/* Paint results and bring them to life: each match ring sweeps 0→score while
+   the number counts up. Skipped (values set instantly) under reduced motion. */
+const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)");
+function paintScreenResults(result) {
+  const el = document.getElementById("screenResults");
+  el.innerHTML = renderScreenResults(result);
+  el.querySelectorAll(".match-score[data-score]").forEach((ring, i) => {
+    const target = Math.max(0, Math.min(100, Number(ring.dataset.score) || 0));
+    if (REDUCED_MOTION.matches) { ring.style.setProperty("--ring", target + "%"); return; }
+    ring.textContent = "0"; ring.style.setProperty("--ring", "0%");
+    const t0 = performance.now() + Math.min(i, 14) * 50 + 150;   // ride the card's gust delay
+    (function step(now) {
+      const p = Math.max(0, Math.min(1, (now - t0) / 750));
+      const v = (1 - Math.pow(1 - p, 3)) * target;               // ease-out cubic
+      ring.textContent = String(Math.round(v));
+      ring.style.setProperty("--ring", v + "%");
+      if (p < 1) requestAnimationFrame(step);
+    })(performance.now());
+  });
 }
 function renderSavedScreener(s) {
   document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec);
-  document.getElementById("screenResults").innerHTML = renderScreenResults(s.result);
+  paintScreenResults(s.result);
   renderScreenRefine(s);
 }
 function analyzeFromScreener(ticker) {
@@ -773,7 +793,7 @@ function runScreener() {
   const finish = () => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; document.getElementById("screenProgress").classList.remove("show"); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
   es.addEventListener("screen_progress", e => { const d = JSON.parse(e.data); document.getElementById("screenProgressText").textContent = d.label || "Screening the S&P 500…"; });
   es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved S&P screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
-  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `I found ${count} matches. Tell me what feels too broad, too strict, or missing and I’ll revise the weights and rerun it.` : "Nothing cleared every rule. Ask me to broaden it, remove a requirement, or emphasize a different idea and I’ll revise the recipe instead of inventing matches."}); document.getElementById("screenResults").innerHTML = renderScreenResults(s.result); renderScreenRefine(s); finish(); });
+  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `I found ${count} matches. Tell me what feels too broad, too strict, or missing and I’ll revise the weights and rerun it.` : "Nothing cleared every rule. Ask me to broaden it, remove a requirement, or emphasize a different idea and I’ll revise the recipe instead of inventing matches."}); paintScreenResults(s.result); renderScreenRefine(s); finish(); });
   es.addEventListener("screen_error", e => { let msg = "The screen could not finish."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screening stopped</b><span>${esc(msg)}</span></div>`; finish(); });
   es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Make sure the Squall server is running, then try again.</span></div>`; finish(); } };
 }
@@ -799,7 +819,7 @@ function refineScreener(rawMessage) {
   es.addEventListener("screen_progress",e=>{const d=JSON.parse(e.data);document.getElementById("screenProgressText").textContent=d.label||"Rerunning the screen…";});
   es.addEventListener("screen_reply",e=>{reply=JSON.parse(e.data).reply||"";});
   es.addEventListener("screen_interpretation",e=>{s.spec=JSON.parse(e.data);s.title=s.spec.title||s.title;document.getElementById("screenInterpretation").innerHTML=renderScreenRecipe(s.spec);renderTickerPills();});
-  es.addEventListener("screen_result",e=>{s.result=JSON.parse(e.data);s.history.push({role:"assistant",content:reply||`I revised the recipe and found ${(s.result.results||[]).length} matches.`});s.history=s.history.slice(-20);document.getElementById("screenResults").innerHTML=renderScreenResults(s.result);finish();});
+  es.addEventListener("screen_result",e=>{s.result=JSON.parse(e.data);s.history.push({role:"assistant",content:reply||`I revised the recipe and found ${(s.result.results||[]).length} matches.`});s.history=s.history.slice(-20);paintScreenResults(s.result);finish();});
   es.addEventListener("screen_error",e=>{let msg="I couldn’t rerun that revision.";try{msg=JSON.parse(e.data).error||msg;}catch(_){}s.history.push({role:"assistant",content:msg});finish();});
   es.onerror=()=>{if(_screenES===es){s.history.push({role:"assistant",content:"The connection dropped before I could rerun the revised recipe. Please try that follow-up again."});finish();}};
 }
@@ -1943,4 +1963,66 @@ document.getElementById("chartModalControls").addEventListener("change", functio
 
   resize();
   start();
+})();
+
+/* ════════════════ TOOLTIPS — site-styled, replace native title balloons ════════════════
+   One #tip element serves the whole app. Delegated listeners adopt any element
+   with a title attribute (including future innerHTML renders) by migrating the
+   text to data-tip on first contact, so the browser balloon never appears.
+   Mouse/pen hover (short delay) and keyboard focus (:focus-visible) both show it. */
+(function () {
+  const tip = document.createElement("div");
+  tip.id = "tip"; tip.setAttribute("role", "tooltip"); tip.setAttribute("aria-hidden", "true");
+  document.body.appendChild(tip);
+  let anchor = null, showT = null;
+
+  const adopt = el => {
+    const t = el.getAttribute("title");
+    if (t) { el.dataset.tip = t; el.removeAttribute("title"); }
+    return el.dataset.tip;
+  };
+  const findTarget = e => e.target && e.target.closest ? e.target.closest("[data-tip], [title]") : null;
+
+  function place(el) {
+    const text = adopt(el);
+    if (!text) return;
+    anchor = el;
+    tip.textContent = text;
+    tip.classList.remove("show", "below");
+    tip.style.left = "0px"; tip.style.top = "0px";          // reset before measuring
+    const r = el.getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight;
+    let x = Math.max(8, Math.min(r.left + r.width / 2 - tw / 2, innerWidth - tw - 8));
+    let y = r.top - th - 10, below = false;
+    if (y < 8) { y = r.bottom + 10; below = true; }
+    tip.style.left = Math.round(x) + "px"; tip.style.top = Math.round(y) + "px";
+    tip.style.setProperty("--ax", Math.round(Math.max(12, Math.min(r.left + r.width / 2 - x, tw - 12))) + "px");
+    tip.classList.toggle("below", below);
+    tip.classList.add("show");
+    tip.setAttribute("aria-hidden", "false");
+  }
+  function hide() {
+    clearTimeout(showT); showT = null; anchor = null;
+    tip.classList.remove("show"); tip.setAttribute("aria-hidden", "true");
+  }
+
+  document.addEventListener("pointerover", e => {
+    if (e.pointerType && e.pointerType !== "mouse" && e.pointerType !== "pen") return;   // touch keeps native-free silence
+    const el = findTarget(e);
+    if (!el) { if (anchor) hide(); return; }
+    if (el === anchor) return;
+    clearTimeout(showT);
+    showT = setTimeout(() => place(el), 120);
+  });
+  document.addEventListener("pointerout", e => {
+    const el = findTarget(e);
+    if (el && !(e.relatedTarget && el.contains(e.relatedTarget))) hide();
+  });
+  document.addEventListener("pointerdown", () => hide(), true);   // don't linger through clicks/drags
+  document.addEventListener("focusin", e => {
+    const el = findTarget(e);
+    if (el && el.matches(":focus-visible")) place(el);            // keyboard focus only, not click focus
+  });
+  document.addEventListener("focusout", () => hide());
+  document.addEventListener("scroll", () => hide(), true);
+  window.addEventListener("keydown", e => { if (e.key === "Escape") hide(); });
 })();

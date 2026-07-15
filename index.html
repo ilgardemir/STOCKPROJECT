@@ -259,11 +259,20 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .screen-examples { display: flex; gap: 7px; flex-wrap: wrap; margin: 10px 2px 22px; }
 .screen-example { border: 1px solid var(--border-soft); border-radius: 99px; background: var(--surface-2); color: var(--text-dim); padding: 6px 10px; cursor: pointer; font-size: 10.5px; }
 .screen-example:hover { color: var(--violet); border-color: var(--violet); }
-#screenProgress { display: none; margin: 18px 0; padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--surface); }
-#screenProgress.show { display: flex; align-items: center; gap: 11px; }
-.screen-spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--violet); border-radius: 50%; animation: spin .8s linear infinite; }
+#screenProgress { display: none; margin: 18px 0; padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--surface); position: relative; overflow: hidden; }
+#screenProgress.show { display: flex; align-items: center; gap: 11px; animation: riseIn .3s var(--ease-out); }
+#screenProgress .wind { width: 24px; height: 20px; flex-shrink: 0; }
+#screenProgress .wind path { fill: none; stroke: var(--violet); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 60; animation: gust 1.8s var(--ease) infinite; }
+#screenProgress .wind path:nth-child(2) { animation-delay: .12s; } #screenProgress .wind path:nth-child(3) { animation-delay: .24s; }
+/* a wind streak sweeps the progress card while the engine works */
+.sp-streak { position: absolute; top: 0; bottom: 0; width: 90px; left: -110px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(157,140,240,.12), transparent); animation: progStreak 1.7s linear infinite; }
+@keyframes progStreak { to { left: 110%; } }
 @keyframes spin { to { transform: rotate(360deg); } }
-#screenProgressText { color: var(--text); font-size: 12px; }
+#screenProgressText { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--text-dim);
+  background: linear-gradient(90deg, var(--text-dim) 30%, var(--bright) 50%, var(--text-dim) 70%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  animation: textSheen 1.8s linear infinite; }
 #screenInterpretation:empty, #screenResults:empty { display: none; }
 .recipe { margin: 18px 0; border: 1px solid rgba(157,140,240,.28); border-radius: var(--radius); background: rgba(157,140,240,.055); padding: 16px; }
 .recipe-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -296,7 +305,11 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .screen-name { min-width: 0; flex: 1; }
 .screen-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bright); font-size: 12.5px; }
 .screen-name span { color: var(--text-dim); font-size: 10px; }
-.match-score { display: grid; place-items: center; width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%; border: 3px solid var(--violet); color: var(--bright); font: 700 12px var(--mono); }
+/* Match ring — conic arc fills 0→score on entrance (app.js drives --ring + a count-up) */
+.match-score { display: grid; place-items: center; width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%;
+  background: radial-gradient(closest-side, var(--surface) calc(100% - 4px), transparent calc(100% - 3px)),
+              conic-gradient(var(--violet) var(--ring, 100%), var(--surface-3) 0);
+  color: var(--bright); font: 700 12px var(--mono); }
 .screen-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin: 11px 0; }
 .screen-metric { padding: 6px; border-radius: 6px; background: var(--surface-2); }
 .screen-metric small { display: block; color: var(--text-dim); font-size: 8px; text-transform: uppercase; }
@@ -326,7 +339,58 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .screen-chat-msg span { display: block; margin-bottom: 3px; color: var(--violet); font: 8px var(--mono); text-transform: uppercase; }.screen-chat-msg p { color: var(--text); font-size: 11px; line-height: 1.5; }
 .screen-refine-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 11px; }
 .screen-refine-prompts button { border: 1px solid var(--border-soft); border-radius: 99px; background: transparent; color: var(--text-dim); padding: 5px 8px; cursor: pointer; font-size: 9.5px; }.screen-refine-prompts button:hover { color: var(--violet); border-color: var(--violet); }
-.screen-refine-form { display: flex; gap: 8px; padding: 11px; border-top: 1px solid var(--border-soft); background: var(--surface-2); }.screen-refine-form input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--bright); padding: 9px 10px; outline: 0; font-size: 11px; }.screen-refine-form input:focus { border-color: var(--violet); }.screen-refine-form button { border: 0; border-radius: 8px; background: var(--violet); color: #fff; padding: 0 13px; cursor: pointer; font-weight: 700; font-size: 10.5px; }.screen-refine-form button:disabled { opacity: .5; }
+.screen-refine-form { display: flex; gap: 8px; padding: 11px; border-top: 1px solid var(--border-soft); background: var(--surface-2); }.screen-refine-form input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--bright); padding: 9px 10px; outline: 0; font-size: 11px; transition: border-color .2s, box-shadow .2s; }.screen-refine-form input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(157,140,240,.12); }.screen-refine-form button { border: 0; border-radius: 8px; background: var(--violet); color: #fff; padding: 0 13px; cursor: pointer; font-weight: 700; font-size: 10.5px; transition: filter .15s, transform .15s var(--ease); }.screen-refine-form button:hover:not(:disabled) { filter: brightness(1.1); }.screen-refine-form button:active { transform: scale(.96); }.screen-refine-form button:disabled { opacity: .5; }
+
+/* ═══ SCREENER MOTION — gust-front results, live recipe, breathing chrome ═══ */
+/* View entrance: kicker → headline → copy → form → example chips */
+#screenerView.show .screen-kicker { animation: riseIn .4s var(--ease-out) backwards .04s; }
+#screenerView.show .screen-head h1 { animation: riseIn .5s var(--ease-out) backwards .1s; }
+#screenerView.show .screen-head p { animation: riseIn .5s var(--ease-out) backwards .16s; }
+#screenerView.show #screenForm { animation: riseIn .5s var(--ease-out) backwards .22s; }
+#screenerView.show .screen-example { animation: popIn .4s var(--ease-spring) backwards; }
+#screenerView.show .screen-example:nth-child(1) { animation-delay: .3s; } #screenerView.show .screen-example:nth-child(2) { animation-delay: .35s; }
+#screenerView.show .screen-example:nth-child(3) { animation-delay: .4s; } #screenerView.show .screen-example:nth-child(4) { animation-delay: .45s; }
+.screen-example { transition: color .15s, border-color .15s, transform .18s var(--ease); }
+.screen-example:hover { transform: translateY(-2px); }
+#screenForm { transition: border-color .25s, box-shadow .25s; }
+#screenForm:focus-within { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(157,140,240,.13), var(--shadow); }
+#screenRun { transition: filter .15s, transform .18s var(--ease), box-shadow .25s var(--ease); }
+#screenRun:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); box-shadow: 0 8px 22px -10px var(--violet); }
+#screenRun:active { transform: scale(.97); box-shadow: none; }
+
+/* Recipe: container rises, chips pop in as a cascade */
+.recipe { animation: riseIn .45s var(--ease-out) backwards; }
+.recipe-chips > * { animation: popIn .38s var(--ease-spring) backwards; }
+.recipe-chips > :nth-child(1) { animation-delay: .05s; } .recipe-chips > :nth-child(2) { animation-delay: .09s; }
+.recipe-chips > :nth-child(3) { animation-delay: .13s; } .recipe-chips > :nth-child(4) { animation-delay: .17s; }
+.recipe-chips > :nth-child(5) { animation-delay: .21s; } .recipe-chips > :nth-child(6) { animation-delay: .25s; }
+.recipe-chips > :nth-child(7) { animation-delay: .29s; } .recipe-chips > :nth-child(8) { animation-delay: .33s; }
+.recipe-chips > :nth-child(9) { animation-delay: .37s; } .recipe-chips > :nth-child(10) { animation-delay: .41s; }
+
+/* Results: each card blows in on a gust front (--i set inline), and a wind
+   shine sweeps across it as it lands — the screener's signature reveal. */
+.screen-results-head { animation: riseIn .4s var(--ease-out) backwards; }
+.screen-result { position: relative; overflow: hidden;
+  animation: gustCard .5s var(--ease-out) backwards; animation-delay: calc(min(var(--i, 0), 14) * .05s);
+  transition: transform .2s var(--ease), border-color .2s, box-shadow .25s var(--ease); }
+@keyframes gustCard { from { opacity: 0; transform: translateX(-18px) translateY(6px); } }
+.screen-result::after { content: ""; position: absolute; top: 0; bottom: 0; width: 70px; left: -95px; pointer-events: none;
+  background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--accent) 13%, transparent), transparent);
+  transform: skewX(-14deg); animation: cardGustSweep .7s var(--ease-out) forwards; animation-delay: calc(min(var(--i, 0), 14) * .05s + .18s); }
+@keyframes cardGustSweep { to { left: calc(100% + 45px); } }
+.screen-result:hover { transform: translateY(-3px); border-color: var(--border); box-shadow: 0 12px 32px -14px rgba(5,12,20,.55); }
+.screen-symbol { transition: background .15s, color .15s, transform .15s var(--ease); }
+.screen-symbol:active { transform: scale(.92); }
+/* Breakdown bars grow from zero after the card lands (from-only keyframe → animates to inline width) */
+.sb-bar b { animation: sbGrow .7s var(--ease-out) backwards; animation-delay: calc(min(var(--i, 0), 14) * .05s + .25s); }
+@keyframes sbGrow { from { width: 0; } }
+.screen-empty { animation: riseIn .45s var(--ease-out) backwards; }
+
+/* Refine panel: rises in; chat messages share the analyzer's msgIn; prompt chips lift */
+.screen-refine { animation: riseIn .5s var(--ease-out) backwards .12s; }
+.screen-chat-msg { animation: msgIn .3s var(--ease) backwards; }
+.screen-refine-prompts button { transition: color .15s, border-color .15s, transform .18s var(--ease); }
+.screen-refine-prompts button:hover { transform: translateY(-1px); }
 
 /* MAIN SPLIT */
 #workspace { flex: 1; display: none; min-height: 0; }
@@ -828,6 +892,26 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .gust-dots i:nth-child(2) { animation-delay: .14s; }
 .gust-dots i:nth-child(3) { animation-delay: .28s; }
 @keyframes gustDot { 0%, 100% { opacity: .25; transform: translateX(-2px); } 50% { opacity: 1; transform: translateX(2px); } }
+
+/* ═══ TOOLTIPS — one site-styled bubble replaces every native title balloon.
+   app.js migrates [title] → data-tip on first hover and positions #tip. ═══ */
+#tip { position: fixed; z-index: 300; max-width: 300px; padding: 7px 11px; border-radius: 7px;
+  background: var(--surface-3); border: 1px solid var(--border); color: var(--bright);
+  font: 500 11.5px/1.55 var(--sans); box-shadow: var(--shadow); pointer-events: none;
+  opacity: 0; transform: translateY(5px) scale(.97); transition: opacity .16s var(--ease), transform .2s var(--ease-spring); }
+#tip.show { opacity: 1; transform: none; }
+#tip.below { transform: translateY(-5px) scale(.97); } #tip.below.show { transform: none; }
+#tip::before { content: ""; position: absolute; left: var(--ax, 50%); top: 100%; width: 8px; height: 8px;
+  background: var(--surface-3); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  transform: translate(-50%, -55%) rotate(45deg); }
+#tip.below::before { top: 0; border: 0; border-left: 1px solid var(--border); border-top: 1px solid var(--border); transform: translate(-50%, -45%) rotate(45deg); }
+
+/* Header chrome micro-interactions */
+#screenerNav, #profileBtn { transition: color .2s, border-color .2s, background .2s, transform .18s var(--ease); }
+#screenerNav:hover, #profileBtn:hover { transform: translateY(-1px); }
+#screenerNav:active, #profileBtn:active { transform: scale(.95); }
+.analysis-tab { transition: background .18s, color .18s, border-color .18s; }
+.analysis-tab:not(.active):hover { color: var(--text); background: var(--surface-3); }
 </style>
 </head>
 <body>
@@ -974,7 +1058,11 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
       <button class="screen-example" type="button" data-screen-example="Cheap profitable stocks with lower volatility and a P/E below 20">Calmer value stocks</button>
       <button class="screen-example" type="button" data-screen-example="Growth stocks breaking out with strong volume and momentum">Growth breakouts</button>
     </div>
-    <div id="screenProgress" role="status"><i class="screen-spinner"></i><span id="screenProgressText">Interpreting your request…</span></div>
+    <div id="screenProgress" role="status">
+      <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
+      <span id="screenProgressText">Interpreting your request…</span>
+      <i class="sp-streak" aria-hidden="true"></i>
+    </div>
     <div id="screenInterpretation"></div>
     <div id="screenResults"></div>
     <div id="screenRefine"></div>
