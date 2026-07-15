@@ -19,6 +19,7 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
+CACHE_VERSION = 2
 
 
 def stage(n, label):
@@ -92,6 +93,9 @@ def get_history(tickers):
             if retry and len(batch) > 10:
                 for offset in range(0, len(batch), 10):
                     load_batch(batch[offset:offset + 10], f"{label}+{offset}", retry=False)
+            elif len(batch) > 1:
+                for offset, symbol in enumerate(batch):
+                    load_batch([symbol], f"{label}.{offset}", retry=False)
     for start in range(0, len(tickers), 50):
         load_batch(tickers[start:start + 50], start)
     return frames
@@ -119,6 +123,10 @@ def history_features(df):
     rng = lambda n: finite((h.tail(n).max() - l.tail(n).min()) / last)
     width15, width30, width60 = rng(15), rng(30), rng(60)
     ma20, ma50, ma200 = (finite(c.tail(min(n, len(c))).mean()) for n in (20, 50, 200))
+    ma50_series = c.rolling(50).mean()
+    above_ma50 = finite((c.tail(60) > ma50_series.tail(60)).mean())
+    distance_ma20 = finite(last / ma20 - 1) if ma20 else None
+    distance_ma50 = finite(last / ma50 - 1) if ma50 else None
     high252 = finite(h.tail(252).max())
     low252 = finite(l.tail(252).min())
     vol20 = finite(vol.tail(20).mean(), 0)
@@ -159,6 +167,11 @@ def history_features(df):
         scale(volume_ratio, 0.70, 2.0), scale(ret(20), -0.05, 0.18), trend
     ])
     low_vol = np.mean([scale(volatility, 0.55, 0.14), scale(max_drawdown, -0.40, -0.08), scale(atr14, 0.045, 0.012)])
+    pullback = np.mean([trend, scale(abs(distance_ma20) if distance_ma20 is not None else None, 0.12, 0), scale(abs(distance_ma50) if distance_ma50 is not None else None, 0.18, 0)])
+    golden = np.mean([100 if ma50 and ma200 and ma50 > ma200 else 10, scale(finite(ma50 / ma200 - 1) if ma50 and ma200 else None, -0.08, 0.12), scale(distance_ma50, -0.12, 0.18)])
+    recovery = np.mean([scale(ret(20), -0.10, 0.16), scale(finite(last / high252 - 1) if high252 else None, -0.55, -0.10), scale(distance_ma20, -0.10, 0.10)])
+    stable = np.mean([scale(above_ma50, 0.30, 0.90), scale(max_drawdown, -0.40, -0.08), scale(volatility, 0.55, 0.16)])
+    efficient = np.mean([scale(ret(60), -0.12, 0.30), scale(finite(ret(60) / volatility) if volatility else None, -0.3, 1.2)])
 
     return {
         "price": last, "return_20d": ret(20), "return_60d": ret(60), "return_1y": ret(252),
@@ -168,7 +181,8 @@ def history_features(df):
         "volume_dryup": dryup, "up_volume_ratio": up_vol, "volatility": volatility,
         "max_drawdown_1y": max_drawdown, "distance_52w_high": finite(last / high252 - 1) if high252 else None,
         "distance_52w_low": finite(last / low252 - 1) if low252 else None,
-        "ma20": ma20, "ma50": ma50, "ma200": ma200,
+        "ma20": ma20, "ma50": ma50, "ma200": ma200, "distance_ma20": distance_ma20,
+        "distance_ma50": distance_ma50, "above_ma50": above_ma50, "obv_norm": obv_norm,
         "scores": {
             "consolidation_short": round(clamp(contraction_short), 1),
             "consolidation_long": round(clamp(contraction_long), 1),
@@ -176,7 +190,13 @@ def history_features(df):
             "uptrend": round(clamp(trend), 1), "accumulation": round(clamp(accumulation), 1),
             "breakout": round(clamp(breakout), 1), "momentum": round(clamp(np.mean([trend, scale(ret(20), -0.08, 0.18)])), 1),
             "near_highs": round(scale(finite(last / high252 - 1) if high252 else None, -0.30, 0), 1),
-            "low_volatility": round(clamp(low_vol), 1), "oversold": round(scale(ret(20), 0.08, -0.18), 1)
+            "low_volatility": round(clamp(low_vol), 1), "high_volatility": round(clamp(100-low_vol), 1),
+            "oversold": round(np.mean([scale(ret(20), 0.08, -0.18), scale(distance_ma20, .08, -.15)]), 1),
+            "downtrend": round(clamp(100-trend), 1), "distribution": round(clamp(100-accumulation), 1),
+            "recovery": round(clamp(recovery), 1), "pullback_to_ma": round(clamp(pullback), 1),
+            "golden_cross": round(clamp(golden), 1), "volume_surge": round(scale(volume_ratio, .6, 2.2), 1),
+            "volume_dryup": round(np.mean([scale(dryup, 1.2, .55), contraction_short]), 1),
+            "trend_stability": round(clamp(stable), 1), "risk_adjusted_momentum": round(clamp(efficient), 1)
         }
     }
 
@@ -189,7 +209,7 @@ def build_universe(tickers, names):
         if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < CACHE_TTL:
             cached = json.loads(CACHE_PATH.read_text())
             cached_symbols = {r.get("ticker") for r in cached.get("rows", [])}
-            if set(tickers).issubset(cached_symbols):
+            if cached.get("version") == CACHE_VERSION and set(tickers).issubset(cached_symbols):
                 stage(2, "Using fresh S&P 500 market cache")
                 return [r for r in cached["rows"] if r.get("ticker") in set(tickers)], True
     except Exception:
@@ -211,20 +231,48 @@ def build_universe(tickers, names):
             "sector": profile.get("sector") or "Unknown", "industry": profile.get("industry") or "Unknown",
             "market_cap": finite(price.get("marketCap")),
             "pe": finite(summary.get("trailingPE")), "forward_pe": finite(summary.get("forwardPE")),
+            "price_to_sales": finite(summary.get("priceToSalesTrailing12Months")), "payout_ratio": finite(summary.get("payoutRatio")),
             "dividend_yield": finite(summary.get("dividendYield")),
             "revenue_growth": finite(financial.get("revenueGrowth")), "earnings_growth": finite(financial.get("earningsGrowth")),
-            "profit_margin": finite(financial.get("profitMargins")), "debt_to_equity": finite(financial.get("debtToEquity")),
-            "beta": finite(stats.get("beta")),
+            "profit_margin": finite(financial.get("profitMargins")), "operating_margin": finite(financial.get("operatingMargins")),
+            "gross_margin": finite(financial.get("grossMargins")), "return_on_equity": finite(financial.get("returnOnEquity")),
+            "debt_to_equity": finite(financial.get("debtToEquity")), "current_ratio": finite(financial.get("currentRatio")),
+            "free_cash_flow": finite(financial.get("freeCashflow")), "total_cash": finite(financial.get("totalCash")),
+            "total_debt": finite(financial.get("totalDebt")), "target_price": finite(financial.get("targetMeanPrice")),
+            "recommendation_mean": finite(financial.get("recommendationMean")), "beta": finite(stats.get("beta")),
+            "price_to_book": finite(stats.get("priceToBook")), "peg_ratio": finite(stats.get("pegRatio")),
+            "enterprise_to_ebitda": finite(stats.get("enterpriseToEbitda")),
+            "institutional_ownership": finite(stats.get("heldPercentInstitutions")), "insider_ownership": finite(stats.get("heldPercentInsiders")),
         })
+        net_cash_ratio = finite((feat["total_cash"] - feat["total_debt"]) / feat["market_cap"]) if feat["market_cap"] and feat["total_cash"] is not None and feat["total_debt"] is not None else None
+        fcf_yield = finite(feat["free_cash_flow"] / feat["market_cap"]) if feat["market_cap"] and feat["free_cash_flow"] is not None else None
+        analyst_upside = finite(feat["target_price"] / feat["price"] - 1) if feat["target_price"] and feat["price"] else None
+        feat.update({"net_cash_ratio":net_cash_ratio, "fcf_yield":fcf_yield, "analyst_upside":analyst_upside})
         feat["scores"].update({
-            "value": round(np.mean([scale(feat["pe"], 40, 10), scale(feat["forward_pe"], 35, 9)]), 1),
+            "value": round(np.mean([scale(feat["pe"], 40, 10), scale(feat["forward_pe"], 35, 9), scale(feat["price_to_book"], 10, 1.5), scale(feat["price_to_sales"], 12, 1.5), scale(feat["enterprise_to_ebitda"], 25, 7)]), 1),
             "growth": round(np.mean([scale(feat["revenue_growth"], -0.05, 0.30), scale(feat["earnings_growth"], -0.10, 0.40)]), 1),
-            "quality": round(np.mean([scale(feat["profit_margin"], -0.02, 0.30), scale(feat["debt_to_equity"], 250, 20)]), 1),
-            "income": round(scale(feat["dividend_yield"], 0, 0.05), 1),
+            "profitability": round(np.mean([scale(feat["profit_margin"], -0.02, .30), scale(feat["operating_margin"], 0, .35), scale(feat["gross_margin"], .10, .70), scale(feat["return_on_equity"], 0, .35)]), 1),
+            "high_margin": round(np.mean([scale(feat["profit_margin"], 0, .35), scale(feat["operating_margin"], 0, .40), scale(feat["gross_margin"], .15, .75)]), 1),
+            "balance_sheet": round(np.mean([scale(feat["debt_to_equity"], 300, 20), scale(feat["current_ratio"], .6, 2.5), scale(net_cash_ratio, -.35, .20)]), 1),
+            "cash_generation": round(np.mean([scale(fcf_yield, -.02, .10), scale(feat["profit_margin"], 0, .30)]), 1),
+            "quality": round(np.mean([scale(feat["profit_margin"], -0.02, 0.30), scale(feat["return_on_equity"], 0, .35), scale(feat["debt_to_equity"], 250, 20), scale(fcf_yield, -.02, .10)]), 1),
+            "income": round(np.mean([scale(feat["dividend_yield"], 0, 0.05), scale(feat["payout_ratio"], 1.2, .35)]), 1),
+            "analyst_upside": round(np.mean([scale(analyst_upside, -.15, .35), scale(feat["recommendation_mean"], 3.5, 1.5)]), 1),
+            "insider_ownership": round(scale(feat["insider_ownership"], 0, .15), 1),
+            "institutional_ownership": round(scale(feat["institutional_ownership"], .25, .95), 1),
+            "mega_cap": round(scale(feat["market_cap"], 10e9, 200e9), 1),
+            "smaller_cap": round(scale(feat["market_cap"], 100e9, 8e9), 1),
         })
         rows.append(feat)
+    # Relative strength is intentionally universe-relative rather than a fixed return cutoff.
+    valid = [r for r in rows if r.get("return_60d") is not None and r.get("return_1y") is not None]
+    if valid:
+        ret60 = pd.Series([r["return_60d"] for r in valid]).rank(pct=True).tolist()
+        ret1y = pd.Series([r["return_1y"] for r in valid]).rank(pct=True).tolist()
+        for row, p60, p1y in zip(valid, ret60, ret1y):
+            row["scores"]["relative_strength"] = round((p60*.55 + p1y*.45)*100, 1)
     try:
-        CACHE_PATH.write_text(json.dumps({"created_at": time.time(), "rows": rows}, separators=(",", ":")))
+        CACHE_PATH.write_text(json.dumps({"version":CACHE_VERSION, "created_at": time.time(), "rows": rows}, separators=(",", ":")))
     except Exception:
         pass
     return rows, False
@@ -232,9 +280,16 @@ def build_universe(tickers, names):
 
 CONCEPT_LABELS = {
     "consolidation": "Consolidation", "volatility_contraction": "Volatility contraction", "uptrend": "Uptrend",
-    "accumulation": "Institutional accumulation", "breakout": "Breakout quality", "momentum": "Momentum",
-    "near_highs": "Near 52-week highs", "low_volatility": "Lower volatility", "oversold": "Oversold pullback",
-    "value": "Value", "growth": "Growth", "quality": "Business quality", "income": "Income"
+    "downtrend":"Downtrend", "accumulation": "Institutional accumulation", "distribution":"Distribution",
+    "breakout": "Breakout quality", "momentum": "Momentum", "relative_strength":"Relative strength",
+    "risk_adjusted_momentum":"Efficient momentum", "near_highs": "Near 52-week highs", "oversold": "Oversold pullback",
+    "recovery":"Early recovery", "pullback_to_ma":"Pullback to support", "golden_cross":"Golden-cross structure",
+    "volume_surge":"Unusual volume", "volume_dryup":"Quiet volume", "low_volatility": "Lower volatility",
+    "high_volatility":"Higher volatility", "trend_stability":"Stable trend", "value": "Value", "growth": "Growth",
+    "profitability":"Profitability", "quality": "Business quality", "balance_sheet":"Balance-sheet strength",
+    "cash_generation":"Cash generation", "high_margin":"High margins", "income": "Income",
+    "analyst_upside":"Analyst-implied upside", "insider_ownership":"Insider ownership",
+    "institutional_ownership":"Institutional ownership", "mega_cap":"Mega-cap scale", "smaller_cap":"Smaller S&P companies"
 }
 
 
@@ -268,23 +323,41 @@ def fmt_pct(v):
     return "N/A" if v is None else f"{v:+.1%}"
 
 
+def fmt_num(v, suffix="", digits=1):
+    return "N/A" if v is None else f"{v:.{digits}f}{suffix}"
+
+
 def explain(row, concepts, settings):
     reasons = []
-    for c in sorted(concepts, key=lambda x: concept_score(row, x["id"], settings) * x.get("weight", 1), reverse=True)[:3]:
+    for c in sorted(concepts, key=lambda x: concept_score(row, x["id"], settings) * x.get("weight", 1), reverse=True)[:6]:
         cid = c["id"]
-        if cid == "consolidation": reasons.append(f"{CONCEPT_LABELS[cid]}: {row['range_30d']:.1%} 30-day range with ATR {row['atr_contraction']:.2f}× its 60-day norm")
-        elif cid == "volatility_contraction": reasons.append(f"Volatility contraction: 15/60-day range ratio {row['range_15d']/max(row['range_60d'], .0001):.2f} and volume {row['volume_dryup']:.2f}× normal")
+        window = int(settings.get("consolidation_window", 30))
+        range_value = row.get("range_60d") if window == 60 else row.get("range_30d") if window == 30 else row.get("range_15d")
+        if cid == "consolidation": reasons.append(f"Consolidation: {fmt_pct(range_value)} {window}-day range and ATR {fmt_num(row.get('atr_contraction'), '×', 2)} its 60-day norm")
+        elif cid == "volatility_contraction": reasons.append(f"Volatility contraction: 15/60-day range ratio {fmt_num(finite(row.get('range_15d'))/max(finite(row.get('range_60d'), .0001), .0001) if row.get('range_15d') is not None else None, '', 2)} and volume {fmt_num(row.get('volume_dryup'), '×', 2)} normal")
         elif cid == "near_highs": reasons.append(f"Near highs: {fmt_pct(row['distance_52w_high'])} from its 52-week high")
-        elif cid in ("uptrend", "momentum"): reasons.append(f"Trend: 20-day {fmt_pct(row['return_20d'])}, 60-day {fmt_pct(row['return_60d'])}")
+        elif cid in ("uptrend", "downtrend", "momentum", "risk_adjusted_momentum"): reasons.append(f"Trend: 20-day {fmt_pct(row['return_20d'])}, 60-day {fmt_pct(row['return_60d'])}")
+        elif cid == "relative_strength": reasons.append(f"Relative strength: {fmt_num(row.get('scores',{}).get(cid), '/100', 0)} versus the S&P 500")
         elif cid == "accumulation": reasons.append(f"Accumulation: {row['up_volume_ratio']:.0%} of recent volume occurred on up days")
+        elif cid == "distribution": reasons.append(f"Distribution: {(1-row['up_volume_ratio']):.0%} of recent volume occurred on down days")
         elif cid == "breakout": reasons.append(f"Breakout quality: volume is {row['volume_ratio']:.2f}× its 20-day average")
-        elif cid == "low_volatility": reasons.append(f"Risk: {row['volatility']:.0%} annualized volatility and {fmt_pct(row['max_drawdown_1y'])} max drawdown")
+        elif cid in ("low_volatility", "high_volatility", "trend_stability"): reasons.append(f"Risk: {fmt_pct(row.get('volatility'))} annualized volatility and {fmt_pct(row.get('max_drawdown_1y'))} max drawdown")
+        elif cid in ("volume_surge", "volume_dryup"): reasons.append(f"Volume: today is {fmt_num(row.get('volume_ratio'), '×', 2)} the 20-day average; recent average is {fmt_num(row.get('volume_dryup'), '×', 2)} the 60-day norm")
+        elif cid == "pullback_to_ma": reasons.append(f"Support proximity: {fmt_pct(row.get('distance_ma20'))} from MA20 and {fmt_pct(row.get('distance_ma50'))} from MA50")
+        elif cid == "golden_cross": reasons.append(f"Moving averages: MA50 {fmt_num(row.get('ma50'), '', 2)} versus MA200 {fmt_num(row.get('ma200'), '', 2)}")
+        elif cid == "recovery": reasons.append(f"Recovery: 20-day {fmt_pct(row.get('return_20d'))} while still {fmt_pct(row.get('distance_52w_high'))} from the yearly high")
         elif cid == "value": reasons.append(f"Valuation: {row['pe']:.1f}× trailing earnings" if row.get("pe") else "Valuation data was limited")
         elif cid == "growth": reasons.append(f"Growth: revenue {fmt_pct(row.get('revenue_growth'))}, earnings {fmt_pct(row.get('earnings_growth'))}")
-        elif cid == "quality": reasons.append(f"Quality: {fmt_pct(row.get('profit_margin'))} profit margin")
+        elif cid in ("quality", "profitability", "high_margin"): reasons.append(f"Profitability: {fmt_pct(row.get('profit_margin'))} net and {fmt_pct(row.get('operating_margin'))} operating margin")
+        elif cid == "balance_sheet": reasons.append(f"Balance sheet: debt/equity {fmt_num(row.get('debt_to_equity'), '', 0)}, current ratio {fmt_num(row.get('current_ratio'), '×', 2)}")
+        elif cid == "cash_generation": reasons.append(f"Cash generation: free-cash-flow yield {fmt_pct(row.get('fcf_yield'))}")
         elif cid == "income": reasons.append(f"Income: {fmt_pct(row.get('dividend_yield'))} dividend yield")
+        elif cid == "analyst_upside": reasons.append(f"Analyst consensus: {fmt_pct(row.get('analyst_upside'))} implied upside (estimate, not fact)")
+        elif cid == "insider_ownership": reasons.append(f"Ownership: insiders report holding {fmt_pct(row.get('insider_ownership'))}")
+        elif cid == "institutional_ownership": reasons.append(f"Ownership: institutions report holding {fmt_pct(row.get('institutional_ownership'))}")
+        elif cid in ("mega_cap", "smaller_cap"): reasons.append(f"Company size: market capitalization ${fmt_num(finite(row.get('market_cap'),0)/1e9, 'B', 1)}")
         elif cid == "oversold": reasons.append(f"Pullback: 20-day return {fmt_pct(row['return_20d'])}")
-    return reasons
+    return list(dict.fromkeys(reasons))[:3]
 
 
 def screen(rows, spec):
@@ -325,7 +398,7 @@ def main():
         "universe": "S&P 500", "universe_requested": len(tickers), "universe_scored": len(rows),
         "cache_hit": cached, "spec": spec, "results": results,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "definitions_version": 1
+        "definitions_version": 2
     }
     stage(5, f"Found {len(results)} matching stocks")
     json.dump(output, sys.stdout, separators=(",", ":"), allow_nan=False)

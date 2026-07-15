@@ -167,7 +167,42 @@ async function gatherResearch(ticker, companyName) {
 }
 
 // ─── NATURAL-LANGUAGE S&P 500 SCREENER ───────────────────────────────────────
-const SCREENER_CONCEPTS = new Set(["consolidation", "volatility_contraction", "uptrend", "accumulation", "breakout", "momentum", "near_highs", "low_volatility", "oversold", "value", "growth", "quality", "income"]);
+const SCREENER_CATALOG = {
+  consolidation:["Consolidation", "Price-range width, ATR contraction, volume dry-up, and proximity to recent highs over the MySquall-selected window."],
+  volatility_contraction:["Shrinking volatility", "Successively tighter 15/30/60-day ranges, falling ATR, and declining volume."],
+  uptrend:["Uptrend", "Price and moving-average alignment plus positive 60-day and one-year returns."],
+  downtrend:["Downtrend", "Price below key moving averages with negative 60-day and one-year returns."],
+  accumulation:["Accumulation", "Up-day volume share, on-balance-volume slope, and recent price strength."],
+  distribution:["Distribution", "Down-day volume dominance, falling on-balance volume, and weakening price action."],
+  breakout:["Breakout quality", "Price versus its prior 20-day high, accompanying volume, momentum, and trend alignment."],
+  momentum:["Momentum", "Weighted 20-day, 60-day, and one-year price strength."],
+  relative_strength:["Relative strength", "Percentile rank of 60-day and one-year performance versus the rest of the S&P 500."],
+  risk_adjusted_momentum:["Efficient momentum", "Price strength rewarded only when it is large relative to realized volatility."],
+  near_highs:["Near 52-week highs", "Distance from the highest traded price during the past year."],
+  oversold:["Oversold pullback", "Negative 20-day return and distance below the 20-day moving average, without predicting a reversal."],
+  recovery:["Early recovery", "Positive recent momentum after a meaningful drawdown from the 52-week high."],
+  pullback_to_ma:["Pullback to support", "An established uptrend trading close to its 20- or 50-day moving average."],
+  golden_cross:["Golden-cross structure", "The 50-day moving average above the 200-day average, with price confirming the structure."],
+  volume_surge:["Unusual volume", "Current volume compared with its 20-day average."],
+  volume_dryup:["Quiet volume", "Twenty-day average volume falling below the 60-day average, useful for quiet bases."],
+  low_volatility:["Lower volatility", "Realized volatility, ATR percentage, beta, and one-year maximum drawdown."],
+  high_volatility:["Higher volatility", "Elevated realized volatility, ATR percentage, beta, and drawdown."],
+  trend_stability:["Stable trend", "Share of recent sessions above the 50-day average plus limited drawdown and volatility."],
+  value:["Value", "Trailing and forward P/E, price-to-book, price-to-sales, PEG, and enterprise-value/EBITDA where available."],
+  growth:["Growth", "Reported revenue and earnings growth, balanced so one extreme field cannot dominate."],
+  profitability:["Profitability", "Profit, operating, and gross margins plus return on equity."],
+  quality:["Business quality", "Profitability, return on equity, leverage, and cash generation combined."],
+  balance_sheet:["Balance-sheet strength", "Debt-to-equity, current ratio, and net cash relative to company size."],
+  cash_generation:["Cash generation", "Free cash flow scaled by market capitalization and supported by profit margins."],
+  high_margin:["High margins", "Gross, operating, and net profit margins versus broad public-company ranges."],
+  income:["Dividend income", "Current dividend yield with a payout-ratio penalty when data is available."],
+  analyst_upside:["Analyst-implied upside", "Consensus target price versus the current price and recommendation mean; never treated as fact."],
+  insider_ownership:["Insider ownership", "Reported percentage of shares held by insiders."],
+  institutional_ownership:["Institutional ownership", "Reported percentage of shares held by institutions."],
+  mega_cap:["Mega-cap scale", "Market capitalization, with the strongest score around $200B and above."],
+  smaller_cap:["Smaller S&P companies", "Lower market capitalization relative to other S&P 500 members; not true small-cap exposure."]
+};
+const SCREENER_CONCEPTS = new Set(Object.keys(SCREENER_CATALOG));
 const SCREENER_SECTORS = ["Technology", "Financial Services", "Healthcare", "Consumer Cyclical", "Consumer Defensive", "Industrials", "Energy", "Utilities", "Real Estate", "Basic Materials", "Communication Services"];
 
 function readSp500Universe() {
@@ -185,16 +220,35 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (/consolidat|tight range|base|coiling|sideways/.test(q)) add("consolidation", 1.35, true);
   if (/volatility contraction|\bvcp\b|volatility.*shrink|getting tighter|contracting/.test(q)) add("volatility_contraction", 1.4, true);
   if (/uptrend|trending up|higher high|higher low|strong trend/.test(q)) add("uptrend", 1.15);
+  if (/downtrend|trending down|lower high|lower low|bearish/.test(q)) add("downtrend", 1.15);
   if (/accumulat|institution.*buy|smart money|buying pressure/.test(q)) add("accumulation", 1.2);
+  if (/distribution|institution.*sell|selling pressure/.test(q)) add("distribution", 1.2);
   if (/breakout|breaking out|new high/.test(q)) add("breakout", 1.25);
-  if (/momentum|moving fast|relative strength|winner/.test(q)) add("momentum", 1.1);
+  if (/momentum|moving fast|winner/.test(q)) add("momentum", 1.1);
+  if (/relative strength|outperform|market leader|leader/.test(q)) add("relative_strength", 1.2);
+  if (/risk.adjusted|efficient momentum|smooth momentum/.test(q)) add("risk_adjusted_momentum", 1.2);
   if (/near.*high|52.week high|close to.*high/.test(q)) add("near_highs", 1.05);
   if (/low vol|less volatile|stable|safer|defensive/.test(q)) add("low_volatility", 1.1);
   if (/oversold|beaten down|pullback|dip/.test(q)) add("oversold", 1.0);
+  if (/recover|turnaround|bouncing back/.test(q)) add("recovery", 1.05);
+  if (/pullback.*(?:moving average|support)|near.*(?:20|50).day|buy.*dip.*uptrend/.test(q)) add("pullback_to_ma", 1.15);
+  if (/golden cross|50.*above.*200/.test(q)) add("golden_cross", 1.1);
+  if (/unusual volume|volume surge|heavy volume|volume spike/.test(q)) add("volume_surge", 1.15);
+  if (/volume dry|quiet volume|low volume base/.test(q)) add("volume_dryup", 1.1);
   if (/cheap|undervalued|value|low p.?e/.test(q)) add("value", 1.0);
   if (/growth|growing|revenue growth|earnings growth/.test(q)) add("growth", 1.0);
-  if (/quality|profitable|strong business|good compan/.test(q)) add("quality", 1.0);
+  if (/quality|strong business|good compan/.test(q)) add("quality", 1.0);
+  if (/profitab|high margin|strong margin/.test(q)) add(/high margin|strong margin/.test(q) ? "high_margin" : "profitability", 1.1);
+  if (/balance sheet|low debt|net cash|financially strong/.test(q)) add("balance_sheet", 1.1);
+  if (/free cash flow|cash generat|cash machine/.test(q)) add("cash_generation", 1.1);
   if (/dividend|income|yield/.test(q)) add("income", 1.0);
+  if (/analyst|price target|wall street upside/.test(q)) add("analyst_upside", .8);
+  if (/insider ownership|founder owned|skin in the game/.test(q)) add("insider_ownership", .9);
+  if (/institutional ownership|owned by funds/.test(q)) add("institutional_ownership", .8);
+  if (/mega.cap|largest compan|giant compan/.test(q)) add("mega_cap", 1.0);
+  if (/smaller compan|smaller cap|smallest.*s&p/.test(q)) add("smaller_cap", 1.0);
+  if (/high vol|volatile|big mover/.test(q)) add("high_volatility", 1.0);
+  if (/stable trend|smooth trend|consistent trend/.test(q)) add("trend_stability", 1.1);
 
   const profileAdjustments = [];
   const horizon = profile?.horizon || 3;
@@ -232,9 +286,14 @@ function fallbackScreenerSpec(query, rawProfile) {
   };
 }
 
+function attachScreenerDefinitions(spec) {
+  spec.definitions = (spec.concepts || []).map(c => ({ id:c.id, label:SCREENER_CATALOG[c.id]?.[0] || c.id, definition:SCREENER_CATALOG[c.id]?.[1] || "Backend-defined quantitative score." }));
+  return spec;
+}
+
 function sanitizeScreenerSpec(candidate, fallback) {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return fallback;
-  const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 6).map(c => ({
+  const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 8).map(c => ({
     id: c.id, weight: Math.max(.25, Math.min(3, Number(c.weight) || 1)), required: Boolean(c.required)
   })) : [];
   const safe = { ...fallback };
@@ -251,12 +310,21 @@ function sanitizeScreenerSpec(candidate, fallback) {
     });
     safe.filters = f;
   }
-  return safe;
+  if (candidate.settings && typeof candidate.settings === "object") {
+    safe.settings = { ...fallback.settings };
+    const threshold = Number(candidate.settings.match_threshold);
+    const window = Number(candidate.settings.consolidation_window);
+    if (Number.isFinite(threshold)) safe.settings.match_threshold = Math.max(20, Math.min(85, threshold));
+    if ([20, 30, 60].includes(window)) safe.settings.consolidation_window = window;
+  }
+  const maxResults = Number(candidate.max_results);
+  if (Number.isFinite(maxResults)) safe.max_results = Math.max(5, Math.min(50, Math.round(maxResults)));
+  return attachScreenerDefinitions(safe);
 }
 
 async function interpretScreenerQuery(query, profile) {
   const fallback = fallbackScreenerSpec(query, profile);
-  if (!API_KEY || API_KEY === "YOUR_OPENROUTER_KEY_HERE") return fallback;
+  if (!API_KEY || API_KEY === "YOUR_OPENROUTER_KEY_HERE") return attachScreenerDefinitions(fallback);
   const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
     const profileText = formatProfile(profile);
@@ -265,7 +333,7 @@ async function interpretScreenerQuery(query, profile) {
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
       body: JSON.stringify({ model: SEARCH_MODEL, temperature: .05, max_tokens: 900,
         messages: [
-          { role:"system", content:"Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose only from these concepts: consolidation, volatility_contraction, uptrend, accumulation, breakout, momentum, near_highs, low_volatility, oversold, value, growth, quality, income. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min). Interpret fuzzy language, but preserve the user's intent. Return JSON only." },
+          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min). Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only. Return JSON only.` },
           { role:"user", content:`Request: ${String(query).slice(0,500)}\n\n${profileText || "No MySquall profile."}\n\nRule-based starting point: ${JSON.stringify(fallback)}` }
         ] })
     });
@@ -274,6 +342,83 @@ async function interpretScreenerQuery(query, profile) {
     let text = data?.choices?.[0]?.message?.content || "";
     text = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
     return sanitizeScreenerSpec(JSON.parse(text), fallback);
+  } catch { return attachScreenerDefinitions(fallback); }
+  finally { clearTimeout(timer); }
+}
+
+function fallbackRefineScreener(message, existing, profile, resultCount) {
+  const text = String(message || "").toLowerCase();
+  const base = sanitizeScreenerSpec(existing, fallbackScreenerSpec(existing?.query || message, profile));
+  const next = JSON.parse(JSON.stringify(base));
+  const mentioned = fallbackScreenerSpec(message, profile).concepts.filter(c =>
+    text.includes(c.id.replaceAll("_", " ")) || text.split(/\s+/).some(w => w.length > 4 && (SCREENER_CATALOG[c.id]?.[0] || "").toLowerCase().includes(w))
+  );
+  const broaden = /broaden|more result|too strict|loosen|less strict|nothing|no match|zero/.test(text);
+  const narrow = /narrow|fewer result|too many|stricter|more selective|best only/.test(text);
+  const remove = /remove|without|drop|ignore|less emphasis/.test(text);
+  let reply;
+  const removedFilters = [];
+  if (remove && /price/.test(text)) { delete next.filters.price_min; delete next.filters.price_max; removedFilters.push("price limits"); }
+  if (remove && /p\/?e|valuation limit/.test(text)) { delete next.filters.pe_max; removedFilters.push("the P/E limit"); }
+  if (remove && /sector|industry/.test(text)) { delete next.filters.sector; removedFilters.push("the sector filter"); }
+  if (remove && /volume limit|minimum volume/.test(text)) { delete next.filters.volume_min; removedFilters.push("the volume limit"); }
+  if (remove && /dividend|yield limit/.test(text)) { delete next.filters.dividend_yield_min; removedFilters.push("the dividend limit"); }
+  if (removedFilters.length) {
+    reply = `I removed ${removedFilters.join(", ")} and reran the remaining weighted recipe.`;
+  } else if (broaden) {
+    const amount = Number(resultCount) === 0 ? 12 : 8;
+    next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - amount);
+    next.concepts.forEach(c => { c.required = false; });
+    reply = `I broadened the recipe by lowering the match threshold to ${next.settings.match_threshold} and turning hard requirements into weighted preferences.`;
+  } else if (narrow) {
+    next.settings.match_threshold = Math.min(85, Number(next.settings.match_threshold || 49) + 8);
+    const strongest = [...next.concepts].sort((a,b) => b.weight - a.weight)[0];
+    if (strongest) strongest.required = true;
+    reply = `I narrowed the recipe to a ${next.settings.match_threshold} match threshold and made the highest-weight idea required.`;
+  } else if (remove && mentioned.length) {
+    const ids = new Set(mentioned.map(c => c.id));
+    next.concepts = next.concepts.filter(c => !ids.has(c.id));
+    if (!next.concepts.length) next.concepts = [{ id:"quality", weight:1, required:false }];
+    reply = `I removed ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and kept the rest of your recipe intact.`;
+  } else if (mentioned.length) {
+    for (const concept of mentioned) {
+      const current = next.concepts.find(c => c.id === concept.id);
+      if (current) current.weight = Math.min(3, current.weight + .35);
+      else next.concepts.push({ ...concept, required:false });
+    }
+    next.concepts = next.concepts.slice(0, 8);
+    reply = `I added more emphasis to ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and reran the same S&P 500 universe.`;
+  } else {
+    next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - (Number(resultCount) === 0 ? 6 : 0));
+    reply = Number(resultCount) === 0
+      ? "I loosened the score threshold slightly because the previous recipe returned no matches. Try naming a concept to add or remove for a more specific revision."
+      : "I kept the measurable recipe stable. Try saying “broaden it,” “narrow it,” “remove value,” or “add unusual volume” for a concrete revision.";
+  }
+  next.summary = `Refined from the prior screen: ${String(message).trim().slice(0, 180)}`;
+  next.interpretation_source = "rules + follow-up";
+  return { reply, spec:attachScreenerDefinitions(next) };
+}
+
+async function refineScreenerSpec(message, existing, profile, resultCount) {
+  const fallback = fallbackRefineScreener(message, existing, profile, resultCount);
+  if (!API_KEY || API_KEY === "YOUR_OPENROUTER_KEY_HERE") return fallback;
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method:"POST", signal:ctrl.signal,
+      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
+      body:JSON.stringify({ model:SEARCH_MODEL, temperature:.08, max_tokens:1100, messages:[
+        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, and max_results. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
+        { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
+      ] })
+    });
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    const raw = String(data?.choices?.[0]?.message?.content || "").replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    const parsed = JSON.parse(raw);
+    const spec = sanitizeScreenerSpec(parsed, fallback.spec);
+    spec.interpretation_source = "ai + follow-up";
+    return { reply:String(parsed.reply || fallback.reply).replace(/[\u0000-\u001f]/g," ").trim().slice(0,500), spec };
   } catch { return fallback; }
   finally { clearTimeout(timer); }
 }
@@ -350,14 +495,25 @@ http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
     const profile = sanitizeProfile(url.searchParams.get("profile"));
+    let existing = null;
+    try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
+    const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
     res.writeHead(200, { "Content-Type":"text/event-stream", "Cache-Control":"no-cache", "Connection":"keep-alive", "X-Accel-Buffering":"no" });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     if (query.length < 3) { send("screen_error", { error:"Describe the kind of S&P 500 stock you want in a little more detail." }); return res.end(); }
 
-    send("screen_progress", { stage:0, total:6, label:"Turning your words into measurable rules" });
+    send("screen_progress", { stage:0, total:6, label:existing ? "Revising your measurable recipe" : "Turning your words into measurable rules" });
     let spec;
-    try { spec = await interpretScreenerQuery(query, profile); }
-    catch { spec = fallbackScreenerSpec(query, profile); }
+    if (existing) {
+      let refined;
+      try { refined = await refineScreenerSpec(query, existing, profile, priorCount); }
+      catch { refined = fallbackRefineScreener(query, existing, profile, priorCount); }
+      spec = refined.spec;
+      send("screen_reply", { reply:refined.reply });
+    } else {
+      try { spec = await interpretScreenerQuery(query, profile); }
+      catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
+    }
     send("screen_interpretation", spec);
 
     let universe;
