@@ -62,6 +62,7 @@ function hydrateSavedScreeners() {
   Object.entries(saved).forEach(([id, raw]) => {
     if (!raw || typeof raw !== "object" || !raw.query) return;
     screeners[id] = { ...raw, id, query: String(raw.query), title: String(raw.title || "Saved screen"),
+      history: Array.isArray(raw.history) ? raw.history.slice(-20).map(m => ({ role:m?.role === "user" ? "user" : "assistant", content:String(m?.content || "").slice(0,1000) })) : [],
       createdAt: Number(raw.createdAt) || Date.now(), updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || Date.now() };
   });
 }
@@ -662,9 +663,14 @@ function resumeSavedWorkspace() {
 /* ════════════════ NATURAL-LANGUAGE S&P 500 SCREENER ════════════════ */
 const SCREEN_CONCEPT_LABELS = {
   consolidation: "Consolidation", volatility_contraction: "Shrinking volatility", uptrend: "Uptrend",
-  accumulation: "Accumulation", breakout: "Breakout", momentum: "Momentum", near_highs: "Near 52-week highs",
-  low_volatility: "Lower volatility", oversold: "Oversold pullback", value: "Value", growth: "Growth",
-  quality: "Business quality", income: "Income"
+  downtrend:"Downtrend", accumulation: "Accumulation", distribution:"Distribution", breakout: "Breakout", momentum: "Momentum",
+  relative_strength:"Relative strength", risk_adjusted_momentum:"Efficient momentum", near_highs: "Near 52-week highs",
+  low_volatility: "Lower volatility", high_volatility:"Higher volatility", trend_stability:"Stable trend",
+  oversold: "Oversold pullback", recovery:"Early recovery", pullback_to_ma:"Pullback to support", golden_cross:"Golden cross",
+  volume_surge:"Unusual volume", volume_dryup:"Quiet volume", value: "Value", growth: "Growth", profitability:"Profitability",
+  quality: "Business quality", balance_sheet:"Balance sheet", cash_generation:"Cash generation", high_margin:"High margins",
+  income: "Income", analyst_upside:"Analyst upside", insider_ownership:"Insider ownership",
+  institutional_ownership:"Institutional ownership", mega_cap:"Mega-cap", smaller_cap:"Smaller S&P companies"
 };
 function openScreener() {
   document.getElementById("hero").style.display = "none";
@@ -696,14 +702,15 @@ function deleteScreener(id) {
 function screenPct(v) { return isNum(v) ? (v * 100).toFixed(1) + "%" : "N/A"; }
 function renderScreenRecipe(spec) {
   if (!spec) return "";
-  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.required ? "required · " : ""}${Math.round((Number(c.weight) || 1) * 100)}% weight</span></div>`).join("");
+  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.required ? "required · " : ""}${(Number(c.weight) || 1).toFixed(2)}× weight</span></div>`).join("");
   const filters = Object.entries(spec.filters || {}).filter(([, v]) => v !== null && v !== "" && v !== undefined)
     .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(v)}</span></div>`).join("");
   const adjustments = (spec.profile_adjustments || []).map(a => `<div class="recipe-adjust">MySquall adjustment · ${esc(a)}</div>`).join("");
   const window = spec.settings?.consolidation_window;
+  const definitions = (spec.definitions || []).map(d => `<details class="recipe-definition"><summary>${esc(d.label || SCREEN_CONCEPT_LABELS[d.id] || d.id)}<span>How Squall measures it</span></summary><p>${esc(d.definition)}</p></details>`).join("");
   const definition = (spec.concepts || []).some(c => c.id === "consolidation")
-    ? `<div class="recipe-adjust">Definition · consolidation uses a ${esc(window || 30)}-trading-day price range, ATR contraction, volume dry-up, and proximity to highs.</div>` : "";
-  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.source || "rules")}</span></div><div class="recipe-chips">${concepts}${filters}</div>${adjustments}${definition}<div class="recipe-adjust">A match score measures fit to this recipe; it is not a prediction or recommendation.</div></div>`;
+    ? `<div class="recipe-adjust">MySquall structure window · ${esc(window || 30)} trading days</div>` : "";
+  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.interpretation_source || "rules")}</span></div><div class="recipe-chips">${concepts}${filters}</div>${adjustments}${definition}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust">A match score measures fit to this recipe; it is not a prediction or recommendation.</div></div>`;
 }
 function renderScreenResults(result) {
   if (!result) return "";
@@ -715,6 +722,7 @@ function renderScreenResults(result) {
 function renderSavedScreener(s) {
   document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec);
   document.getElementById("screenResults").innerHTML = renderScreenResults(s.result);
+  renderScreenRefine(s);
 }
 function analyzeFromScreener(ticker) {
   document.getElementById("ticker").value = ticker;
@@ -726,22 +734,48 @@ function runScreener() {
   if (_screenES) _screenES.close();
   openScreener();
   const id = "screen-" + Date.now().toString(36), now = Date.now();
-  const s = screeners[id] = { id, query, title: "New S&P screen", spec: null, result: null, profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
+  const s = screeners[id] = { id, query, title: "New S&P screen", spec: null, result: null, history:[], profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
   activeScreen = id;
   document.getElementById("screenRun").disabled = true;
   document.getElementById("screenProgressText").textContent = "Interpreting your request…";
   document.getElementById("screenProgress").classList.add("show");
-  document.getElementById("screenInterpretation").innerHTML = ""; document.getElementById("screenResults").innerHTML = "";
+  document.getElementById("screenInterpretation").innerHTML = ""; document.getElementById("screenResults").innerHTML = ""; document.getElementById("screenRefine").innerHTML = "";
   renderTickerPills();
   let url = "/screen-stream?q=" + encodeURIComponent(query);
   if (s.profile) url += "&profile=" + encodeURIComponent(JSON.stringify(s.profile));
   const es = _screenES = new EventSource(url);
-  const finish = () => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; document.getElementById("screenProgress").classList.remove("show"); persistScreeners(); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
+  const finish = () => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; document.getElementById("screenProgress").classList.remove("show"); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
   es.addEventListener("screen_progress", e => { const d = JSON.parse(e.data); document.getElementById("screenProgressText").textContent = d.label || "Screening the S&P 500…"; });
   es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved S&P screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
-  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); document.getElementById("screenResults").innerHTML = renderScreenResults(s.result); finish(); });
+  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `I found ${count} matches. Tell me what feels too broad, too strict, or missing and I’ll revise the weights and rerun it.` : "Nothing cleared every rule. Ask me to broaden it, remove a requirement, or emphasize a different idea and I’ll revise the recipe instead of inventing matches."}); document.getElementById("screenResults").innerHTML = renderScreenResults(s.result); renderScreenRefine(s); finish(); });
   es.addEventListener("screen_error", e => { let msg = "The screen could not finish."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screening stopped</b><span>${esc(msg)}</span></div>`; finish(); });
   es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Make sure the Squall server is running, then try again.</span></div>`; finish(); } };
+}
+function renderScreenRefine(s) {
+  const el = document.getElementById("screenRefine"); if (!el) return;
+  if (!s?.spec) { el.innerHTML=""; return; }
+  const messages=(s.history||[]).map(m => `<div class="screen-chat-msg ${m.role}"><span>${m.role === "user" ? "You" : "Squall"}</span><p>${esc(m.content)}</p></div>`).join("");
+  el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Refine this screen</h2><p>Keep talking normally. Squall changes the measurable recipe, then the backend reruns every stock.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden it and remove unnecessary hard requirements')">Broaden it</button><button type="button" onclick="refineScreener('Narrow it to the strongest matches')">Narrow it</button><button type="button" onclick="refineScreener('Add more emphasis to relative strength')">Add relative strength</button><button type="button" onclick="refineScreener('Add unusual volume')">Add unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="Try: remove value, care more about cash flow, make it less strict…" aria-label="Refine this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Rerunning…" : "Send & rerun"}</button></form></section>`;
+  const messagesEl=el.querySelector(".screen-chat-messages"); if(messagesEl) messagesEl.scrollTop=messagesEl.scrollHeight;
+}
+function refineScreener(rawMessage) {
+  const message=String(rawMessage||"").trim(), s=screeners[activeScreen];
+  if (!s || !s.spec || message.length < 2 || s.loading) return;
+  if (_screenES) _screenES.close();
+  s.history=(s.history||[]).concat({role:"user",content:message}).slice(-20); s.loading=true; s.updatedAt=Date.now();
+  renderScreenRefine(s); persistScreeners();
+  document.getElementById("screenProgressText").textContent="Revising the recipe from your follow-up…";
+  document.getElementById("screenProgress").classList.add("show");
+  let url="/screen-stream?q="+encodeURIComponent(message)+"&existing="+encodeURIComponent(JSON.stringify(s.spec))+"&result_count="+encodeURIComponent((s.result?.results||[]).length);
+  if(s.profile) url+="&profile="+encodeURIComponent(JSON.stringify(s.profile));
+  const es=_screenES=new EventSource(url); let reply="";
+  const finish=()=>{s.loading=false;s.updatedAt=Date.now();document.getElementById("screenProgress").classList.remove("show");persistScreeners();renderScreenRefine(s);renderTickerPills();es.close();if(_screenES===es)_screenES=null;};
+  es.addEventListener("screen_progress",e=>{const d=JSON.parse(e.data);document.getElementById("screenProgressText").textContent=d.label||"Rerunning the screen…";});
+  es.addEventListener("screen_reply",e=>{reply=JSON.parse(e.data).reply||"";});
+  es.addEventListener("screen_interpretation",e=>{s.spec=JSON.parse(e.data);s.title=s.spec.title||s.title;document.getElementById("screenInterpretation").innerHTML=renderScreenRecipe(s.spec);renderTickerPills();});
+  es.addEventListener("screen_result",e=>{s.result=JSON.parse(e.data);s.history.push({role:"assistant",content:reply||`I revised the recipe and found ${(s.result.results||[]).length} matches.`});s.history=s.history.slice(-20);document.getElementById("screenResults").innerHTML=renderScreenResults(s.result);finish();});
+  es.addEventListener("screen_error",e=>{let msg="I couldn’t rerun that revision.";try{msg=JSON.parse(e.data).error||msg;}catch(_){}s.history.push({role:"assistant",content:msg});finish();});
+  es.onerror=()=>{if(_screenES===es){s.history.push({role:"assistant",content:"The connection dropped before I could rerun the revised recipe. Please try that follow-up again."});finish();}};
 }
 document.querySelectorAll("[data-screen-example]").forEach(button => button.addEventListener("click", () => { document.getElementById("screenQuery").value = button.dataset.screenExample; document.getElementById("screenQuery").focus(); }));
 

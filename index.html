@@ -275,6 +275,11 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .recipe-chip b { display: block; color: var(--bright); font-size: 11px; }
 .recipe-chip span { color: var(--text-dim); font: 9px var(--mono); }
 .recipe-adjust { margin-top: 10px; color: var(--accent); font-size: 10.5px; }
+.recipe-definitions { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 6px; margin-top: 12px; }
+.recipe-definition { border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); }
+.recipe-definition summary { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--text); cursor: pointer; font-size: 10.5px; }
+.recipe-definition summary span { color: var(--text-dim); font: 8px var(--mono); text-transform: uppercase; }
+.recipe-definition p { margin: 0; padding: 0 10px 10px; color: var(--text-dim); font-size: 10px; line-height: 1.45; }
 .screen-results-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 24px 0 10px; }
 .screen-results-head h2 { color: var(--bright); font-family: var(--display); font-size: 16px; }
 .screen-results-head span { color: var(--text-dim); font: 10px var(--mono); }
@@ -295,6 +300,18 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .screen-reason { color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
 .screen-reason::before { content: "✓"; color: var(--green); margin-right: 6px; }
 .screen-empty { padding: 34px; text-align: center; color: var(--text-dim); border: 1px dashed var(--border); border-radius: var(--radius); }
+.screen-empty b, .screen-empty span { display: block; }.screen-empty span { margin-top: 6px; font-size: 11px; }
+.screen-refine { margin-top: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
+.screen-refine-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 15px 16px; border-bottom: 1px solid var(--border-soft); }
+.screen-refine-head h2 { color: var(--bright); font-family: var(--display); font-size: 15px; }.screen-refine-head p { margin-top: 3px; color: var(--text-dim); font-size: 10.5px; }
+.screen-refine-head > span { flex-shrink: 0; color: var(--violet); font: 9px var(--mono); }
+.screen-chat-messages { max-height: 290px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.screen-chat-msg { max-width: min(720px,88%); padding: 9px 11px; border-radius: 10px; background: var(--surface-2); }
+.screen-chat-msg.user { align-self: flex-end; background: rgba(157,140,240,.12); }.screen-chat-msg.assistant { align-self: flex-start; }
+.screen-chat-msg span { display: block; margin-bottom: 3px; color: var(--violet); font: 8px var(--mono); text-transform: uppercase; }.screen-chat-msg p { color: var(--text); font-size: 11px; line-height: 1.5; }
+.screen-refine-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 11px; }
+.screen-refine-prompts button { border: 1px solid var(--border-soft); border-radius: 99px; background: transparent; color: var(--text-dim); padding: 5px 8px; cursor: pointer; font-size: 9.5px; }.screen-refine-prompts button:hover { color: var(--violet); border-color: var(--violet); }
+.screen-refine-form { display: flex; gap: 8px; padding: 11px; border-top: 1px solid var(--border-soft); background: var(--surface-2); }.screen-refine-form input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--bright); padding: 9px 10px; outline: 0; font-size: 11px; }.screen-refine-form input:focus { border-color: var(--violet); }.screen-refine-form button { border: 0; border-radius: 8px; background: var(--violet); color: #fff; padding: 0 13px; cursor: pointer; font-weight: 700; font-size: 10.5px; }.screen-refine-form button:disabled { opacity: .5; }
 
 /* MAIN SPLIT */
 #workspace { flex: 1; display: none; min-height: 0; }
@@ -945,6 +962,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
     <div id="screenProgress" role="status"><i class="screen-spinner"></i><span id="screenProgressText">Interpreting your request…</span></div>
     <div id="screenInterpretation"></div>
     <div id="screenResults"></div>
+    <div id="screenRefine"></div>
   </div>
 </section>
 
