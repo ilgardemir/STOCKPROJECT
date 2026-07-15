@@ -205,6 +205,28 @@ const SCREENER_CATALOG = {
 const SCREENER_CONCEPTS = new Set(Object.keys(SCREENER_CATALOG));
 const SCREENER_SECTORS = ["Technology", "Financial Services", "Healthcare", "Consumer Cyclical", "Consumer Defensive", "Industrials", "Energy", "Utilities", "Real Estate", "Basic Materials", "Communication Services"];
 
+// Thematic matching keyword sets. The LLM expands arbitrary themes at runtime;
+// this small lexicon just keeps the no-API-key fallback from being theme-blind.
+// Matching happens in screener.py against each company's business description —
+// the descriptions never touch the model, so this adds ~no tokens per screen.
+const THEME_LEXICON = {
+  "AI":            { trigger:/\b(a\.?i\.?|artificial intelligence|machine learning|\bml\b|deep learning|generative|\bllm\b|neural)\b/, label:"Artificial intelligence", keywords:["artificial intelligence", "machine learning", "deep learning", "generative", "large language model", "neural network", "inference", "gpu", "accelerated computing", "data center", "computer vision", "autonomous"] },
+  "cybersecurity": { trigger:/\b(cyber ?security|cyber|infosec|firewall|endpoint security|zero trust)\b/, label:"Cybersecurity", keywords:["cybersecurity", "security", "threat", "firewall", "endpoint", "identity", "encryption", "malware", "zero trust", "cloud security"] },
+  "cloud":         { trigger:/\b(cloud computing|saas|cloud infrastructure|hyperscal)\b/, label:"Cloud computing", keywords:["cloud", "saas", "software as a service", "data center", "infrastructure", "platform", "subscription"] },
+  "semiconductors":{ trigger:/\b(semiconductor|chip ?maker|chips|foundry|fabless|wafer)\b/, label:"Semiconductors", keywords:["semiconductor", "chip", "integrated circuit", "foundry", "wafer", "fabless", "processor", "memory", "silicon"] },
+  "EV":            { trigger:/\b(electric vehicle|\bev\b|ev makers?|electric car)\b/, label:"Electric vehicles", keywords:["electric vehicle", "battery", "charging", "lithium", "powertrain", "autonomous driving"] },
+  "clean energy":  { trigger:/\b(clean energy|renewable|solar|wind power|green energy)\b/, label:"Clean energy", keywords:["solar", "renewable", "wind", "clean energy", "photovoltaic", "battery storage", "hydrogen", "decarboniz"] },
+  "biotech":       { trigger:/\b(biotech|biotechnology|drug ?maker|pharmaceutical|gene therapy|oncology)\b/, label:"Biotech / pharma", keywords:["biotechnology", "pharmaceutical", "therapeutic", "clinical", "drug", "oncology", "gene therapy", "fda", "molecule"] },
+  "defense":       { trigger:/\b(defense|defence|aerospace|military|weapons)\b/, label:"Defense / aerospace", keywords:["defense", "aerospace", "military", "missile", "aircraft", "government", "national security", "radar"] },
+  "obesity":       { trigger:/\b(obesity|weight ?loss|glp-?1|ozempic|wegovy)\b/, label:"Obesity / GLP-1", keywords:["obesity", "glp-1", "weight", "diabetes", "metabolic", "incretin"] }
+};
+function detectTheme(q) {
+  const text = String(q || "").toLowerCase();
+  for (const t of Object.values(THEME_LEXICON))
+    if (t.trigger.test(text)) return { label:t.label, keywords:[...t.keywords] };
+  return null;
+}
+
 function readSp500Universe() {
   const src = fs.readFileSync(path.join(__dirname, "sp500.js"), "utf8");
   const tickers = src.match(/window\.SP500\s*=\s*(\[[\s\S]*?\]);/)?.[1];
@@ -278,12 +300,21 @@ function fallbackScreenerSpec(query, rawProfile) {
   const price = numberAfter(/(?:price|stocks?).{0,8}(?:over|above|at least)\s*\$?(\d+(?:\.\d+)?)/);
   if (price !== null) filters.price_min = price;
 
-  return {
+  const theme = detectTheme(q);
+  // A bare theme query ("AI stocks") needs no quantitative concept — the theme
+  // gate does the selecting. Seed a mild quality tilt only so ranking isn't flat.
+  if (theme && !concepts.length) add("quality", 0.6);
+
+  const spec = {
     query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "S&P 500 screen",
-    summary: `Rank S&P 500 companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
+    summary: theme
+      ? `Find S&P 500 companies in the ${theme.label} theme${concepts.length ? ", ranked by " + concepts.map(c => c.id.replaceAll("_", " ")).join(", ") : ""}.`
+      : `Rank S&P 500 companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
     concepts, filters, settings: { consolidation_window: consolidationWindow, match_threshold: threshold },
     max_results: 20, profile_adjustments: profileAdjustments, interpretation_source: "rules"
   };
+  if (theme) spec.theme = theme;
+  return spec;
 }
 
 function attachScreenerDefinitions(spec) {
@@ -319,6 +350,20 @@ function sanitizeScreenerSpec(candidate, fallback) {
   }
   const maxResults = Number(candidate.max_results);
   if (Number.isFinite(maxResults)) safe.max_results = Math.max(5, Math.min(50, Math.round(maxResults)));
+  // Theme: a label + keyword list matched against company descriptions in Python.
+  // Sanitize hard (lowercase, drop odd chars, cap count/length) — these become
+  // literal substring probes, so keep them clean; absent/empty theme is dropped.
+  if (candidate.theme && typeof candidate.theme === "object" && !Array.isArray(candidate.theme)) {
+    const keywords = Array.isArray(candidate.theme.keywords)
+      ? [...new Set(candidate.theme.keywords
+          .map(k => String(k).toLowerCase().replace(/[^a-z0-9 +.\-]/g, " ").replace(/\s+/g, " ").trim())
+          .filter(k => k.length >= 2 && k.length <= 40))].slice(0, 24)
+      : [];
+    if (keywords.length) {
+      const label = String(candidate.theme.label || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 40) || "Theme";
+      safe.theme = { label, keywords };
+    }
+  }
   return attachScreenerDefinitions(safe);
 }
 
@@ -333,7 +378,9 @@ async function interpretScreenerQuery(query, profile) {
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
       body: JSON.stringify({ model: SEARCH_MODEL, temperature: .05, max_tokens: 900,
         messages: [
-          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min). Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only. Return JSON only.` },
+          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min), and optionally theme. Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only.
+
+THEME: only when the request names an industry, technology, product, or trend that the quantitative concepts above cannot capture (e.g. "AI stocks", "cybersecurity", "obesity drugs", "nuclear"), add theme={label, keywords}. keywords = 6-16 short lowercase words/phrases likely to appear verbatim in a company's business-description text — include synonyms, core technologies, and product terms (e.g. AI → "artificial intelligence","machine learning","gpu","accelerated computing","inference","neural network"). These are matched literally against company descriptions by the backend; the descriptions reflect established business, not last week's news. Omit theme entirely for purely quantitative requests. Return JSON only.` },
           { role:"user", content:`Request: ${String(query).slice(0,500)}\n\n${profileText || "No MySquall profile."}\n\nRule-based starting point: ${JSON.stringify(fallback)}` }
         ] })
     });
@@ -363,6 +410,9 @@ function fallbackRefineScreener(message, existing, profile, resultCount) {
   if (remove && /sector|industry/.test(text)) { delete next.filters.sector; removedFilters.push("the sector filter"); }
   if (remove && /volume limit|minimum volume/.test(text)) { delete next.filters.volume_min; removedFilters.push("the volume limit"); }
   if (remove && /dividend|yield limit/.test(text)) { delete next.filters.dividend_yield_min; removedFilters.push("the dividend limit"); }
+  if (remove && /theme|topic|industry theme/.test(text) && next.theme) { delete next.theme; removedFilters.push("the theme filter"); }
+  const newTheme = !remove ? detectTheme(message) : null;
+  if (newTheme) next.theme = newTheme;
   if (removedFilters.length) {
     reply = `I removed ${removedFilters.join(", ")} and reran the remaining weighted recipe.`;
   } else if (broaden) {
@@ -408,7 +458,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
       body:JSON.stringify({ model:SEARCH_MODEL, temperature:.08, max_tokens:1100, messages:[
-        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, and max_results. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
+        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords}. Keep the existing theme unless the user changes the subject or asks to drop it (then omit theme); if they name a new industry/technology theme, replace it with 6-16 lowercase description keywords. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
     });

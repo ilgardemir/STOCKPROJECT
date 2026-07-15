@@ -19,7 +19,7 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 2
+CACHE_VERSION = 3  # bumped: rows now carry business_summary for theme matching
 
 
 def stage(n, label):
@@ -229,6 +229,9 @@ def build_universe(tickers, names):
         feat.update({
             "ticker": ticker, "name": names.get(ticker) or price.get("longName") or price.get("shortName") or ticker,
             "sector": profile.get("sector") or "Unknown", "industry": profile.get("industry") or "Unknown",
+            # Business description (already fetched via asset_profile) — used for
+            # deterministic theme keyword matching. Truncated to bound cache size.
+            "business_summary": (str(profile.get("longBusinessSummary") or "")[:2400]),
             "market_cap": finite(price.get("marketCap")),
             "pe": finite(summary.get("trailingPE")), "forward_pe": finite(summary.get("forwardPE")),
             "price_to_sales": finite(summary.get("priceToSalesTrailing12Months")), "payout_ratio": finite(summary.get("payoutRatio")),
@@ -360,25 +363,79 @@ def explain(row, concepts, settings):
     return list(dict.fromkeys(reasons))[:3]
 
 
+THEME_FLOOR = 20  # min description-match score to count as thematically relevant
+
+
+def theme_relevance(summary, keywords):
+    """Score how strongly a company's business description matches theme keywords.
+
+    Deterministic literal substring matching — no model, no tokens. Distinct
+    keyword hits dominate; repeated hits add a small bonus. Returns (score,
+    matched_terms) or (None, []) when there's no description to judge.
+    """
+    text = str(summary or "").lower()
+    if not text or not keywords:
+        return None, []
+    matched, total = [], 0
+    for kw in keywords:
+        k = str(kw).lower().strip()
+        if len(k) < 2:
+            continue
+        c = text.count(k)
+        if c > 0:
+            matched.append(kw)
+            total += c
+    if not matched:
+        return 0.0, []
+    score = clamp(len(matched) * 30 + min(total - len(matched), 8) * 3)
+    # Prefer the longest (most specific) matched phrases in the explanation.
+    matched.sort(key=len, reverse=True)
+    return round(score, 1), matched[:4]
+
+
 def screen(rows, spec):
     concepts = spec.get("concepts") or [{"id": "quality", "weight": 1}]
     settings = spec.get("settings") or {}
     filters = spec.get("filters") or {}
+    theme = spec.get("theme") or {}
+    theme_keywords = theme.get("keywords") if isinstance(theme, dict) else None
     threshold = clamp(settings.get("match_threshold", 48), 20, 85)
     ranked = []
     for row in rows:
         if not passes_filters(row, filters):
             continue
+
+        # Theme gate: when a theme is requested, a company must visibly match it
+        # in its business description (or it's dropped — we don't guess). This is
+        # what keeps a respiratory-device maker out of an "AI stocks" screen.
+        theme_val, theme_terms = None, []
+        if theme_keywords:
+            theme_val, theme_terms = theme_relevance(row.get("business_summary"), theme_keywords)
+            if theme_val is None or theme_val < THEME_FLOOR:
+                continue
+
         scores = [(c, concept_score(row, c.get("id"), settings)) for c in concepts if c.get("id") in CONCEPT_LABELS]
         if not scores:
             continue
         total_weight = sum(max(.1, finite(c.get("weight"), 1)) for c, _ in scores)
-        score = sum(s * max(.1, finite(c.get("weight"), 1)) for c, s in scores) / total_weight
+        concept_blend = sum(s * max(.1, finite(c.get("weight"), 1)) for c, s in scores) / total_weight
+
+        # With a theme, it drives ranking (concepts refine within the theme);
+        # without one, the concept blend is the whole score, as before.
+        score = 0.55 * theme_val + 0.45 * concept_blend if theme_val is not None else concept_blend
+
         must = [s for c, s in scores if c.get("required")]
         if score < threshold or (must and min(must) < max(30, threshold - 12)):
             continue
+
         result = {k: row.get(k) for k in ("ticker", "name", "sector", "industry", "price", "market_cap", "pe", "return_20d", "return_60d", "distance_52w_high", "volume_ratio", "volatility")}
-        result.update({"match_score": round(score, 1), "concept_scores": {c["id"]: round(s, 1) for c, s in scores}, "reasons": explain(row, concepts, settings)})
+        reasons = explain(row, concepts, settings)
+        if theme_terms:
+            reasons = [f"{theme.get('label', 'Theme')} match: description mentions {', '.join(theme_terms)}"] + reasons
+        result.update({"match_score": round(score, 1), "concept_scores": {c["id"]: round(s, 1) for c, s in scores}, "reasons": reasons[:4]})
+        if theme_val is not None:
+            result["theme_score"] = theme_val
+            result["theme_terms"] = theme_terms
         ranked.append(result)
     ranked.sort(key=lambda x: x["match_score"], reverse=True)
     return ranked[:int(clamp(spec.get("max_results", 20), 5, 50))]
