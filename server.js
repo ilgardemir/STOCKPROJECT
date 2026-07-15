@@ -6,6 +6,7 @@ const path = require("path");
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
 const SCRAPER_PATH = "./scraperFinal.py";
+const SCREENER_PATH = "./screener.py";
 const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = "deepseek/deepseek-v4-flash";         // main analysis — live search is now a separate focused step (below), NOT bolted onto this prompt
 const SEARCH_MODEL = "deepseek/deepseek-v4-flash";       // cheap model for the web-research pass; used with an explicit web plugin, one clean query per topic
@@ -165,6 +166,118 @@ async function gatherResearch(ticker, companyName) {
   return settled.filter(Boolean).map(r => `**${r.label}**\n${r.txt}`).join("\n\n");
 }
 
+// ─── NATURAL-LANGUAGE S&P 500 SCREENER ───────────────────────────────────────
+const SCREENER_CONCEPTS = new Set(["consolidation", "volatility_contraction", "uptrend", "accumulation", "breakout", "momentum", "near_highs", "low_volatility", "oversold", "value", "growth", "quality", "income"]);
+const SCREENER_SECTORS = ["Technology", "Financial Services", "Healthcare", "Consumer Cyclical", "Consumer Defensive", "Industrials", "Energy", "Utilities", "Real Estate", "Basic Materials", "Communication Services"];
+
+function readSp500Universe() {
+  const src = fs.readFileSync(path.join(__dirname, "sp500.js"), "utf8");
+  const tickers = src.match(/window\.SP500\s*=\s*(\[[\s\S]*?\]);/)?.[1];
+  const names = src.match(/window\.SP500_NAMES\s*=\s*(\{[\s\S]*?\});/)?.[1];
+  return { tickers: tickers ? JSON.parse(tickers) : [], names: names ? JSON.parse(names) : {} };
+}
+
+function fallbackScreenerSpec(query, rawProfile) {
+  const q = String(query || "").toLowerCase();
+  const profile = sanitizeProfile(rawProfile);
+  const concepts = [];
+  const add = (id, weight = 1, required = false) => { if (!concepts.some(c => c.id === id)) concepts.push({ id, weight, required }); };
+  if (/consolidat|tight range|base|coiling|sideways/.test(q)) add("consolidation", 1.35, true);
+  if (/volatility contraction|\bvcp\b|volatility.*shrink|getting tighter|contracting/.test(q)) add("volatility_contraction", 1.4, true);
+  if (/uptrend|trending up|higher high|higher low|strong trend/.test(q)) add("uptrend", 1.15);
+  if (/accumulat|institution.*buy|smart money|buying pressure/.test(q)) add("accumulation", 1.2);
+  if (/breakout|breaking out|new high/.test(q)) add("breakout", 1.25);
+  if (/momentum|moving fast|relative strength|winner/.test(q)) add("momentum", 1.1);
+  if (/near.*high|52.week high|close to.*high/.test(q)) add("near_highs", 1.05);
+  if (/low vol|less volatile|stable|safer|defensive/.test(q)) add("low_volatility", 1.1);
+  if (/oversold|beaten down|pullback|dip/.test(q)) add("oversold", 1.0);
+  if (/cheap|undervalued|value|low p.?e/.test(q)) add("value", 1.0);
+  if (/growth|growing|revenue growth|earnings growth/.test(q)) add("growth", 1.0);
+  if (/quality|profitable|strong business|good compan/.test(q)) add("quality", 1.0);
+  if (/dividend|income|yield/.test(q)) add("income", 1.0);
+
+  const profileAdjustments = [];
+  const horizon = profile?.horizon || 3;
+  const consolidationWindow = horizon <= 2 ? 20 : horizon >= 4 ? 60 : 30;
+  if (concepts.some(c => c.id === "consolidation" || c.id === "volatility_contraction"))
+    profileAdjustments.push(`Used a ${consolidationWindow}-day structure window for your MySquall holding period.`);
+  let threshold = profile?.risk <= 2 ? 55 : profile?.risk >= 4 ? 44 : 49;
+  if (profile?.risk <= 2 && !concepts.length) { add("low_volatility", 1.2); profileAdjustments.push("Emphasized lower volatility because your profile prioritizes capital protection."); }
+  if (!concepts.length) {
+    if (profile?.style === "value") add("value", 1.1);
+    else if (profile?.style === "growth") add("growth", 1.1);
+    else if (profile?.style === "income") add("income", 1.1);
+    else if (profile?.style === "swing") add("momentum", 1.1);
+    else add("quality", 1.0);
+  }
+
+  let sector = "";
+  for (const s of SCREENER_SECTORS) {
+    const aliases = { "Technology":["tech", "software", "semiconductor"], "Financial Services":["financial", "bank"], "Healthcare":["healthcare", "health care", "biotech"], "Consumer Cyclical":["consumer cyclical", "retail"], "Consumer Defensive":["consumer defensive", "staples"], "Communication Services":["communication", "media", "telecom"], "Basic Materials":["materials"] }[s] || [s.toLowerCase()];
+    if (aliases.some(a => q.includes(a))) { sector = s; break; }
+  }
+  const numberAfter = pattern => finiteNumber(q.match(pattern)?.[1]);
+  const finiteNumber = value => { const n = Number(value); return Number.isFinite(n) ? n : null; };
+  const filters = { sector };
+  const pe = numberAfter(/(?:p\/?e|pe).{0,8}(?:under|below|less than|max)\s*(\d+(?:\.\d+)?)/);
+  if (pe !== null) filters.pe_max = pe;
+  const price = numberAfter(/(?:price|stocks?).{0,8}(?:over|above|at least)\s*\$?(\d+(?:\.\d+)?)/);
+  if (price !== null) filters.price_min = price;
+
+  return {
+    query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "S&P 500 screen",
+    summary: `Rank S&P 500 companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
+    concepts, filters, settings: { consolidation_window: consolidationWindow, match_threshold: threshold },
+    max_results: 20, profile_adjustments: profileAdjustments, interpretation_source: "rules"
+  };
+}
+
+function sanitizeScreenerSpec(candidate, fallback) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return fallback;
+  const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 6).map(c => ({
+    id: c.id, weight: Math.max(.25, Math.min(3, Number(c.weight) || 1)), required: Boolean(c.required)
+  })) : [];
+  const safe = { ...fallback };
+  if (concepts.length) safe.concepts = concepts;
+  safe.title = String(candidate.title || fallback.title).replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 54);
+  safe.summary = String(candidate.summary || fallback.summary).replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 280);
+  safe.interpretation_source = "ai";
+  if (candidate.filters && typeof candidate.filters === "object") {
+    const f = { ...fallback.filters };
+    const sector = String(candidate.filters.sector || "").trim();
+    if (!sector || SCREENER_SECTORS.includes(sector)) f.sector = sector;
+    ["market_cap_min", "market_cap_max", "price_min", "price_max", "pe_max", "volume_min", "dividend_yield_min"].forEach(k => {
+      const n = Number(candidate.filters[k]); if (Number.isFinite(n) && n >= 0) f[k] = n;
+    });
+    safe.filters = f;
+  }
+  return safe;
+}
+
+async function interpretScreenerQuery(query, profile) {
+  const fallback = fallbackScreenerSpec(query, profile);
+  if (!API_KEY || API_KEY === "YOUR_OPENROUTER_KEY_HERE") return fallback;
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const profileText = formatProfile(profile);
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST", signal: ctrl.signal,
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
+      body: JSON.stringify({ model: SEARCH_MODEL, temperature: .05, max_tokens: 900,
+        messages: [
+          { role:"system", content:"Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose only from these concepts: consolidation, volatility_contraction, uptrend, accumulation, breakout, momentum, near_highs, low_volatility, oversold, value, growth, quality, income. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min). Interpret fuzzy language, but preserve the user's intent. Return JSON only." },
+          { role:"user", content:`Request: ${String(query).slice(0,500)}\n\n${profileText || "No MySquall profile."}\n\nRule-based starting point: ${JSON.stringify(fallback)}` }
+        ] })
+    });
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    let text = data?.choices?.[0]?.message?.content || "";
+    text = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    return sanitizeScreenerSpec(JSON.parse(text), fallback);
+  } catch { return fallback; }
+  finally { clearTimeout(timer); }
+}
+
 /**
  * Fast format gate — runs BEFORE spawning Python or calling AI.
  * Only rejects obvious garbage; the scraper does the authoritative validation.
@@ -228,6 +341,49 @@ http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, {"Content-Type":"application/json"});
     res.end(JSON.stringify({ status: "ok", model: AI_MODEL }));
+    return;
+  }
+
+  // Natural-language S&P 500 screener. The model interprets intent; Python does
+  // every numerical comparison so results remain reproducible and explainable.
+  if (req.method === "GET" && req.url.startsWith("/screen-stream")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
+    const profile = sanitizeProfile(url.searchParams.get("profile"));
+    res.writeHead(200, { "Content-Type":"text/event-stream", "Cache-Control":"no-cache", "Connection":"keep-alive", "X-Accel-Buffering":"no" });
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (query.length < 3) { send("screen_error", { error:"Describe the kind of S&P 500 stock you want in a little more detail." }); return res.end(); }
+
+    send("screen_progress", { stage:0, total:6, label:"Turning your words into measurable rules" });
+    let spec;
+    try { spec = await interpretScreenerQuery(query, profile); }
+    catch { spec = fallbackScreenerSpec(query, profile); }
+    send("screen_interpretation", spec);
+
+    let universe;
+    try { universe = readSp500Universe(); }
+    catch (e) { send("screen_error", { error:"Could not read the S&P 500 universe: " + e.message }); return res.end(); }
+    const py = spawn(PYTHON, [SCREENER_PATH], { env:process.env });
+    let stdout = "", stderr = "", buf = "";
+    py.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    py.stderr.on("data", chunk => {
+      const text = chunk.toString(); stderr = (stderr + text).slice(-3000); buf += text;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        const m = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
+        if (m) send("screen_progress", { stage:Math.min(6, Number(m[1]) + 1), total:6, label:m[3] });
+      }
+    });
+    py.on("error", e => { send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
+    py.on("close", code => {
+      let result;
+      try { result = JSON.parse(stdout); }
+      catch { send("screen_error", { error:"The screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
+      if (code !== 0 || result.error) { send("screen_error", { error:result.error || "The screening engine failed.", detail:stderr.slice(-500) }); return res.end(); }
+      send("screen_result", result); res.end();
+    });
+    py.stdin.end(JSON.stringify({ tickers:universe.tickers, names:universe.names, spec }));
     return;
   }
 
