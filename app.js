@@ -6,6 +6,10 @@ let active = null;     // active ticker for the chat/AI/data panes
 const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false, sr: true, pct: false, vol: true, instWindow: false };
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
+const SCREENER_STORAGE_KEY = "squall-saved-screeners-v1";
+const screeners = {};   // saved natural-language S&P 500 screens
+let activeScreen = null;
+let _screenES = null;
 const ANALYSIS_RUNS_KEY = "squall-analysis-runs-v1";
 const RUN_WINDOW_MS = 15 * 60 * 1000;
 const RUN_LIMIT = 3;
@@ -51,6 +55,21 @@ function persistSessions() {
   try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved)); return true; }
   catch (_) { return false; }
 }
+function hydrateSavedScreeners() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(SCREENER_STORAGE_KEY) || "{}"); } catch (_) { saved = {}; }
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
+  Object.entries(saved).forEach(([id, raw]) => {
+    if (!raw || typeof raw !== "object" || !raw.query) return;
+    screeners[id] = { ...raw, id, query: String(raw.query), title: String(raw.title || "Saved screen"),
+      createdAt: Number(raw.createdAt) || Date.now(), updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || Date.now() };
+  });
+}
+function persistScreeners() {
+  const saved = {};
+  Object.entries(screeners).forEach(([id, s]) => { saved[id] = { ...s, loading: false }; });
+  try { localStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(saved)); return true; } catch (_) { return false; }
+}
 function touchSession(sess) { if (sess) sess.updatedAt = Date.now(); }
 function recentAnalysisRuns(ticker) {
   let runs = [];
@@ -68,6 +87,7 @@ function analysisRunWait(ticker) {
   return runs.length >= RUN_LIMIT ? Math.max(1, Math.ceil((runs[0].at + RUN_WINDOW_MS - Date.now()) / 60000)) : 0;
 }
 hydrateSavedSessions();
+hydrateSavedScreeners();
 
 /* ════════════════ THEME ════════════════ */
 const SUN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
@@ -405,6 +425,8 @@ function runAnalysis() {
   const btn = document.getElementById("analyzeBtn");
   const profileSnapshot = getMySquallProfile();
   const profileKey = mySquallKey(profileSnapshot);
+  activeScreen = null;
+  document.getElementById("screenerView")?.classList.remove("show");
   if (!query) { showProgress(0, 7, "Enter a ticker or company name first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
   finalizePartialStream();
@@ -607,29 +629,121 @@ function finalizeAiRender(d) {
 /* ════════════════ HOME / WORKSPACE NAVIGATION ════════════════ */
 function goHome() {
   const ws = document.getElementById("workspace"), hero = document.getElementById("hero"), strip = document.getElementById("summaryStrip");
-  if (!ws.classList.contains("show")) return;
+  const screen = document.getElementById("screenerView");
+  if (!ws.classList.contains("show") && !screen?.classList.contains("show")) return;
   ws.classList.add("leaving");
   setTimeout(() => {
     ws.classList.remove("show", "leaving");
+    screen?.classList.remove("show"); activeScreen = null;
     strip.classList.remove("show");
     hero.style.display = "";
     hero.style.animation = "none"; void hero.offsetWidth; hero.style.animation = "";   // replay entrance
-    document.getElementById("resumeChip").classList.toggle("show", Object.keys(sessions).length > 0);
+    document.getElementById("resumeChip").classList.toggle("show", Object.keys(sessions).length + Object.keys(screeners).length > 0);
     document.getElementById("ticker").focus();
   }, 290);
 }
 function showWorkspace(skipAnim) {
   const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
+  document.getElementById("screenerView")?.classList.remove("show"); activeScreen = null;
   if (ws.classList.contains("show")) { if (hero.style.display !== "none") hero.style.display = "none"; return; }
   const reveal = () => { hero.style.display = "none"; hero.classList.remove("leaving"); ws.classList.add("show"); if (active) requestAnimationFrame(drawChart); };
   if (skipAnim || hero.style.display === "none") reveal();
   else { hero.classList.add("leaving"); setTimeout(reveal, 260); }
 }
 function resumeSavedWorkspace() {
-  if (!active || !sessions[active]) active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
+  const latestAnalysis = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0];
+  const latestScreen = Object.keys(screeners).sort((a, b) => screeners[b].updatedAt - screeners[a].updatedAt)[0];
+  if (latestScreen && (!latestAnalysis || screeners[latestScreen].updatedAt > sessions[latestAnalysis].updatedAt)) { openSavedScreener(latestScreen); return; }
+  if (!active || !sessions[active]) active = latestAnalysis || null;
   if (!active) return;
   showWorkspace(true); renderTickerPills(); renderAll(sessions[active].data);
 }
+
+/* ════════════════ NATURAL-LANGUAGE S&P 500 SCREENER ════════════════ */
+const SCREEN_CONCEPT_LABELS = {
+  consolidation: "Consolidation", volatility_contraction: "Shrinking volatility", uptrend: "Uptrend",
+  accumulation: "Accumulation", breakout: "Breakout", momentum: "Momentum", near_highs: "Near 52-week highs",
+  low_volatility: "Lower volatility", oversold: "Oversold pullback", value: "Value", growth: "Growth",
+  quality: "Business quality", income: "Income"
+};
+function openScreener() {
+  document.getElementById("hero").style.display = "none";
+  document.getElementById("workspace").classList.remove("show", "leaving");
+  document.getElementById("summaryStrip").classList.remove("show");
+  document.getElementById("screenerView").classList.add("show");
+  renderTickerPills();
+  setTimeout(() => document.getElementById("screenQuery")?.focus(), 0);
+}
+function openSavedScreener(id) {
+  const s = screeners[id]; if (!s) return;
+  activeScreen = id; active = null; openScreener();
+  document.getElementById("screenQuery").value = s.query;
+  renderSavedScreener(s); renderTickerPills();
+}
+function deleteScreener(id) {
+  if (!screeners[id]) return;
+  delete screeners[id];
+  if (activeScreen === id) {
+    activeScreen = null;
+    const next = Object.keys(screeners).sort((a, b) => screeners[b].updatedAt - screeners[a].updatedAt)[0];
+    if (next) { persistScreeners(); openSavedScreener(next); return; }
+    document.getElementById("screenInterpretation").innerHTML = "";
+    document.getElementById("screenResults").innerHTML = "";
+    goHome();
+  }
+  persistScreeners(); renderTickerPills();
+}
+function screenPct(v) { return isNum(v) ? (v * 100).toFixed(1) + "%" : "N/A"; }
+function renderScreenRecipe(spec) {
+  if (!spec) return "";
+  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.required ? "required · " : ""}${Math.round((Number(c.weight) || 1) * 100)}% weight</span></div>`).join("");
+  const filters = Object.entries(spec.filters || {}).filter(([, v]) => v !== null && v !== "" && v !== undefined)
+    .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(v)}</span></div>`).join("");
+  const adjustments = (spec.profile_adjustments || []).map(a => `<div class="recipe-adjust">MySquall adjustment · ${esc(a)}</div>`).join("");
+  const window = spec.settings?.consolidation_window;
+  const definition = (spec.concepts || []).some(c => c.id === "consolidation")
+    ? `<div class="recipe-adjust">Definition · consolidation uses a ${esc(window || 30)}-trading-day price range, ATR contraction, volume dry-up, and proximity to highs.</div>` : "";
+  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.source || "rules")}</span></div><div class="recipe-chips">${concepts}${filters}</div>${adjustments}${definition}<div class="recipe-adjust">A match score measures fit to this recipe; it is not a prediction or recommendation.</div></div>`;
+}
+function renderScreenResults(result) {
+  if (!result) return "";
+  const rows = result.results || [];
+  if (!rows.length) return `<div class="screen-empty"><b>No stocks cleared every rule.</b><span>Try loosening one requirement or using broader wording. Squall will never invent a match just to fill the page.</span></div>`;
+  const cards = rows.map(r => `<article class="screen-result"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" title="Recipe match score">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div><div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
+  return `<div class="screen-results-head"><h2>${rows.length} measurable matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} S&P 500 companies scored${result.cache_hit ? " · cached market data" : ""}</span></div><div class="screen-grid">${cards}</div>`;
+}
+function renderSavedScreener(s) {
+  document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec);
+  document.getElementById("screenResults").innerHTML = renderScreenResults(s.result);
+}
+function analyzeFromScreener(ticker) {
+  document.getElementById("ticker").value = ticker;
+  runAnalysis();
+}
+function runScreener() {
+  const query = document.getElementById("screenQuery").value.trim();
+  if (query.length < 3) { document.getElementById("screenProgressText").textContent = "Describe what you want in a little more detail."; document.getElementById("screenProgress").classList.add("show"); return; }
+  if (_screenES) _screenES.close();
+  openScreener();
+  const id = "screen-" + Date.now().toString(36), now = Date.now();
+  const s = screeners[id] = { id, query, title: "New S&P screen", spec: null, result: null, profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
+  activeScreen = id;
+  document.getElementById("screenRun").disabled = true;
+  document.getElementById("screenProgressText").textContent = "Interpreting your request…";
+  document.getElementById("screenProgress").classList.add("show");
+  document.getElementById("screenInterpretation").innerHTML = ""; document.getElementById("screenResults").innerHTML = "";
+  renderTickerPills();
+  let url = "/screen-stream?q=" + encodeURIComponent(query);
+  if (s.profile) url += "&profile=" + encodeURIComponent(JSON.stringify(s.profile));
+  const es = _screenES = new EventSource(url);
+  const finish = () => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; document.getElementById("screenProgress").classList.remove("show"); persistScreeners(); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
+  es.addEventListener("screen_progress", e => { const d = JSON.parse(e.data); document.getElementById("screenProgressText").textContent = d.label || "Screening the S&P 500…"; });
+  es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved S&P screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
+  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); document.getElementById("screenResults").innerHTML = renderScreenResults(s.result); finish(); });
+  es.addEventListener("screen_error", e => { let msg = "The screen could not finish."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screening stopped</b><span>${esc(msg)}</span></div>`; finish(); });
+  es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Make sure the Squall server is running, then try again.</span></div>`; finish(); } };
+}
+document.querySelectorAll("[data-screen-example]").forEach(button => button.addEventListener("click", () => { document.getElementById("screenQuery").value = button.dataset.screenExample; document.getElementById("screenQuery").focus(); }));
 
 /* ════════════════ RENDER HELPERS ════════════════ */
 let _cardN = 0;
@@ -679,26 +793,31 @@ function signalHtml(s) { const m = String(s).match(/^([^:]+):\s*(.*)$/);
 
 /* ════════════════ SAVED ANALYSIS TABS ════════════════ */
 function renderTickerPills() {
-  const keys = Object.keys(sessions).sort((a, b) => sessions[a].createdAt - sessions[b].createdAt);
+  const items = [
+    ...Object.keys(sessions).map(key => ({ kind: "analysis", key, at: sessions[key].createdAt })),
+    ...Object.keys(screeners).map(key => ({ kind: "screen", key, at: screeners[key].createdAt }))
+  ].sort((a, b) => a.at - b.at);
   const el = document.getElementById("analysisTabs");
   if (!el) return;
-  el.innerHTML = keys.map(t => {
-    const s = sessions[t], when = new Date(s.createdAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    return `<div class="analysis-tab ${t === active ? "active" : ""}" data-ticker="${esc(t)}">
-      <button class="analysis-tab-main" type="button" title="Open saved ${esc(t)} analysis"><b>${esc(t)}</b><span>${esc(when)}</span></button>
-      <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(t)} analysis" title="Delete this analysis">×</button>
+  el.innerHTML = items.map(item => {
+    const s = item.kind === "analysis" ? sessions[item.key] : screeners[item.key];
+    const when = new Date(s.createdAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const label = item.kind === "analysis" ? item.key : (s.title || "Saved screen");
+    const selected = item.kind === "analysis" ? (!activeScreen && item.key === active) : item.key === activeScreen;
+    return `<div class="analysis-tab ${item.kind === "screen" ? "screener-tab" : ""} ${selected ? "active" : ""}" data-kind="${item.kind}" data-key="${esc(item.key)}">
+      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "⌁ " : ""}${esc(label)}</b><span>${esc(when)}</span></button>
+      <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(label)}" title="Delete this saved item">×</button>
     </div>`;
   }).join("");
   el.querySelectorAll(".analysis-tab").forEach(tab => {
-    const ticker = tab.dataset.ticker;
-    tab.querySelector(".analysis-tab-main").onclick = () => switchTicker(ticker);
-    tab.querySelector(".analysis-tab-close").onclick = () => deleteSession(ticker);
+    tab.querySelector(".analysis-tab-main").onclick = () => tab.dataset.kind === "screen" ? openSavedScreener(tab.dataset.key) : switchTicker(tab.dataset.key);
+    tab.querySelector(".analysis-tab-close").onclick = () => tab.dataset.kind === "screen" ? deleteScreener(tab.dataset.key) : deleteSession(tab.dataset.key);
   });
-  document.getElementById("resumeChip")?.classList.toggle("show", keys.length > 0);
+  document.getElementById("resumeChip")?.classList.toggle("show", items.length > 0);
 }
 function switchTicker(t) {
   if (!sessions[t]) return;
-  active = t;
+  active = t; activeScreen = null;
   showWorkspace(true);
   renderTickerPills();
   renderAll(sessions[t].data);
