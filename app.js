@@ -5,6 +5,69 @@ const sessions = {};   // { TICKER: { data, context, history, range } }
 let active = null;     // active ticker for the chat/AI/data panes
 const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false, sr: true, pct: false, vol: true, instWindow: false };
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
+const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
+const ANALYSIS_RUNS_KEY = "squall-analysis-runs-v1";
+const RUN_WINDOW_MS = 15 * 60 * 1000;
+const RUN_LIMIT = 3;
+
+function cleanHistory(history) {
+  return Array.isArray(history) ? history.map(m => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: String(m.content || ""),
+    reasoning: String(m.reasoning || ""),
+    error: Boolean(m.error)
+  })) : [];
+}
+function hydrateSavedSessions() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "{}"); } catch (_) { saved = {}; }
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
+  Object.entries(saved).forEach(([ticker, raw]) => {
+    if (!raw || typeof raw !== "object" || !raw.data || raw.data.ticker !== ticker) return;
+    sessions[ticker] = {
+      data: raw.data,
+      context: String(raw.context || raw.data.ai_prompt || ""),
+      history: cleanHistory(raw.history),
+      range: Number(raw.range) || 252,
+      profile: raw.profile || null,
+      profileKey: String(raw.profileKey || "none"),
+      createdAt: Number(raw.createdAt) || Date.now(),
+      updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || Date.now(),
+      fibAnchors: raw.fibAnchors || null
+    };
+  });
+  active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
+}
+function persistSessions() {
+  const saved = {};
+  Object.entries(sessions).forEach(([ticker, s]) => {
+    saved[ticker] = {
+      data: s.data, context: s.context, history: cleanHistory(s.history), range: s.range,
+      profile: s.profile || null, profileKey: s.profileKey || "none",
+      createdAt: s.createdAt || Date.now(), updatedAt: s.updatedAt || Date.now(),
+      fibAnchors: s.fibAnchors || null
+    };
+  });
+  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved)); return true; }
+  catch (_) { return false; }
+}
+function touchSession(sess) { if (sess) sess.updatedAt = Date.now(); }
+function recentAnalysisRuns(ticker) {
+  let runs = [];
+  try { runs = JSON.parse(localStorage.getItem(ANALYSIS_RUNS_KEY) || "[]"); } catch (_) {}
+  const cutoff = Date.now() - RUN_WINDOW_MS;
+  return Array.isArray(runs) ? runs.filter(r => r && r.at >= cutoff && (!ticker || r.ticker === ticker)) : [];
+}
+function recordAnalysisRun(ticker) {
+  const runs = recentAnalysisRuns();
+  runs.push({ ticker, at: Date.now() });
+  try { localStorage.setItem(ANALYSIS_RUNS_KEY, JSON.stringify(runs)); } catch (_) {}
+}
+function analysisRunWait(ticker) {
+  const runs = recentAnalysisRuns(ticker);
+  return runs.length >= RUN_LIMIT ? Math.max(1, Math.ceil((runs[0].at + RUN_WINDOW_MS - Date.now()) / 60000)) : 0;
+}
+hydrateSavedSessions();
 
 /* ════════════════ THEME ════════════════ */
 const SUN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
@@ -301,7 +364,7 @@ function finalizePartialStream() {
   // A new run (or navigation) interrupts an in-flight stream — keep what arrived.
   if (_stream && !_stream.done) {
     const s = sessions[_stream.ticker];
-    if (s) { s.data.aiSummary = _stream.answer; s.data.aiReasoning = _stream.thinking; s.data.model = _stream.model; }
+    if (s) { s.data.aiSummary = _stream.answer; s.data.aiReasoning = _stream.thinking; s.data.model = _stream.model; touchSession(s); persistSessions(); }
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
     document.getElementById("aiModelTag")?.classList.remove("live");
   }
@@ -349,7 +412,12 @@ function runAnalysis() {
   // Re-run of something we already hold (matched by ticker)? Reopen instantly, no tokens spent.
   const direct = query.toUpperCase();
   if (sessions[direct] && sessions[direct].data.aiSummary && sessions[direct].profileKey === profileKey) {
-    showWorkspace(); active = direct; renderTickerPills(); renderAll(sessions[direct].data); return;
+    active = direct; showWorkspace(); renderTickerPills(); renderAll(sessions[direct].data); return;
+  }
+  const wait = /^[A-Z.\-]{1,10}$/.test(direct) ? analysisRunWait(direct) : 0;
+  if (wait) {
+    showProgress(0, 7, `You've already run ${RUN_LIMIT} ${direct} analyses recently. Reopen its saved tab or try again in about ${wait} min.`, true);
+    hideProgress(4200); return;
   }
 
   let key = direct;   // session key; updated to the resolved ticker on `result`
@@ -387,8 +455,11 @@ function runAnalysis() {
     const data = JSON.parse(e.data);
     gotResult = true;
     key = data.ticker;   // resolved symbol — re-key so the AI-stream handlers below find the session
+    const now = Date.now();
     sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252,
-      profile: profileSnapshot, profileKey };
+      profile: profileSnapshot, profileKey, createdAt: now, updatedAt: now, fibAnchors: null };
+    recordAnalysisRun(data.ticker);
+    persistSessions();
     active = data.ticker;
     renderTickerPills();
     renderAll(data);
@@ -416,7 +487,7 @@ function runAnalysis() {
   es.addEventListener("ai_done", e => {
     const d = JSON.parse(e.data);
     const sess = sessions[key];
-    if (sess) { sess.data.aiSummary = d.aiSummary; sess.data.aiReasoning = d.aiReasoning; sess.data.model = d.model; }
+    if (sess) { sess.data.aiSummary = d.aiSummary; sess.data.aiReasoning = d.aiReasoning; sess.data.model = d.model; touchSession(sess); persistSessions(); }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
@@ -428,7 +499,7 @@ function runAnalysis() {
   es.addEventListener("ai_error", e => {
     const d = JSON.parse(e.data);
     const sess = sessions[key];
-    if (sess) { sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || ""; }
+    if (sess) { sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || ""; touchSession(sess); persistSessions(); }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
@@ -447,7 +518,7 @@ const RETRY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 // so runAnalysis doesn't short-circuit to the cached-result path.
 function retryAnalysis(t) {
   if (!t) return;
-  if (sessions[t]) sessions[t].data.aiSummary = "";
+  if (sessions[t]) { sessions[t].data.aiSummary = ""; touchSession(sessions[t]); persistSessions(); }
   document.getElementById("ticker").value = t;
   runAnalysis();
 }
@@ -554,6 +625,11 @@ function showWorkspace(skipAnim) {
   if (skipAnim || hero.style.display === "none") reveal();
   else { hero.classList.add("leaving"); setTimeout(reveal, 260); }
 }
+function resumeSavedWorkspace() {
+  if (!active || !sessions[active]) active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
+  if (!active) return;
+  showWorkspace(true); renderTickerPills(); renderAll(sessions[active].data);
+}
 
 /* ════════════════ RENDER HELPERS ════════════════ */
 let _cardN = 0;
@@ -601,24 +677,52 @@ function signalHtml(s) { const m = String(s).match(/^([^:]+):\s*(.*)$/);
   const inner = m ? `<b>${esc(m[1])}:</b>&nbsp;<span>${esc(m[2])}</span>` : esc(s);
   return `<div class="signal ${signalClass(s)}">${inner}</div>`; }
 
-/* ════════════════ TICKER PILLS (per-ticker sessions) ════════════════ */
+/* ════════════════ SAVED ANALYSIS TABS ════════════════ */
 function renderTickerPills() {
-  const keys = Object.keys(sessions);
-  const el = document.getElementById("chatTickers");
-  if (keys.length <= 1) { el.innerHTML = ""; return; }
-  el.innerHTML = keys.map(t => `<button class="chat-tick ${t === active ? "active" : ""}" onclick="switchTicker('${t}')">${esc(t)}</button>`).join("");
+  const keys = Object.keys(sessions).sort((a, b) => sessions[a].createdAt - sessions[b].createdAt);
+  const el = document.getElementById("analysisTabs");
+  if (!el) return;
+  el.innerHTML = keys.map(t => {
+    const s = sessions[t], when = new Date(s.createdAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return `<div class="analysis-tab ${t === active ? "active" : ""}" data-ticker="${esc(t)}">
+      <button class="analysis-tab-main" type="button" title="Open saved ${esc(t)} analysis"><b>${esc(t)}</b><span>${esc(when)}</span></button>
+      <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(t)} analysis" title="Delete this analysis">×</button>
+    </div>`;
+  }).join("");
+  el.querySelectorAll(".analysis-tab").forEach(tab => {
+    const ticker = tab.dataset.ticker;
+    tab.querySelector(".analysis-tab-main").onclick = () => switchTicker(ticker);
+    tab.querySelector(".analysis-tab-close").onclick = () => deleteSession(ticker);
+  });
+  document.getElementById("resumeChip")?.classList.toggle("show", keys.length > 0);
 }
 function switchTicker(t) {
   if (!sessions[t]) return;
   active = t;
+  showWorkspace(true);
   renderTickerPills();
   renderAll(sessions[t].data);
   syncChatSendMode();   // reflect whether this ticker's thread is mid-stream
+}
+function deleteSession(t) {
+  const sess = sessions[t]; if (!sess) return;
+  if (sess._chatAbort) { try { sess._chatAbort.abort(); } catch (_) {} }
+  const keys = Object.keys(sessions), idx = keys.indexOf(t);
+  delete sessions[t];
+  if (active === t) active = keys[idx + 1] && sessions[keys[idx + 1]] ? keys[idx + 1] : keys[idx - 1] && sessions[keys[idx - 1]] ? keys[idx - 1] : Object.keys(sessions)[0] || null;
+  persistSessions(); renderTickerPills();
+  if (active && sessions[active]) { renderAll(sessions[active].data); syncChatSendMode(); }
+  else {
+    document.getElementById("summaryStrip").classList.remove("show");
+    const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
+    ws.classList.remove("show", "leaving"); hero.style.display = "";
+  }
 }
 
 /* ════════════════ RENDER: SUMMARY STRIP ════════════════ */
 function renderStrip(d) {
   const q = d.live_quote || {}, t = (d.raw_data || {}).technicals || {};
+  const company = d.company_profile || {}, regime = d.market_regime || {};
   const price = q.last_price ?? t.current_price, chg = t.daily_change;
   const strip = document.getElementById("summaryStrip");
   strip.innerHTML = `
@@ -626,6 +730,8 @@ function renderStrip(d) {
     <span id="sTicker">${esc(d.ticker)}${q.exchange ? " · " + esc(q.exchange) : ""}</span>
     <span id="sPrice">${fUsd(price)}</span>
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
+    ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
+    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.summary || "")}">${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}%` : ""}</span>` : ""}
     ${(d.price_action && d.price_action.trend) ? `<span class="meta-dot">Structure <b>${esc(d.price_action.trend)}</b></span>` : ""}
     ${q.market_state ? `<span class="meta-dot">Market <b>${esc(q.market_state)}</b></span>` : ""}
     ${q.fetched_at ? `<span class="meta-dot">Fetched <b>${esc(q.fetched_at)}</b></span>` : ""}`;
@@ -653,7 +759,7 @@ function renderAll(d) {
   const r = d.raw_data || {};
   const v = r.valuation || {}, p = r.profitability || {}, fh = r.financial_health || {}, sec = r.sec_fundamentals || {},
         t = r.technicals || {}, rr = r.risk_return || {}, s = r.sentiment || {}, kl = r.key_levels || {};
-  const q = d.live_quote || {}, pa = d.price_action || {}, inst = d.institutional || {};
+  const q = d.live_quote || {}, pa = d.price_action || {}, inst = d.institutional || {}, company = d.company_profile || {}, regime = d.market_regime || {};
   let html = "";
 
   /* Snapshot */
@@ -666,6 +772,8 @@ function renderAll(d) {
     ${metric("Volume", fInt(q.last_volume))}
     ${metric("Market Cap", fUsd(q.market_cap))}
     ${metric("Currency", esc(q.currency || "N/A"))}
+    ${metric("Sector", esc(company.sector || "N/A"))}
+    ${metric("Industry", esc(company.industry || "N/A"))}
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
@@ -674,6 +782,19 @@ function renderAll(d) {
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
     html += card("chart", I.chart, "Candlestick — Price Action", chartCardBody());
+  }
+
+  /* Deterministic market regime — explains the current price/volume environment. */
+  if (regime.label && regime.label !== "INSUFFICIENT DATA") {
+    const confidence = isNum(regime.confidence) ? Math.max(0, Math.min(100, regime.confidence)) : 0;
+    let body = `<div class="regime-summary ${signalClass(regime.label)}">
+      <div><span>Current regime</span><strong>${esc(regime.label)}</strong></div>
+      <div class="regime-confidence"><span>${Math.round(confidence)}% confidence</span><i><b style="width:${confidence}%"></b></i></div>
+      <p>${esc(regime.summary || "Price and volume currently give a mixed signal.")}</p>
+    </div>`;
+    if (Array.isArray(regime.evidence) && regime.evidence.length) body += `<div class="regime-evidence">${regime.evidence.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
+    body += `<p class="learn-note"><b>How to use this:</b> regime describes the current environment; it does not predict the next move. Trend regimes favor continuation setups, while range or transition regimes reward patience and tighter risk controls.</p>`;
+    html += card("regime", I.gauge, "Market Regime", body, { count: regime.label });
   }
 
   /* Price action / market structure */
@@ -890,19 +1011,60 @@ function chartCardBody() {
     ${tog("ma50", "MA 50", "var(--amber)", true)}
     ${tog("ma200", "MA 200", "var(--text-dim)", true)}
     ${tog("bb", "Bollinger", "var(--violet)", true, true)}
-    ${tog("fib", "Fibonacci", "var(--violet)", true, true)}
+    ${tog("fib", "Auto Fib", "var(--violet)", true, true)}
     ${tog("sr", "Support / Resistance", "var(--red)", true, true)}
     ${tog("pct", "% scale", "var(--accent)", false)}
     ${tog("vol", "Volume", "var(--text-dim)", false)}
+    <button class="chart-tool-btn" type="button" data-chart-action="draw-fib">Draw Fib</button>
+    <button class="chart-tool-btn quiet" type="button" data-chart-action="clear-fib">Clear Fib</button>
+    <span class="fib-status" data-fib-status></span>
     <div id="rangeSel"></div></div>
     <div id="chartBox">
       <canvas id="priceChart" role="img" aria-label="Candlestick price chart with volume"></canvas><div id="chartTip"></div>
       <button class="chart-expand-btn" title="Expand chart">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
-    </div>`;
+    </div>
+    <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>`;
 }
 const RANGES = [["1W", 5], ["1M", 21], ["3M", 63], ["6M", 126], ["1Y", 252], ["2Y", 504], ["5Y", 1260]];
+const fibInteraction = { ticker: null, mode: false, pending: null, dragging: null };
+
+function manualFibLevels(anchors) {
+  if (!anchors?.start || !anchors?.end || !isNum(anchors.start.price) || !isNum(anchors.end.price)) return null;
+  const levels = {};
+  [["0%", 0], ["23.6%", .236], ["38.2%", .382], ["50%", .5], ["61.8%", .618], ["78.6%", .786], ["100%", 1]].forEach(([label, ratio]) => {
+    levels[label] = anchors.end.price + (anchors.start.price - anchors.end.price) * ratio;
+  });
+  return levels;
+}
+function syncFibControls() {
+  const sess = sessions[active], drawing = fibInteraction.mode && fibInteraction.ticker === active;
+  document.querySelectorAll('[data-chart-action="draw-fib"]').forEach(btn => {
+    btn.classList.toggle("active", drawing); btn.textContent = drawing ? "Cancel drawing" : (sess?.fibAnchors ? "Redraw Fib" : "Draw Fib");
+  });
+  document.querySelectorAll('[data-chart-action="clear-fib"]').forEach(btn => { btn.disabled = !sess?.fibAnchors && !drawing; });
+  const status = drawing ? (fibInteraction.pending ? "Now choose the swing end" : "Choose the swing start") : (sess?.fibAnchors ? "Custom Fib saved" : "");
+  document.querySelectorAll("[data-fib-status]").forEach(el => { el.textContent = status; });
+}
+function toggleFibDraw() {
+  if (!active || !sessions[active]) return;
+  const same = fibInteraction.mode && fibInteraction.ticker === active;
+  fibInteraction.ticker = active; fibInteraction.mode = !same; fibInteraction.pending = null; fibInteraction.dragging = null;
+  if (!same) chartOpts.fib = true;
+  document.querySelectorAll('input[data-opt="fib"]').forEach(cb => { cb.checked = chartOpts.fib; cb.closest(".toggle")?.classList.toggle("on", chartOpts.fib); });
+  syncFibControls(); drawChart();
+}
+function clearManualFib() {
+  const sess = sessions[active]; if (!sess) return;
+  sess.fibAnchors = null; fibInteraction.mode = false; fibInteraction.pending = null; fibInteraction.dragging = null;
+  touchSession(sess); persistSessions(); syncFibControls(); drawChart();
+}
+document.addEventListener("click", e => {
+  const btn = e.target.closest("[data-chart-action]"); if (!btn) return;
+  if (btn.dataset.chartAction === "draw-fib") toggleFibDraw();
+  if (btn.dataset.chartAction === "clear-fib") clearManualFib();
+});
 
 function buildRangeSel(container) {
   if (!container) return;
@@ -912,7 +1074,7 @@ function buildRangeSel(container) {
   container.querySelectorAll("button").forEach(b => {
     b.onclick = () => {
       const n = Number(b.dataset.range);
-      if (sessions[active]) sessions[active].range = n;
+      if (sessions[active]) { sessions[active].range = n; touchSession(sessions[active]); persistSessions(); }
       // keep both selectors in sync
       ["#rangeSel", "#chartModalRangeSel"].forEach(sel =>
         document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", Number(x.dataset.range) === n)));
@@ -927,6 +1089,7 @@ function wireChartControls() {
   });
   buildRangeSel(document.getElementById("rangeSel"));
   buildRangeSel(document.getElementById("chartModalRangeSel"));
+  syncFibControls();
   const expandBtn = document.querySelector('.chart-expand-btn');
   if (expandBtn) expandBtn.onclick = () => window.expandChart(active);
 }
@@ -979,7 +1142,8 @@ function drawChart() {
   const kl = d.raw_data?.key_levels || {};
   const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(isNum).map(x => [x, cssVar("--red")]),
                                    ...(kl.support || []).filter(isNum).map(x => [x, cssVar("--green")])] : [];
-  const fib = (chartOpts.fib && d.price_action && d.price_action.fib) ? d.price_action.fib : null;
+  const manualAnchors = sess.fibAnchors;
+  const fib = chartOpts.fib ? (manualFibLevels(manualAnchors) || d.price_action?.fib || null) : null;
 
   // price bounds (include overlays so nothing clips)
   let vals = [];
@@ -987,6 +1151,7 @@ function drawChart() {
   if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x)) vals.push(x, bb.lo[i]); });
   srLevels.forEach(l => vals.push(l[0]));
   if (fib) Object.values(fib).forEach(x => { if (isNum(x)) vals.push(x); });
+  if (fibInteraction.ticker === active && fibInteraction.pending) vals.push(fibInteraction.pending.price);
   const lo = Math.min(...vals) * 0.99, hi = Math.max(...vals) * 1.01;
 
   const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = 12, padB = 30;
@@ -1043,6 +1208,21 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(padL, Y(val)); ctx.lineTo(W - padR, Y(val)); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     ctx.fillStyle = cssVar("--violet"); ctx.textAlign = "right"; ctx.fillText(k, W - padR - 3, Y(val) - 3); }); }
 
+  // A custom Fib has a visible swing leg and draggable endpoints.
+  const anchorPoint = anchor => {
+    if (!anchor) return null;
+    const i = data.findIndex(p => p.date === anchor.date);
+    return i < 0 ? null : { x: X(i), y: Y(anchor.price), i };
+  };
+  const startPoint = anchorPoint(manualAnchors?.start), endPoint = anchorPoint(manualAnchors?.end);
+  if (startPoint && endPoint) {
+    ctx.strokeStyle = cssVar("--violet"); ctx.lineWidth = 1.4; ctx.globalAlpha = .8;
+    ctx.beginPath(); ctx.moveTo(startPoint.x, startPoint.y); ctx.lineTo(endPoint.x, endPoint.y); ctx.stroke(); ctx.globalAlpha = 1;
+    [startPoint, endPoint].forEach(point => { ctx.beginPath(); ctx.arc(point.x, point.y, 5, 0, Math.PI * 2); ctx.fillStyle = cssVar("--surface"); ctx.fill(); ctx.strokeStyle = cssVar("--violet"); ctx.lineWidth = 2; ctx.stroke(); });
+  }
+  const pendingPoint = fibInteraction.ticker === active ? anchorPoint(fibInteraction.pending) : null;
+  if (pendingPoint) { ctx.beginPath(); ctx.arc(pendingPoint.x, pendingPoint.y, 6, 0, Math.PI * 2); ctx.fillStyle = cssVar("--violet"); ctx.fill(); }
+
   // MA lines
   const maSpec = [[chartOpts.ma200, ma200, cssVar("--text-dim"), 1.2], [chartOpts.ma50, ma50, cssVar("--amber"), 1.4], [chartOpts.ma20, ma20, cssVar("--accent"), 1.4]];
   maSpec.forEach(([on, arr, color, wgt]) => { if (!on) return; ctx.beginPath(); let st = false;
@@ -1072,10 +1252,17 @@ function drawChart() {
     ctx.fillStyle = grad; ctx.fillRect(frontX - 34, padT, 34, plotB - padT);
   }
 
-  // crosshair / tooltip
-  canvas.onmousemove = e => {
+  const pointFromEvent = e => {
     const rect = canvas.getBoundingClientRect();
     const i = Math.max(0, Math.min(data.length - 1, Math.floor(((e.clientX - rect.left) - padL) / (W - padL - padR) * data.length)));
+    const p = data[i]; if (!p) return null;
+    const py = e.clientY - rect.top;
+    const price = Math.abs(py - Y(p.high)) <= Math.abs(py - Y(p.low)) ? p.high : p.low;
+    return { date: p.date, price, i, x: X(i), y: Y(price) };
+  };
+  const showHover = e => {
+    const hit = pointFromEvent(e); if (!hit) return;
+    const i = hit.i;
     const p = data[i]; if (!p) return;
     drawChart._hover = i; drawChart();
     tipEl.style.display = "block";
@@ -1084,7 +1271,35 @@ function drawChart() {
       <span class="${chg >= 0 ? "tg" : "tr"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span> · Vol ${fInt(p.volume)}`;
     const tx = Math.min(X(i) + 12, W - 160); tipEl.style.left = Math.max(padL, tx) + "px"; tipEl.style.top = "10px";
   };
-  canvas.onmouseleave = () => { tipEl.style.display = "none"; drawChart._hover = null; drawChart(); };
+  canvas.onpointerdown = e => {
+    const hit = pointFromEvent(e); if (!hit) return;
+    const drawing = fibInteraction.mode && fibInteraction.ticker === active;
+    if (drawing) {
+      if (!fibInteraction.pending) fibInteraction.pending = { date: hit.date, price: hit.price };
+      else {
+        sess.fibAnchors = { start: fibInteraction.pending, end: { date: hit.date, price: hit.price } };
+        fibInteraction.pending = null; fibInteraction.mode = false; touchSession(sess); persistSessions();
+      }
+      syncFibControls(); drawChart(); return;
+    }
+    const near = (point, name) => point && Math.hypot((e.clientX - canvas.getBoundingClientRect().left) - point.x, (e.clientY - canvas.getBoundingClientRect().top) - point.y) <= 14 ? name : null;
+    const handle = near(startPoint, "start") || near(endPoint, "end");
+    if (handle) { fibInteraction.dragging = handle; fibInteraction.ticker = active; canvas.setPointerCapture(e.pointerId); e.preventDefault(); }
+  };
+  canvas.onpointermove = e => {
+    if (fibInteraction.dragging && fibInteraction.ticker === active && sess.fibAnchors) {
+      const hit = pointFromEvent(e); if (!hit) return;
+      sess.fibAnchors[fibInteraction.dragging] = { date: hit.date, price: hit.price };
+      tipEl.style.display = "none"; drawChart(); return;
+    }
+    showHover(e);
+  };
+  canvas.onpointerup = () => {
+    if (!fibInteraction.dragging) return;
+    fibInteraction.dragging = null; touchSession(sess); persistSessions(); syncFibControls(); drawChart();
+  };
+  canvas.onpointercancel = canvas.onpointerup;
+  canvas.onmouseleave = () => { if (fibInteraction.dragging) return; tipEl.style.display = "none"; drawChart._hover = null; drawChart(); };
 
   // draw crosshair if hovering
   if (isNum(drawChart._hover) && drawChart._hover < data.length) {
@@ -1278,6 +1493,7 @@ async function streamChatReply(sess) {
 
   aiMsg.streaming = false;
   sess._chatBusy = false; sess._chatAbort = null;
+  touchSession(sess); persistSessions(); renderTickerPills();
   if (sessions[active] === sess) { renderChat(); setChatSendMode(false); }
   document.getElementById("chatInput").focus();
 }
@@ -1288,6 +1504,7 @@ document.getElementById("chatMessages").addEventListener("scroll", function () {
 document.getElementById("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
 syncChatThinkBtn();
 document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
+renderTickerPills();
 
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
 (function () {
