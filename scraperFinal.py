@@ -883,6 +883,69 @@ def analyze_institutional(hist: pd.DataFrame) -> dict:
     if out["obv_trend"] == "FALLING" and dist >= acc: out["net_bias"] = "DISTRIBUTION"
     return out
 
+def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional: dict) -> dict:
+    """Classify the current tape with deterministic price/volume evidence only."""
+    out = {"label":"INSUFFICIENT DATA", "confidence":0, "summary":"", "evidence":[], "scores":{}}
+    if hist is None or hist.empty or len(hist) < 80: return out
+
+    close = hist["Close"].astype(float)
+    last = float(close.iloc[-1])
+    ma20 = float(close.tail(20).mean())
+    ma50 = float(close.tail(50).mean())
+    ma200 = float(close.tail(min(200, len(close))).mean())
+    ret20 = safe_divide(last, float(close.iloc[-21])) - 1 if len(close) >= 21 else 0
+    ret60 = safe_divide(last, float(close.iloc[-61])) - 1 if len(close) >= 61 else 0
+    slope20 = safe_divide(np.polyfit(np.arange(20), close.tail(20).values, 1)[0], ma20)
+    range20 = safe_divide(float(hist["High"].tail(20).max() - hist["Low"].tail(20).min()), last)
+    ma_spread = safe_divide(abs(ma20 - ma50), last)
+    structure = price_action.get("trend", "RANGE")
+    bias = institutional.get("net_bias", "NEUTRAL")
+    up_vol = institutional.get("up_vol_ratio")
+
+    scores = {"TRENDING UP":0, "TRENDING DOWN":0, "ACCUMULATION":0,
+              "DISTRIBUTION":0, "RANGE / TRANSITION":0}
+    if structure == "UPTREND": scores["TRENDING UP"] += 4
+    elif structure == "DOWNTREND": scores["TRENDING DOWN"] += 4
+    else: scores["RANGE / TRANSITION"] += 3
+    if ma20 > ma50 > ma200: scores["TRENDING UP"] += 3
+    elif ma20 < ma50 < ma200: scores["TRENDING DOWN"] += 3
+    elif ma_spread < 0.025: scores["RANGE / TRANSITION"] += 2
+    if ret20 > 0.04 and slope20 > 0: scores["TRENDING UP"] += 2
+    elif ret20 < -0.04 and slope20 < 0: scores["TRENDING DOWN"] += 2
+    elif abs(ret20) < 0.04 and range20 < 0.16: scores["RANGE / TRANSITION"] += 2
+    if bias == "ACCUMULATION": scores["ACCUMULATION"] += 4
+    elif bias == "DISTRIBUTION": scores["DISTRIBUTION"] += 4
+    if structure in ("RANGE", "RANGE / TRANSITION"):
+        if bias == "ACCUMULATION": scores["ACCUMULATION"] += 3
+        elif bias == "DISTRIBUTION": scores["DISTRIBUTION"] += 3
+    if is_valid(up_vol):
+        if up_vol >= 0.60: scores["ACCUMULATION"] += 2
+        elif up_vol <= 0.42: scores["DISTRIBUTION"] += 2
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    label, winner = ranked[0]
+    gap = winner - ranked[1][1]
+    confidence = int(max(45, min(92, 48 + winner * 5 + gap * 4)))
+    evidence = [f"Structure: {structure.lower().replace(' / ', '/')}."]
+    if ma20 > ma50 > ma200: evidence.append("20D > 50D > 200D moving averages.")
+    elif ma20 < ma50 < ma200: evidence.append("20D < 50D < 200D moving averages.")
+    else: evidence.append("Moving averages are mixed or compressed.")
+    evidence.append(f"20-session return: {ret20:+.1%}; 60-session return: {ret60:+.1%}.")
+    if bias != "NEUTRAL": evidence.append(f"Volume footprint: {bias.lower()}.")
+
+    summaries = {
+        "TRENDING UP":"Buyers control the primary trend; pullbacks matter more than isolated red days.",
+        "TRENDING DOWN":"Sellers control the primary trend; rallies need confirmation before the regime improves.",
+        "ACCUMULATION":"Price is relatively contained while volume behavior suggests patient net buying.",
+        "DISTRIBUTION":"Price is relatively contained while volume behavior suggests patient net selling.",
+        "RANGE / TRANSITION":"Neither side has durable control; range boundaries and confirmation matter most."
+    }
+    out.update({"label":label, "confidence":confidence, "summary":summaries[label],
+                "evidence":evidence, "scores":scores,
+                "metrics":{"return_20d":safe_float(ret20), "return_60d":safe_float(ret60),
+                           "range_20d":safe_float(range20), "ma_spread":safe_float(ma_spread)}})
+    return out
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. INTRADAY DATA
@@ -1105,6 +1168,7 @@ def generate_analysis_payload(query: str) -> dict:
     stage(7, "Computing signals & building AI prompt")
     price_action  = analyze_price_action(hist, latest or 0)
     institutional = analyze_institutional(hist)
+    market_regime = classify_market_regime(hist, price_action, institutional)
 
     # ── Valuation (yahoo modules with FMP fallback) ────────────────────────────
     pe_trail  = safe_float(sd.get("trailingPE")     or ks.get("trailingPE")     or fmp_m.get("peRatioTTM"))
@@ -1320,6 +1384,9 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
     ai_prompt += f"OBV: {institutional.get('obv_trend','N/A')} | Up-Vol%: {fmt(institutional.get('up_vol_ratio'),'pct')} | Acc/Dist days: {institutional.get('accumulation_days',0)}/{institutional.get('distribution_days',0)} | Bias: {institutional.get('net_bias','NEUTRAL')}\n"
     for s in institutional.get("signals",[]): ai_prompt += f"- {s}\n"
 
+    ai_prompt += f"\n### 12c. MARKET REGIME\n{market_regime.get('label','N/A')} ({market_regime.get('confidence',0)}% confidence): {market_regime.get('summary','')}\n"
+    for item in market_regime.get("evidence",[]): ai_prompt += f"- {item}\n"
+
     if data_warnings:
         ai_prompt += "\n### DATA QUALITY\n"
         for w in data_warnings: ai_prompt += f"- {w}\n"
@@ -1429,8 +1496,10 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
         "price_history":     price_history,
         "price_history_1y":  price_history[-252:] if len(price_history) >= 252 else price_history,
         "sec_filing":        sec_filing_attachment,
+        "company_profile":   {"sector": ap.get("sector"), "industry": ap.get("industry")},
         "price_action":      price_action,
         "institutional":     institutional,
+        "market_regime":     market_regime,
         "algorithmic_signals": flags,
         "ai_prompt":         ai_prompt,
     }
