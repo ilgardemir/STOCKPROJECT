@@ -304,6 +304,16 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .screen-reasons { display: flex; flex-direction: column; gap: 5px; }
 .screen-reason { color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
 .screen-reason::before { content: "✓"; color: var(--green); margin-right: 6px; }
+/* Per-card match-score breakdown — theme + concept sub-scores as mini bars */
+.score-breakdown { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 11px; }
+.sb-head { color: var(--text-dim); font: 700 8px var(--mono); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 2px; cursor: help; }
+.sb-row { display: grid; grid-template-columns: 78px 1fr 22px; align-items: center; gap: 8px; }
+.sb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 9.5px; }
+.sb-bar { height: 4px; border-radius: 99px; background: var(--surface-3); overflow: hidden; }
+.sb-bar b { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.sb-val { text-align: right; color: var(--text); font: 10px var(--mono); }
+.sb-row.theme .sb-label { color: var(--violet); font-weight: 600; }
+.sb-row.theme .sb-bar b { background: var(--violet); }
 .screen-empty { padding: 34px; text-align: center; color: var(--text-dim); border: 1px dashed var(--border); border-radius: var(--radius); }
 .screen-empty b, .screen-empty span { display: block; }.screen-empty span { margin-top: 6px; font-size: 11px; }
 .screen-refine { margin-top: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }

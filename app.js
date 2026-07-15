@@ -717,11 +717,32 @@ function renderScreenRecipe(spec) {
     ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations — it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
   return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.interpretation_source || "rules")}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">A <b>match score</b> measures how well a company fits <em>this recipe</em> — it is not a rating of the company, a prediction, or a recommendation.</div></div>`;
 }
+// Per-result breakdown of the components behind the match score: the theme
+// relevance (if any) plus each concept's 0-100 sub-score. Makes the circle
+// number legible instead of opaque. Weights (from the recipe) show on hover.
+function scoreBar(label, value, kind, weight) {
+  const pct = Math.max(0, Math.min(100, Number(value) || 0));
+  const wt = isNum(weight) ? ` · ${Number(weight).toFixed(2)}× weight` : "";
+  return `<div class="sb-row ${kind}" title="${esc(label)}: ${Math.round(pct)}/100${wt}"><span class="sb-label">${esc(label)}</span><span class="sb-bar"><b style="width:${pct}%"></b></span><span class="sb-val">${Math.round(pct)}</span></div>`;
+}
+function scoreBreakdown(r, spec) {
+  const rows = [];
+  const themeLabel = spec && spec.theme && spec.theme.label;
+  if (isNum(r.theme_score) && themeLabel) rows.push(scoreBar(themeLabel, r.theme_score, "theme"));
+  const weights = {};
+  (spec && Array.isArray(spec.concepts) ? spec.concepts : []).forEach(c => { weights[c.id] = c.weight; });
+  Object.entries(r.concept_scores || {}).forEach(([id, v]) =>
+    rows.push(scoreBar(SCREEN_CONCEPT_LABELS[id] || id, v, "concept", weights[id])));
+  if (!rows.length) return "";
+  const blend = isNum(r.theme_score) ? "0.55 × theme + 0.45 × concepts" : "weighted average of concepts";
+  return `<div class="score-breakdown"><div class="sb-head" title="Match score = ${blend}">Score breakdown</div>${rows.join("")}</div>`;
+}
 function renderScreenResults(result) {
   if (!result) return "";
   const rows = result.results || [];
+  const spec = result.spec || {};
   if (!rows.length) return `<div class="screen-empty"><b>No stocks cleared every rule.</b><span>Try loosening one requirement or using broader wording. Squall will never invent a match just to fill the page.</span></div>`;
-  const cards = rows.map(r => `<article class="screen-result"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" title="Match score — how well this stock fits your recipe, not a rating of the company">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div><div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
+  const cards = rows.map(r => `<article class="screen-result"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" title="Match score — how well this stock fits your recipe, not a rating of the company">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
   return `<div class="screen-results-head"><h2>${rows.length} measurable matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} S&P 500 companies scored${result.cache_hit ? " · cached market data" : ""}</span></div><div class="screen-grid">${cards}</div>`;
 }
 function renderSavedScreener(s) {
