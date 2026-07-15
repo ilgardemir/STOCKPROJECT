@@ -336,9 +336,18 @@ function sanitizeScreenerSpec(candidate, fallback) {
     const f = { ...fallback.filters };
     const sector = String(candidate.filters.sector || "").trim();
     if (!sector || SCREENER_SECTORS.includes(sector)) f.sector = sector;
+    // Zero is never a meaningful bound for any of these filters — models that
+    // "fill in" unused fields with 0 (pe_max: 0, price_max: 0, …) would filter
+    // out the entire universe. Treat 0/negative/non-numeric all as "not set".
     ["market_cap_min", "market_cap_max", "price_min", "price_max", "pe_max", "volume_min", "dividend_yield_min"].forEach(k => {
-      const n = Number(candidate.filters[k]); if (Number.isFinite(n) && n >= 0) f[k] = n;
+      if (!(k in candidate.filters)) return;   // key absent → keep the fallback's value
+      const n = Number(candidate.filters[k]);
+      if (Number.isFinite(n) && n > 0) f[k] = n;
+      else delete f[k];   // explicit 0/null/garbage → "not set" (also clears a stale fallback value)
     });
+    // Drop an inverted max that would contradict its min and empty the results.
+    if (f.price_max != null && f.price_min != null && f.price_max < f.price_min) delete f.price_max;
+    if (f.market_cap_max != null && f.market_cap_min != null && f.market_cap_max < f.market_cap_min) delete f.market_cap_max;
     safe.filters = f;
   }
   if (candidate.settings && typeof candidate.settings === "object") {
@@ -378,7 +387,7 @@ async function interpretScreenerQuery(query, profile) {
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
       body: JSON.stringify({ model: SEARCH_MODEL, temperature: .05, max_tokens: 900,
         messages: [
-          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min), and optionally theme. Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only.
+          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min), and optionally theme. FILTERS: include a filter key ONLY when the user's request implies that constraint — omit every unused filter entirely. Never emit 0, null, or placeholder values as defaults (pe_max: 0 or price_max: 0 would wrongly exclude every stock). Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only.
 
 THEME: only when the request names an industry, technology, product, or trend that the quantitative concepts above cannot capture (e.g. "AI stocks", "cybersecurity", "obesity drugs", "nuclear"), add theme={label, keywords}. keywords = 6-16 short lowercase words/phrases likely to appear verbatim in a company's business-description text — include synonyms, core technologies, and product terms (e.g. AI → "artificial intelligence","machine learning","gpu","accelerated computing","inference","neural network"). These are matched literally against company descriptions by the backend; the descriptions reflect established business, not last week's news. Omit theme entirely for purely quantitative requests. Return JSON only.` },
           { role:"user", content:`Request: ${String(query).slice(0,500)}\n\n${profileText || "No MySquall profile."}\n\nRule-based starting point: ${JSON.stringify(fallback)}` }
@@ -458,7 +467,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
       body:JSON.stringify({ model:SEARCH_MODEL, temperature:.08, max_tokens:1100, messages:[
-        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords}. Keep the existing theme unless the user changes the subject or asks to drop it (then omit theme); if they name a new industry/technology theme, replace it with 6-16 lowercase description keywords. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
+        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords}. Keep the existing theme unless the user changes the subject or asks to drop it (then omit theme); if they name a new industry/technology theme, replace it with 6-16 lowercase description keywords. Include a filter key only when a real constraint applies — never emit 0/null placeholder filter values (they would exclude every stock). “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
     });
