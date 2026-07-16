@@ -243,6 +243,13 @@ function fUsd(v) { if (!isNum(v)) return "N/A"; const a = Math.abs(v);
 const fInt = v => isNum(v) ? Math.round(v).toLocaleString("en-US") : "N/A";
 const signCls = (v, inv = false) => (!isNum(v) || v === 0) ? "" : ((inv ? v < 0 : v > 0) ? "green" : "red");
 const esc = t => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const escAttr = t => esc(t).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return (url.protocol === "https:" || url.protocol === "http:") ? url.href : "";
+  } catch { return ""; }
+}
 // Escape for a single-quoted JS string sitting inside a double-quoted HTML attribute
 // (e.g. onclick="retryAnalysis('…')") — company names may contain ' or &.
 const jsAttr = s => String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
@@ -973,10 +980,33 @@ function renderAll(d) {
     ${metric("Currency", esc(q.currency || "N/A"))}
     ${metric("Sector", esc(company.sector || "N/A"))}
     ${metric("Industry", esc(company.industry || "N/A"))}
+    ${metric("Quote Source", esc(q.source || d.data_sources?.quote || "N/A"))}
+    ${metric("Chart Source", esc(d.data_sources?.history || "N/A"))}
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
   html += card("snapshot", I.bolt, "Live Snapshot", snap);
+
+  /* Sourced company news — the model explains these records but does not search for them. */
+  const news = Array.isArray(d.company_news) ? d.company_news : [];
+  if (news.length) {
+    const newsBody = `<div class="news-list">${news.slice(0, 10).map(item => {
+      const href = safeHttpUrl(item.url);
+      let date = "Date unavailable";
+      if (item.published_at) {
+        const parsed = new Date(item.published_at);
+        if (!Number.isNaN(parsed.getTime())) date = parsed.toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+      }
+      const headline = esc(item.headline || "Untitled story");
+      const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
+      return `<article class="news-item">
+        <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
+        <h4>${title}</h4>
+        ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
+      </article>`;
+    }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
+    html += card("news", I.doc, "Recent Company News", newsBody, { count: news.length });
+  }
 
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {

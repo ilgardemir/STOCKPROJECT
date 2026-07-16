@@ -8,9 +8,8 @@ const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE"
 const SCRAPER_PATH = "./scraperFinal.py";
 const SCREENER_PATH = "./screener.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "deepseek/deepseek-v4-flash";         // main analysis — live search is now a separate focused step (below), NOT bolted onto this prompt
-const SEARCH_MODEL = "deepseek/deepseek-v4-flash";       // cheap model for the web-research pass; used with an explicit web plugin, one clean query per topic
-const RESEARCH_ON  = false; // DISABLED for now — live web search is unfunctional and stalls the AI stream. Re-enable when fixed (set to: process.env.WEB_RESEARCH !== "off").
+const AI_MODEL    = "deepseek/deepseek-v4-flash";         // interprets the structured payload; it never searches for market/news data
+const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines screener language only; no web plugin
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -80,15 +79,8 @@ function formatProfile(raw) {
   ].join("\n");
 }
 
-function buildAiMessages(prompt, research, profile) {
+function buildAiMessages(prompt, profile) {
   let userContent = prompt;
-  if (research && research.trim()) {
-    userContent +=
-      "\n\n---\n### REAL-TIME WEB INTELLIGENCE (live search — recent product launches, congressional/politician trades, geopolitical events)\n" +
-      "Gathered just now via live web search. Weave the relevant items into the Sentiment & Positioning and Catalysts & Risks sections and always cite their dates. " +
-      "This is qualitative context only — never let it override the audited financial figures above, and skip items that don't bear on the thesis.\n\n" +
-      research;
-  }
   const profileText = formatProfile(profile);
   if (profileText) userContent += "\n\n" + profileText;
   return [
@@ -97,73 +89,11 @@ function buildAiMessages(prompt, research, profile) {
       content: [
         "You are a quantitative financial analyst writing a thorough, multi-section read for an investor who can already see all the underlying data.",
         "Reason carefully before answering, then interpret — connect valuation, fundamentals, technicals, and institutional positioning into judgments. Never restate figures, rebuild tables, or list metrics for their own sake; cite a number only when it anchors a specific conclusion.",
-        "Be specific to this company, not generic. Use only the data and live-search intelligence supplied; never invent figures, strikes, expirations, or news events.",
+        "Be specific to this company, not generic. Use only the structured data and Finnhub source records supplied; never invent figures, strikes, expirations, or news events.",
       ].join(" ")
     },
     { role: "user", content: userContent }
   ];
-}
-
-// ─── LIVE WEB RESEARCH ──────────────────────────────────────────────────────
-// The old `:online` bolted a single auto-generated query onto the giant financial
-// prompt → a diluted query that surfaced nothing usable. Instead we run one clean,
-// single-topic search per category so Exa gets a focused query each time, then feed
-// the findings into the analysis prompt above.
-const RESEARCH_TOPICS = [
-  { label: "Product launches & announcements",
-    q: (n, t) => `Recent product launches, product announcements, major partnerships, or notable business developments for ${n} (${t}) in the last 90 days. List each as a bullet with its date and source.` },
-  { label: "Congressional / politician trades",
-    q: (n, t) => `US congressional, senator, or representative stock trades (buys or sells) of ${n} (${t}) disclosed in the last 6 months — per trackers like Capitol Trades, Quiver Quantitative, Unusual Whales, or the news. List politician, buy or sell, amount range, and date.` },
-  { label: "Geopolitical & political events",
-    q: (n, t) => `Geopolitical or political events in the last 90 days that materially affect ${n} (${t}) — wars, sanctions, tariffs, export controls, regulation, antitrust, or government contracts. List each with its date and source.` },
-];
-
-async function webSearch(query) {
-  // Hard timeout: a slow or hanging web-plugin call must NEVER stall the analysis.
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
-  try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "Content-Type":  "application/json",
-        "Authorization": `Bearer ${API_KEY}`,
-        "HTTP-Referer":  "http://localhost",
-        "X-Title":       "Squall Research"
-      },
-      body: JSON.stringify({
-        model:       SEARCH_MODEL,
-        temperature: 0.1,
-        max_tokens:  600,
-        plugins:     [{ id: "web", max_results: 6 }],   // explicit web plugin → we control results count; query stays this focused topic
-        messages: [
-          { role: "system", content: "You are a financial news researcher. Using ONLY the live web results attached to this request, extract concrete, recent, dated facts. Reply as terse bullet points, each ending with '(date — source)'. If nothing relevant is found, reply with exactly: None found." },
-          { role: "user", content: query }
-        ]
-      })
-    });
-    if (!res.ok) return null;
-    const j = await res.json().catch(() => null);
-    const txt = j?.choices?.[0]?.message?.content?.trim();
-    return (txt && !/^none found\.?$/i.test(txt)) ? txt : null;
-  } catch {
-    return null;   // aborted / network error → just no research for this topic
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Runs the topic searches in parallel; returns a markdown block (or "" if nothing surfaced).
-async function gatherResearch(ticker, companyName) {
-  const name = companyName || ticker;
-  const settled = await Promise.all(
-    RESEARCH_TOPICS.map(topic =>
-      webSearch(topic.q(name, ticker))
-        .then(txt => (txt ? { label: topic.label, txt } : null))
-        .catch(() => null))
-  );
-  return settled.filter(Boolean).map(r => `**${r.label}**\n${r.txt}`).join("\n\n");
 }
 
 // ─── NATURAL-LANGUAGE S&P 500 SCREENER ───────────────────────────────────────
@@ -385,7 +315,7 @@ async function interpretScreenerQuery(query, profile) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", signal: ctrl.signal,
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
-      body: JSON.stringify({ model: SEARCH_MODEL, temperature: .05, max_tokens: 900,
+      body: JSON.stringify({ model: UTILITY_MODEL, temperature: .05, max_tokens: 900,
         messages: [
           { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min), and optionally theme. FILTERS: include a filter key ONLY when the user's request implies that constraint — omit every unused filter entirely. Never emit 0, null, or placeholder values as defaults (pe_max: 0 or price_max: 0 would wrongly exclude every stock). Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only.
 
@@ -466,7 +396,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
-      body:JSON.stringify({ model:SEARCH_MODEL, temperature:.08, max_tokens:1100, messages:[
+      body:JSON.stringify({ model:UTILITY_MODEL, temperature:.08, max_tokens:1100, messages:[
         { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords}. Keep the existing theme unless the user changes the subject or asks to drop it (then omit theme); if they name a new industry/technology theme, replace it with 6-16 lowercase description keywords. Include a filter key only when a real constraint applies — never emit 0/null placeholder filter values (they would exclude every stock). “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
@@ -544,7 +474,7 @@ http.createServer(async (req, res) => {
   // Health
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, {"Content-Type":"application/json"});
-    res.end(JSON.stringify({ status: "ok", model: AI_MODEL }));
+    res.end(JSON.stringify({ status: "ok", model: AI_MODEL, finnhub_configured: Boolean(process.env.FINNHUB_API_KEY) }));
     return;
   }
 
@@ -657,13 +587,6 @@ http.createServer(async (req, res) => {
       // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
       send("result", { ...payload, model: AI_MODEL });
 
-      // Focused live-web research (clean per-topic queries) → injected into the analysis.
-      // Runs while the AI pane still shows its loading skeleton; adds a few seconds.
-      let research = "";
-      if (RESEARCH_ON) {
-        try { research = await gatherResearch(payload.ticker, payload.company_name); } catch (_) {}
-      }
-
       send("ai_start", { model: AI_MODEL });
 
       // Request body is fixed across retries. `allow_fallbacks` lets OpenRouter reroute
@@ -675,7 +598,7 @@ http.createServer(async (req, res) => {
         reasoning:   { effort: REASON_EFFORT },
         stream:      true,
         provider:    { allow_fallbacks: true },
-        messages:    buildAiMessages(payload.ai_prompt, research, profile)
+        messages:    buildAiMessages(payload.ai_prompt, profile)
       });
 
       const MAX_ATTEMPTS = 3;
@@ -793,10 +716,6 @@ http.createServer(async (req, res) => {
               res.end(JSON.stringify({ error: payload.error })); return;
             }
             try {
-              let research = "";
-              if (RESEARCH_ON) {
-                try { research = await gatherResearch(payload.ticker, payload.company_name); } catch (_) {}
-              }
               const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
                 headers: {
@@ -810,7 +729,7 @@ http.createServer(async (req, res) => {
                   temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
                   reasoning:   { effort: REASON_EFFORT },
-                  messages:    buildAiMessages(payload.ai_prompt, research, profile)
+                  messages:    buildAiMessages(payload.ai_prompt, profile)
                 })
               });
               const aiData   = await aiRes.json();
@@ -936,5 +855,6 @@ http.createServer(async (req, res) => {
   console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
   console.log(`   Model    : ${AI_MODEL}`);
   console.log(`   Scraper  : ${path.resolve(SCRAPER_PATH)}`);
+  console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
   console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}\n`);
 });
