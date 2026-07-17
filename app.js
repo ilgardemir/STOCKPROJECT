@@ -677,7 +677,16 @@ const SCREEN_CONCEPT_LABELS = {
   volume_surge:"Unusual volume", volume_dryup:"Quiet volume", value: "Value", growth: "Growth", profitability:"Profitability",
   quality: "Business quality", balance_sheet:"Balance sheet", cash_generation:"Cash generation", high_margin:"High margins",
   income: "Income", analyst_upside:"Analyst upside", insider_ownership:"Insider ownership",
-  institutional_ownership:"Institutional ownership", mega_cap:"Mega-cap", smaller_cap:"Smaller S&P companies"
+  institutional_ownership:"Institutional ownership", mega_cap:"Mega-cap", smaller_cap:"Smaller S&P companies",
+  profitable_growth:"Profitable growth", garp:"Growth at a reasonable price", quality_value:"Quality value",
+  steady_compounder:"Steady compounder", defensive_quality:"Defensive quality", speculative_growth:"Speculative growth",
+  revenue_growth:"Revenue growth", earnings_growth:"Earnings growth", high_roe:"High return on equity",
+  fcf_yield:"Free-cash-flow yield", cash_rich:"Cash-rich", low_debt:"Low debt",
+  capital_efficiency:"Capital efficiency", dividend_quality:"Dividend quality", liquidity:"Trading liquidity",
+  options_liquidity_proxy:"Options-liquidity proxy", low_beta:"Lower beta", high_beta:"Higher beta",
+  high_short_interest:"High short interest", squeeze:"Technical squeeze", bullish_pullback:"Healthy pullback",
+  mean_reversion:"Mean-reversion setup", turnaround:"Turnaround setup", technical_strength:"Technical strength",
+  short_squeeze_setup:"Short-squeeze setup"
 };
 function openScreener() {
   document.getElementById("hero").style.display = "none";
@@ -709,20 +718,22 @@ function deleteScreener(id) {
 function screenPct(v) { return isNum(v) ? (v * 100).toFixed(1) + "%" : "N/A"; }
 function renderScreenRecipe(spec) {
   if (!spec) return "";
-  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.required ? "required · " : ""}${(Number(c.weight) || 1).toFixed(2)}× weight</span></div>`).join("");
+  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.source === "profile" ? "MySquall tilt · " : ""}${c.required ? "required · " : ""}${(Number(c.weight) || 1).toFixed(2)}× weight</span></div>`).join("");
   const filters = Object.entries(spec.filters || {}).filter(([, v]) => v !== null && v !== "" && v !== undefined)
-    .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(v)}</span></div>`).join("");
+    .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(Array.isArray(v) ? v.join(", ") : v)}</span></div>`).join("");
   const adjustments = (spec.profile_adjustments || []).map(a => `<div class="recipe-adjust">MySquall adjustment · ${esc(a)}</div>`).join("");
   const window = spec.settings?.consolidation_window;
   const definitions = (spec.definitions || []).map(d => `<details class="recipe-definition"><summary>${esc(d.label || SCREEN_CONCEPT_LABELS[d.id] || d.id)}<span>How Squall measures it</span></summary><p>${esc(d.definition)}</p></details>`).join("");
   const definition = (spec.concepts || []).some(c => c.id === "consolidation")
     ? `<div class="recipe-adjust">MySquall structure window · ${esc(window || 30)} trading days</div>` : "";
+  const momentumWindow = (spec.concepts || []).some(c => c.id === "momentum")
+    ? `<div class="recipe-adjust">MySquall momentum window · ${esc(spec.settings?.momentum_window || 60)} trading days</div>` : "";
   const theme = spec.theme && Array.isArray(spec.theme.keywords) && spec.theme.keywords.length ? spec.theme : null;
   const themeChip = theme
-    ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))}</span></div>` : "";
+    ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))} · minimum evidence ${esc(theme.min_score || 24)}/100${theme.exclude_keywords?.length ? ` · excludes ${esc(theme.exclude_keywords.join(", "))}` : ""}</span></div>` : "";
   const themeNote = theme
     ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations — it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
-  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.interpretation_source || "rules")}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">A <b>match score</b> measures how well a company fits <em>this recipe</em> — it is not a rating of the company, a prediction, or a recommendation.</div></div>`;
+  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.interpretation_source || "rules")}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${momentumWindow}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">A <b>match score</b> measures how well a company fits <em>this recipe</em> — it is not a rating of the company, a prediction, or a recommendation.</div></div>`;
 }
 // Per-result breakdown of the components behind the match score: the theme
 // relevance (if any) plus each concept's 0-100 sub-score. Makes the circle
