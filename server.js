@@ -96,17 +96,22 @@ function buildAiMessages(prompt, profile) {
   ];
 }
 
-// ─── NATURAL-LANGUAGE S&P 500 SCREENER ───────────────────────────────────────
+// ─── NATURAL-LANGUAGE MULTI-INDEX SCREENER ───────────────────────────────────
 const SCREENER_CATALOG = {
   consolidation:["Consolidation", "Price-range width, ATR contraction, volume dry-up, and proximity to recent highs over the MySquall-selected window."],
   volatility_contraction:["Shrinking volatility", "Successively tighter 15/30/60-day ranges, falling ATR, and declining volume."],
+  vcp:["Volatility contraction pattern (VCP)", "A prior uptrend followed by successively tighter price ranges, contracting ATR, lighter volume, and price holding near a potential pivot."],
+  cup_and_handle:["Cup with handle", "A rounded 1-6 month base with comparable left and right highs, followed by a shorter and shallower handle in the upper part of the base."],
+  flat_base:["Flat base", "A shallow, orderly multi-week range near prior highs with subdued volume and an established trend."],
+  double_bottom:["Double bottom", "Two comparable lows separated by a meaningful rebound, with price returning toward the midpoint pivot."],
+  bull_flag:["Bull flag", "A strong prior advance followed by a short, controlled pullback on a tighter range and lighter volume."],
   uptrend:["Uptrend", "Price and moving-average alignment plus positive 60-day and one-year returns."],
   downtrend:["Downtrend", "Price below key moving averages with negative 60-day and one-year returns."],
   accumulation:["Accumulation", "Up-day volume share, on-balance-volume slope, and recent price strength."],
   distribution:["Distribution", "Down-day volume dominance, falling on-balance volume, and weakening price action."],
   breakout:["Breakout quality", "Price versus its prior 20-day high, accompanying volume, momentum, and trend alignment."],
-  momentum:["Momentum", "Weighted 20-day, 60-day, and one-year price strength."],
-  relative_strength:["Relative strength", "Percentile rank of 60-day and one-year performance versus the rest of the S&P 500."],
+  momentum:["Momentum", "Price strength over a MySquall-selected 20-, 60-, or 252-session window."],
+  relative_strength:["Relative strength", "Percentile rank of 60-day and one-year performance versus the rest of the selected universe."],
   risk_adjusted_momentum:["Efficient momentum", "Price strength rewarded only when it is large relative to realized volatility."],
   near_highs:["Near 52-week highs", "Distance from the highest traded price during the past year."],
   oversold:["Oversold pullback", "Negative 20-day return and distance below the 20-day moving average, without predicting a reversal."],
@@ -130,15 +135,51 @@ const SCREENER_CATALOG = {
   insider_ownership:["Insider ownership", "Reported percentage of shares held by insiders."],
   institutional_ownership:["Institutional ownership", "Reported percentage of shares held by institutions."],
   mega_cap:["Mega-cap scale", "Market capitalization, with the strongest score around $200B and above."],
-  smaller_cap:["Smaller S&P companies", "Lower market capitalization relative to other S&P 500 members; not true small-cap exposure."]
+  smaller_cap:["Smaller companies", "Lower market capitalization relative to the selected large-cap universe; not true small-cap exposure."],
+  profitable_growth:["Profitable growth", "Revenue and earnings growth combined with positive margins so growth is not rewarded by itself."],
+  garp:["Growth at a reasonable price", "Growth, valuation, and quality blended into a deterministic GARP score."],
+  quality_value:["Quality value", "Cheap valuation rewarded only when profitability, cash generation, and leverage also hold up."],
+  steady_compounder:["Steady compounder", "Stable trend, efficient momentum, lower volatility, quality, and cash generation."],
+  defensive_quality:["Defensive quality", "Lower volatility, balance-sheet strength, business quality, and dividend support."],
+  speculative_growth:["Speculative growth", "Fast reported growth combined with high volatility and weaker current profitability; explicitly higher risk."],
+  revenue_growth:["Revenue growth", "Reported year-over-year revenue growth scored independently from earnings growth."],
+  earnings_growth:["Earnings growth", "Reported year-over-year earnings growth scored independently from revenue growth."],
+  high_roe:["High return on equity", "Reported return on equity versus broad public-company ranges, with no claim about durability."],
+  fcf_yield:["Free-cash-flow yield", "Free cash flow divided by market capitalization."],
+  cash_rich:["Cash-rich balance sheet", "Net cash relative to market value plus current-ratio support."],
+  low_debt:["Low debt", "Debt-to-equity and net-cash position, with missing data treated neutrally."],
+  capital_efficiency:["Capital efficiency", "Return on equity, operating margin, and free-cash-flow yield."],
+  dividend_quality:["Dividend quality", "Dividend yield balanced against payout ratio, profitability, and balance-sheet strength."],
+  liquidity:["Trading liquidity", "Average daily dollar volume and company size; this is stock liquidity, not options liquidity."],
+  options_liquidity_proxy:["Options-liquidity proxy", "Stock dollar volume, share volume, price, and company size as a proxy only; it does not use live options open interest."],
+  low_beta:["Lower beta", "Reported beta and realized volatility, favoring less market sensitivity."],
+  high_beta:["Higher beta", "Reported beta and realized volatility, favoring larger market sensitivity."],
+  high_short_interest:["High short interest", "Reported short interest as a percentage of float."],
+  squeeze:["Technical squeeze", "Volatility contraction, quiet volume, and compressed price ranges; not a short-squeeze prediction."],
+  bullish_pullback:["Bullish pullback", "Uptrend quality combined with proximity to moving-average support and a controlled pullback."],
+  mean_reversion:["Mean-reversion setup", "Oversold conditions balanced with trend stability; it does not predict a bounce."],
+  turnaround:["Turnaround setup", "Recent recovery and improving momentum after a larger drawdown."],
+  technical_strength:["Technical strength", "Trend, momentum, relative strength, and accumulation combined."],
+  short_squeeze_setup:["Short-squeeze setup", "High reported short interest plus unusual volume and positive momentum; not a squeeze forecast."]
 };
 const SCREENER_CONCEPTS = new Set(Object.keys(SCREENER_CATALOG));
 const SCREENER_SECTORS = ["Technology", "Financial Services", "Healthcare", "Consumer Cyclical", "Consumer Defensive", "Industrials", "Energy", "Utilities", "Real Estate", "Basic Materials", "Communication Services"];
+const SCREENER_SECTOR_ALIASES = {
+  "Technology":["technology sector", "tech sector", "software sector", "semiconductor sector"],
+  "Financial Services":["financial sector", "financials", "banking sector", "banks"],
+  "Healthcare":["healthcare", "health care sector", "medical sector"],
+  "Consumer Cyclical":["consumer cyclical", "consumer discretionary", "retail sector"],
+  "Consumer Defensive":["consumer defensive", "consumer staples", "staples sector"],
+  "Industrials":["industrial sector", "industrials"], "Energy":["energy sector", "oil and gas sector"],
+  "Utilities":["utilities sector", "utility sector"], "Real Estate":["real estate sector", "reits", "reit sector"],
+  "Basic Materials":["basic materials", "materials sector"],
+  "Communication Services":["communication services", "communications sector", "telecom sector", "media sector"]
+};
 
 // Thematic matching keyword sets. The LLM expands arbitrary themes at runtime;
 // this small lexicon just keeps the no-API-key fallback from being theme-blind.
-// Matching happens in screener.py against each company's business description —
-// the descriptions never touch the model, so this adds ~no tokens per screen.
+// Matching happens in screener.py against company identity and business fields;
+// those records never touch the model, so this adds ~no tokens per screen.
 const THEME_LEXICON = {
   "AI":            { trigger:/\b(a\.?i\.?|artificial intelligence|machine learning|\bml\b|deep learning|generative|\bllm\b|neural)\b/, label:"Artificial intelligence", keywords:["artificial intelligence", "machine learning", "deep learning", "generative", "large language model", "neural network", "inference", "gpu", "accelerated computing", "data center", "computer vision", "autonomous"] },
   "cybersecurity": { trigger:/\b(cyber ?security|cyber|infosec|firewall|endpoint security|zero trust)\b/, label:"Cybersecurity", keywords:["cybersecurity", "security", "threat", "firewall", "endpoint", "identity", "encryption", "malware", "zero trust", "cloud security"] },
@@ -148,29 +189,121 @@ const THEME_LEXICON = {
   "clean energy":  { trigger:/\b(clean energy|renewable|solar|wind power|green energy)\b/, label:"Clean energy", keywords:["solar", "renewable", "wind", "clean energy", "photovoltaic", "battery storage", "hydrogen", "decarboniz"] },
   "biotech":       { trigger:/\b(biotech|biotechnology|drug ?maker|pharmaceutical|gene therapy|oncology)\b/, label:"Biotech / pharma", keywords:["biotechnology", "pharmaceutical", "therapeutic", "clinical", "drug", "oncology", "gene therapy", "fda", "molecule"] },
   "defense":       { trigger:/\b(defense|defence|aerospace|military|weapons)\b/, label:"Defense / aerospace", keywords:["defense", "aerospace", "military", "missile", "aircraft", "government", "national security", "radar"] },
-  "obesity":       { trigger:/\b(obesity|weight ?loss|glp-?1|ozempic|wegovy)\b/, label:"Obesity / GLP-1", keywords:["obesity", "glp-1", "weight", "diabetes", "metabolic", "incretin"] }
+  "obesity":       { trigger:/\b(obesity|weight ?loss|glp-?1|ozempic|wegovy)\b/, label:"Obesity / GLP-1", keywords:["obesity", "glp-1", "weight", "diabetes", "metabolic", "incretin"] },
+  "nuclear":       { trigger:/\b(nuclear|uranium|small modular reactor|\bsmr\b)\b/, label:"Nuclear energy", keywords:["nuclear", "uranium", "reactor", "small modular reactor", "nuclear fuel", "power generation"] },
+  "robotics":      { trigger:/\b(robotics?|industrial automation|factory automation|humanoid)\b/, label:"Robotics / automation", keywords:["robotics", "robot", "automation", "autonomous", "machine vision", "motion control", "industrial software"] },
+  "quantum":       { trigger:/\b(quantum computing|quantum computer|qubits?)\b/, label:"Quantum computing", keywords:["quantum computing", "quantum computer", "qubit", "quantum processor", "quantum network"] },
+  "fintech":       { trigger:/\b(fintech|digital payments?|payment network|digital banking)\b/, label:"Financial technology", keywords:["fintech", "digital payment", "payment network", "merchant", "digital wallet", "financial software", "payment processing"] },
+  "data centers":  { trigger:/\b(data centers?|datacenters?|ai infrastructure|digital infrastructure)\b/, label:"Data-center infrastructure", keywords:["data center", "datacenter", "server", "networking", "accelerated computing", "power management", "digital infrastructure"] }
 };
 function detectTheme(q) {
   const text = String(q || "").toLowerCase();
   for (const t of Object.values(THEME_LEXICON))
-    if (t.trigger.test(text)) return { label:t.label, keywords:[...t.keywords] };
+    if (t.trigger.test(text)) return {
+      label:t.label, keywords:[...t.keywords], exclude_keywords:[],
+      min_score:/\b(pure.?play|core business|primarily|main business|direct exposure)\b/.test(text) ? 55 : 24
+    };
   return null;
 }
 
-function readSp500Universe() {
+const SCREEN_UNIVERSES = new Set(["combined", "sp500", "nasdaq100", "dow30"]);
+
+function readMarketUniverse(requested = "combined") {
   const src = fs.readFileSync(path.join(__dirname, "sp500.js"), "utf8");
   const tickers = src.match(/window\.SP500\s*=\s*(\[[\s\S]*?\]);/)?.[1];
   const names = src.match(/window\.SP500_NAMES\s*=\s*(\{[\s\S]*?\});/)?.[1];
-  return { tickers: tickers ? JSON.parse(tickers) : [], names: names ? JSON.parse(names) : {} };
+  const extraSrc = fs.readFileSync(path.join(__dirname, "market-universes.js"), "utf8");
+  const extraJson = extraSrc.match(/window\.MARKET_UNIVERSES\s*=\s*(\{[\s\S]*\});/)?.[1];
+  const sp500 = tickers ? JSON.parse(tickers) : [];
+  const spNames = names ? JSON.parse(names) : {};
+  const extra = extraJson ? JSON.parse(extraJson) : { nasdaq100:[], dow30:[], names:{} };
+  const universeId = SCREEN_UNIVERSES.has(requested) ? requested : "combined";
+  const lists = { sp500, nasdaq100:extra.nasdaq100 || [], dow30:extra.dow30 || [] };
+  const selected = universeId === "combined" ? ["sp500", "nasdaq100", "dow30"] : [universeId];
+  const selectedTickers = [...new Set(selected.flatMap(id => lists[id] || []))];
+  const memberships = {};
+  for (const ticker of selectedTickers) {
+    memberships[ticker] = [];
+    if (lists.sp500.includes(ticker)) memberships[ticker].push("S&P 500");
+    if (lists.nasdaq100.includes(ticker)) memberships[ticker].push("Nasdaq-100");
+    if (lists.dow30.includes(ticker)) memberships[ticker].push("Dow 30");
+  }
+  const labels = {
+    combined:"S&P 500 + Nasdaq-100 + Dow 30", sp500:"S&P 500",
+    nasdaq100:"Nasdaq-100", dow30:"Dow 30"
+  };
+  return {
+    id:universeId, label:labels[universeId], tickers:selectedTickers,
+    names:{ ...(extra.names || {}), ...spNames }, memberships
+  };
+}
+
+function applyProfileCalibration(spec, rawProfile, query) {
+  const profile = sanitizeProfile(rawProfile);
+  if (!profile) return spec;
+  const q = String(query || spec.query || "").toLowerCase();
+  const concepts = (Array.isArray(spec.concepts) ? spec.concepts : [])
+    .filter(c => c && SCREENER_CONCEPTS.has(c.id) && c.source !== "profile")
+    .map(c => ({ ...c, source:"request" }));
+  const adjustments = [];
+  const addTilt = (id, weight, reason) => {
+    const existing = concepts.find(c => c.id === id);
+    if (existing) existing.weight = Math.min(3, Number(existing.weight || 1) + Math.min(.2, weight / 3));
+    else if (concepts.length < 10) concepts.push({ id, weight, required:false, source:"profile" });
+    if (reason && !adjustments.includes(reason)) adjustments.push(reason);
+  };
+
+  const horizonDays = [10, 20, 60, 126, 252][profile.horizon - 1];
+  const consolidationWindow = profile.horizon <= 2 ? 20 : profile.horizon >= 4 ? 60 : 30;
+  if (profile.risk <= 2) {
+    addTilt("low_volatility", .5, "Added a modest lower-volatility tilt for your cautious risk setting.");
+    addTilt("balance_sheet", .4, "Included balance-sheet resilience as a secondary preference.");
+  } else if (profile.risk >= 4) {
+    addTilt("risk_adjusted_momentum", .35, "Allowed more price movement but still rewards momentum efficiency.");
+  }
+
+  const styleTilts = {
+    value:["quality_value", .5], growth:["profitable_growth", .5], income:["dividend_quality", .55],
+    swing:["technical_strength", .5], "long-term":["steady_compounder", .5], options:["options_liquidity_proxy", .55]
+  };
+  if (styleTilts[profile.style]) {
+    const [id, weight] = styleTilts[profile.style];
+    addTilt(id, weight, `Added a small ${SCREENER_CATALOG[id][0].toLowerCase()} tilt for your ${profile.style} style.`);
+  }
+  const priorityTilts = {
+    downside:"defensive_quality", growth:"profitable_growth", valuation:"garp", income:"dividend_quality",
+    momentum:"technical_strength", options:"options_liquidity_proxy"
+  };
+  for (const priority of profile.priorities || []) {
+    const id = priorityTilts[priority];
+    if (id) addTilt(id, .35, `Used ${SCREENER_CATALOG[id][0].toLowerCase()} as a light MySquall ${priority} preference.`);
+  }
+
+  let threshold = profile.risk <= 2 ? 54 : profile.risk >= 4 ? 44 : 49;
+  if (/\b(strict|strictly|only|must|best|strongest|very)\b/.test(q)) threshold += 7;
+  if (/\b(broad|broadly|some exposure|somewhat|ideas|candidates)\b/.test(q)) threshold -= 6;
+  spec.concepts = concepts.slice(0, 10);
+  spec.settings = {
+    ...(spec.settings || {}), consolidation_window:consolidationWindow,
+    momentum_window:horizonDays, profile_risk:profile.risk,
+    match_threshold:Math.max(20, Math.min(85, Number(spec.settings?.match_threshold ?? threshold)))
+  };
+  spec.profile_adjustments = adjustments.slice(0, 6);
+  return spec;
 }
 
 function fallbackScreenerSpec(query, rawProfile) {
   const q = String(query || "").toLowerCase();
   const profile = sanitizeProfile(rawProfile);
   const concepts = [];
-  const add = (id, weight = 1, required = false) => { if (!concepts.some(c => c.id === id)) concepts.push({ id, weight, required }); };
-  if (/consolidat|tight range|base|coiling|sideways/.test(q)) add("consolidation", 1.35, true);
-  if (/volatility contraction|\bvcp\b|volatility.*shrink|getting tighter|contracting/.test(q)) add("volatility_contraction", 1.4, true);
+  const add = (id, weight = 1, required = false) => { if (!concepts.some(c => c.id === id)) concepts.push({ id, weight, required, source:"request" }); };
+  if (/consolidat|tight range|coiling|sideways|price base/.test(q)) add("consolidation", 1.35, true);
+  if (/volatility.*shrink|shrinking volatility|getting tighter|contracting volatility/.test(q)) add("volatility_contraction", 1.25);
+  if (/\bvcp\b|volatility contraction pattern|minervini pattern/.test(q)) add("vcp", 1.5, true);
+  if (/cup (?:with|and) handle|cup.?and.?handle|\bcwh\b/.test(q)) add("cup_and_handle", 1.5, true);
+  if (/flat base|tight flat base/.test(q)) add("flat_base", 1.4, true);
+  if (/double bottom|w.?base|w.?pattern/.test(q)) add("double_bottom", 1.4, true);
+  if (/bull flag|bullish flag|flag pattern/.test(q)) add("bull_flag", 1.35, true);
   if (/uptrend|trending up|higher high|higher low|strong trend/.test(q)) add("uptrend", 1.15);
   if (/downtrend|trending down|lower high|lower low|bearish/.test(q)) add("downtrend", 1.15);
   if (/accumulat|institution.*buy|smart money|buying pressure/.test(q)) add("accumulation", 1.2);
@@ -181,16 +314,16 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (/risk.adjusted|efficient momentum|smooth momentum/.test(q)) add("risk_adjusted_momentum", 1.2);
   if (/near.*high|52.week high|close to.*high/.test(q)) add("near_highs", 1.05);
   if (/low vol|less volatile|stable|safer|defensive/.test(q)) add("low_volatility", 1.1);
-  if (/oversold|beaten down|pullback|dip/.test(q)) add("oversold", 1.0);
-  if (/recover|turnaround|bouncing back/.test(q)) add("recovery", 1.05);
+  if (/oversold|beaten down|pullback|dip/.test(q) && !/bullish pullback|healthy pullback|mean reversion|turnaround/.test(q)) add("oversold", 1.0);
+  if (/recover|turnaround|bouncing back/.test(q) && !/turnaround setup|early turnaround/.test(q)) add("recovery", 1.05);
   if (/pullback.*(?:moving average|support)|near.*(?:20|50).day|buy.*dip.*uptrend/.test(q)) add("pullback_to_ma", 1.15);
   if (/golden cross|50.*above.*200/.test(q)) add("golden_cross", 1.1);
-  if (/unusual volume|volume surge|heavy volume|volume spike/.test(q)) add("volume_surge", 1.15);
+  if (/unusual(?:\s+\w+){0,2}\s+volume|volume surge|heavy volume|high trading volume|volume spike/.test(q)) add("volume_surge", 1.15);
   if (/volume dry|quiet volume|low volume base/.test(q)) add("volume_dryup", 1.1);
   if (/cheap|undervalued|value|low p.?e/.test(q)) add("value", 1.0);
-  if (/growth|growing|revenue growth|earnings growth/.test(q)) add("growth", 1.0);
+  if (/growth|growing|revenue growth|earnings growth/.test(q) && !/profitable growth|speculative growth|cheap growth|growth at a reasonable price|revenue growth|sales growth|earnings growth|profit growth/.test(q)) add("growth", 1.0);
   if (/quality|strong business|good compan/.test(q)) add("quality", 1.0);
-  if (/profitab|high margin|strong margin/.test(q)) add(/high margin|strong margin/.test(q) ? "high_margin" : "profitability", 1.1);
+  if (/profitab|high margin|strong margin/.test(q) && !/profitable growth/.test(q)) add(/high margin|strong margin/.test(q) ? "high_margin" : "profitability", 1.1);
   if (/balance sheet|low debt|net cash|financially strong/.test(q)) add("balance_sheet", 1.1);
   if (/free cash flow|cash generat|cash machine/.test(q)) add("cash_generation", 1.1);
   if (/dividend|income|yield/.test(q)) add("income", 1.0);
@@ -201,6 +334,30 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (/smaller compan|smaller cap|smallest.*s&p/.test(q)) add("smaller_cap", 1.0);
   if (/high vol|volatile|big mover/.test(q)) add("high_volatility", 1.0);
   if (/stable trend|smooth trend|consistent trend/.test(q)) add("trend_stability", 1.1);
+  if (/profitable growth|growth.*profit|growing.*profit/.test(q)) add("profitable_growth", 1.25);
+  if (/\bgarp\b|growth at a reasonable price|reasonably priced growth|cheap growth/.test(q)) add("garp", 1.3);
+  if (/quality value|high quality.*cheap|cheap.*quality|value without.*trap/.test(q)) add("quality_value", 1.25);
+  if (/compounder|steady grower|sleep.?well|boring.*winner|consistent compound/.test(q)) add("steady_compounder", 1.25);
+  if (/defensive quality|capital preservation|downside protection|safe.*quality|recession resistant/.test(q)) add("defensive_quality", 1.25);
+  if (/speculative growth|high risk.*growth|moonshot|lottery ticket/.test(q)) add("speculative_growth", 1.15);
+  if (/revenue growth|sales growth|top.?line growth/.test(q)) add("revenue_growth", 1.15);
+  if (/earnings growth|profit growth|bottom.?line growth/.test(q)) add("earnings_growth", 1.15);
+  if (/high roe|return on equity|capital efficient|capital efficiency/.test(q)) add(/capital efficient|capital efficiency/.test(q) ? "capital_efficiency" : "high_roe", 1.15);
+  if (/fcf yield|free.?cash.?flow yield/.test(q)) add("fcf_yield", 1.2);
+  if (/cash rich|net cash|cash heavy/.test(q)) add("cash_rich", 1.15);
+  if (/low debt|debt free|little debt|low leverage/.test(q)) add("low_debt", 1.15);
+  if (/dividend quality|safe dividend|sustainable dividend/.test(q)) add("dividend_quality", 1.2);
+  if (/liquid|easy to trade|high dollar volume/.test(q)) add("liquidity", 1.05);
+  if (/liquid options|options liquidity|trade options|optionable/.test(q)) add("options_liquidity_proxy", 1.15);
+  if (/low beta|market insensitive/.test(q)) add("low_beta", 1.05);
+  if (/high beta|moves more than.*market/.test(q)) add("high_beta", 1.05);
+  if (/high short interest|heavily shorted|shorted stocks/.test(q)) add("high_short_interest", 1.15);
+  if (/short squeeze/.test(q)) add("short_squeeze_setup", 1.3);
+  if (/technical squeeze|volatility squeeze|coiled spring/.test(q)) add("squeeze", 1.25);
+  if (/bullish pullback|healthy pullback|dip in.*uptrend/.test(q)) add("bullish_pullback", 1.25);
+  if (/mean reversion|snapback|oversold.*stable/.test(q)) add("mean_reversion", 1.15);
+  if (/turnaround setup|early turnaround|improving after.*drop/.test(q)) add("turnaround", 1.2);
+  if (/technical strength|technically strong|strong chart/.test(q)) add("technical_strength", 1.2);
 
   const profileAdjustments = [];
   const horizon = profile?.horizon || 3;
@@ -217,18 +374,21 @@ function fallbackScreenerSpec(query, rawProfile) {
     else add("quality", 1.0);
   }
 
-  let sector = "";
-  for (const s of SCREENER_SECTORS) {
-    const aliases = { "Technology":["tech", "software", "semiconductor"], "Financial Services":["financial", "bank"], "Healthcare":["healthcare", "health care", "biotech"], "Consumer Cyclical":["consumer cyclical", "retail"], "Consumer Defensive":["consumer defensive", "staples"], "Communication Services":["communication", "media", "telecom"], "Basic Materials":["materials"] }[s] || [s.toLowerCase()];
-    if (aliases.some(a => q.includes(a))) { sector = s; break; }
-  }
+  const sectors = SCREENER_SECTORS.filter(s => (SCREENER_SECTOR_ALIASES[s] || [s.toLowerCase()]).some(a => q.includes(a)));
   const numberAfter = pattern => finiteNumber(q.match(pattern)?.[1]);
   const finiteNumber = value => { const n = Number(value); return Number.isFinite(n) ? n : null; };
-  const filters = { sector };
+  const filters = {};
+  if (sectors.length) filters.sectors = sectors;
   const pe = numberAfter(/(?:p\/?e|pe).{0,8}(?:under|below|less than|max)\s*(\d+(?:\.\d+)?)/);
   if (pe !== null) filters.pe_max = pe;
   const price = numberAfter(/(?:price|stocks?).{0,8}(?:over|above|at least)\s*\$?(\d+(?:\.\d+)?)/);
   if (price !== null) filters.price_min = price;
+  const growthPct = numberAfter(/(?:revenue|sales).{0,12}growth.{0,8}(?:over|above|at least)\s*(\d+(?:\.\d+)?)\s*%/);
+  if (growthPct !== null) filters.revenue_growth_min = growthPct / 100;
+  const marginPct = numberAfter(/(?:profit|net) margin.{0,8}(?:over|above|at least)\s*(\d+(?:\.\d+)?)\s*%/);
+  if (marginPct !== null) filters.profit_margin_min = marginPct / 100;
+  const betaMax = numberAfter(/beta.{0,8}(?:under|below|less than|max)\s*(\d+(?:\.\d+)?)/);
+  if (betaMax !== null) filters.beta_max = betaMax;
 
   const theme = detectTheme(q);
   // A bare theme query ("AI stocks") needs no quantitative concept — the theme
@@ -236,15 +396,15 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (theme && !concepts.length) add("quality", 0.6);
 
   const spec = {
-    query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "S&P 500 screen",
+    query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "Stock screen",
     summary: theme
-      ? `Find S&P 500 companies in the ${theme.label} theme${concepts.length ? ", ranked by " + concepts.map(c => c.id.replaceAll("_", " ")).join(", ") : ""}.`
-      : `Rank S&P 500 companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
-    concepts, filters, settings: { consolidation_window: consolidationWindow, match_threshold: threshold },
+      ? `Find companies in the ${theme.label} theme${concepts.length ? ", ranked by " + concepts.map(c => c.id.replaceAll("_", " ")).join(", ") : ""}.`
+      : `Rank companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
+    concepts, filters, settings: { consolidation_window: consolidationWindow, momentum_window:[10,20,60,126,252][horizon - 1], match_threshold: threshold },
     max_results: 20, profile_adjustments: profileAdjustments, interpretation_source: "rules"
   };
   if (theme) spec.theme = theme;
-  return spec;
+  return applyProfileCalibration(spec, profile, query);
 }
 
 function attachScreenerDefinitions(spec) {
@@ -252,10 +412,10 @@ function attachScreenerDefinitions(spec) {
   return spec;
 }
 
-function sanitizeScreenerSpec(candidate, fallback) {
-  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return fallback;
-  const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 8).map(c => ({
-    id: c.id, weight: Math.max(.25, Math.min(3, Number(c.weight) || 1)), required: Boolean(c.required)
+function sanitizeScreenerSpec(candidate, fallback, rawProfile = null, query = "") {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return attachScreenerDefinitions(applyProfileCalibration(fallback, rawProfile, query));
+  const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 10).map(c => ({
+    id: c.id, weight: Math.max(.25, Math.min(3, Number(c.weight) || 1)), required: Boolean(c.required), source:"request"
   })) : [];
   const safe = { ...fallback };
   if (concepts.length) safe.concepts = concepts;
@@ -264,12 +424,22 @@ function sanitizeScreenerSpec(candidate, fallback) {
   safe.interpretation_source = "ai";
   if (candidate.filters && typeof candidate.filters === "object") {
     const f = { ...fallback.filters };
-    const sector = String(candidate.filters.sector || "").trim();
-    if (!sector || SCREENER_SECTORS.includes(sector)) f.sector = sector;
+    const sectorList = Array.isArray(candidate.filters.sectors) ? candidate.filters.sectors : candidate.filters.sector ? [candidate.filters.sector] : null;
+    if (sectorList) {
+      const sectors = [...new Set(sectorList.map(x => String(x).trim()).filter(x => SCREENER_SECTORS.includes(x)))];
+      if (sectors.length) f.sectors = sectors; else delete f.sectors;
+      delete f.sector;
+    }
+    if (Array.isArray(candidate.filters.exclude_sectors)) {
+      const excluded = [...new Set(candidate.filters.exclude_sectors.map(x => String(x).trim()).filter(x => SCREENER_SECTORS.includes(x)))];
+      if (excluded.length) f.exclude_sectors = excluded; else delete f.exclude_sectors;
+    }
     // Zero is never a meaningful bound for any of these filters — models that
     // "fill in" unused fields with 0 (pe_max: 0, price_max: 0, …) would filter
     // out the entire universe. Treat 0/negative/non-numeric all as "not set".
-    ["market_cap_min", "market_cap_max", "price_min", "price_max", "pe_max", "volume_min", "dividend_yield_min"].forEach(k => {
+    ["market_cap_min", "market_cap_max", "price_min", "price_max", "pe_max", "forward_pe_max", "volume_min",
+      "avg_dollar_volume_min", "dividend_yield_min", "revenue_growth_min", "earnings_growth_min",
+      "profit_margin_min", "current_ratio_min", "beta_min", "beta_max", "short_interest_min"].forEach(k => {
       if (!(k in candidate.filters)) return;   // key absent → keep the fallback's value
       const n = Number(candidate.filters[k]);
       if (Number.isFinite(n) && n > 0) f[k] = n;
@@ -278,18 +448,21 @@ function sanitizeScreenerSpec(candidate, fallback) {
     // Drop an inverted max that would contradict its min and empty the results.
     if (f.price_max != null && f.price_min != null && f.price_max < f.price_min) delete f.price_max;
     if (f.market_cap_max != null && f.market_cap_min != null && f.market_cap_max < f.market_cap_min) delete f.market_cap_max;
+    if (f.beta_max != null && f.beta_min != null && f.beta_max < f.beta_min) delete f.beta_max;
     safe.filters = f;
   }
   if (candidate.settings && typeof candidate.settings === "object") {
     safe.settings = { ...fallback.settings };
     const threshold = Number(candidate.settings.match_threshold);
     const window = Number(candidate.settings.consolidation_window);
+    const momentumWindow = Number(candidate.settings.momentum_window);
     if (Number.isFinite(threshold)) safe.settings.match_threshold = Math.max(20, Math.min(85, threshold));
     if ([20, 30, 60].includes(window)) safe.settings.consolidation_window = window;
+    if ([10, 20, 60, 126, 252].includes(momentumWindow)) safe.settings.momentum_window = momentumWindow;
   }
   const maxResults = Number(candidate.max_results);
   if (Number.isFinite(maxResults)) safe.max_results = Math.max(5, Math.min(50, Math.round(maxResults)));
-  // Theme: a label + keyword list matched against company descriptions in Python.
+  // Theme: a label + keyword list matched against company identity and business fields in Python.
   // Sanitize hard (lowercase, drop odd chars, cap count/length) — these become
   // literal substring probes, so keep them clean; absent/empty theme is dropped.
   if (candidate.theme && typeof candidate.theme === "object" && !Array.isArray(candidate.theme)) {
@@ -298,12 +471,19 @@ function sanitizeScreenerSpec(candidate, fallback) {
           .map(k => String(k).toLowerCase().replace(/[^a-z0-9 +.\-]/g, " ").replace(/\s+/g, " ").trim())
           .filter(k => k.length >= 2 && k.length <= 40))].slice(0, 24)
       : [];
+    const excludeKeywords = Array.isArray(candidate.theme.exclude_keywords)
+      ? [...new Set(candidate.theme.exclude_keywords
+          .map(k => String(k).toLowerCase().replace(/[^a-z0-9 +.\-]/g, " ").replace(/\s+/g, " ").trim())
+          .filter(k => k.length >= 2 && k.length <= 40))].slice(0, 16)
+      : [];
     if (keywords.length) {
       const label = String(candidate.theme.label || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 40) || "Theme";
-      safe.theme = { label, keywords };
+      const requestedMin = Number(candidate.theme.min_score);
+      safe.theme = { label, keywords, exclude_keywords:excludeKeywords,
+        min_score:Number.isFinite(requestedMin) ? Math.max(15, Math.min(80, requestedMin)) : Number(fallback.theme?.min_score || 24) };
     }
   }
-  return attachScreenerDefinitions(safe);
+  return attachScreenerDefinitions(applyProfileCalibration(safe, rawProfile, query || fallback.query));
 }
 
 async function interpretScreenerQuery(query, profile) {
@@ -317,9 +497,13 @@ async function interpretScreenerQuery(query, profile) {
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
       body: JSON.stringify({ model: UTILITY_MODEL, temperature: .05, max_tokens: 900,
         messages: [
-          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks. Choose up to 8 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters (sector, market_cap_min/max, price_min/max, pe_max, volume_min, dividend_yield_min), and optionally theme. FILTERS: include a filter key ONLY when the user's request implies that constraint — omit every unused filter entirely. Never emit 0, null, or placeholder values as defaults (pe_max: 0 or price_max: 0 would wrongly exclude every stock). Interpret fuzzy language and use weights for emphasis; mark required only when the user clearly says must/only.
+          { role:"system", content:`Translate a layperson's stock-screening request into strict JSON. Never select stocks and never invent a metric. Choose up to 10 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Convert fuzzy language and named chart formations (for example VCP, cup with handle, flat base, double bottom, and bull flag) into the closest measurable concept blend, using weights for emphasis. Mark required only when the user clearly says must/only.
 
-THEME: only when the request names an industry, technology, product, or trend that the quantitative concepts above cannot capture (e.g. "AI stocks", "cybersecurity", "obesity drugs", "nuclear"), add theme={label, keywords}. keywords = 6-16 short lowercase words/phrases likely to appear verbatim in a company's business-description text — include synonyms, core technologies, and product terms (e.g. AI → "artificial intelligence","machine learning","gpu","accelerated computing","inference","neural network"). These are matched literally against company descriptions by the backend; the descriptions reflect established business, not last week's news. Omit theme entirely for purely quantitative requests. Return JSON only.` },
+Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters, settings, max_results, and optionally theme. Allowed filters: sectors (array using only ${JSON.stringify(SCREENER_SECTORS)}), exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, short_interest_min. Express percentages as fractions (15% = 0.15) and market caps/dollar volume as raw dollars. Include a filter ONLY when the user explicitly implies that hard constraint. Never emit 0, null, or placeholder defaults.
+
+MySquall is context for quantifying time horizon, risk, and light secondary tilts. Preserve the user's explicit request as the dominant concepts; the server deterministically reapplies profile calibration after your JSON is sanitized.
+
+THEME: when the request names an industry, technology, product, or trend (e.g. "AI stocks", "cybersecurity", "obesity drugs", "nuclear"), add theme={label, keywords, exclude_keywords, min_score}. keywords = 8-20 concise lowercase words/phrases likely to appear in a company name, sector, industry, or business description. Include specific synonyms, enabling technologies, and product terms; avoid vague words such as "company", "technology", or "solutions" by themselves. Set min_score around 24 for broad exposure, 40 for meaningful exposure, and 55-70 only for "pure play", "primarily", or "core business" wording. Use exclude_keywords only when the user explicitly excludes an exposure. A theme can coexist with sectors and quantitative concepts. Omit theme only for purely quantitative requests. Return JSON only.` },
           { role:"user", content:`Request: ${String(query).slice(0,500)}\n\n${profileText || "No MySquall profile."}\n\nRule-based starting point: ${JSON.stringify(fallback)}` }
         ] })
     });
@@ -327,33 +511,45 @@ THEME: only when the request names an industry, technology, product, or trend th
     const data = await res.json();
     let text = data?.choices?.[0]?.message?.content || "";
     text = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-    return sanitizeScreenerSpec(JSON.parse(text), fallback);
+    return sanitizeScreenerSpec(JSON.parse(text), fallback, profile, query);
   } catch { return attachScreenerDefinitions(fallback); }
   finally { clearTimeout(timer); }
 }
 
 function fallbackRefineScreener(message, existing, profile, resultCount) {
   const text = String(message || "").toLowerCase();
-  const base = sanitizeScreenerSpec(existing, fallbackScreenerSpec(existing?.query || message, profile));
+  const baseQuery = existing?.query || message;
+  const base = sanitizeScreenerSpec(existing, fallbackScreenerSpec(baseQuery, profile), profile, baseQuery);
+  const priorProfileIds = new Set((existing?.concepts || []).filter(c => c.source === "profile").map(c => c.id));
+  base.concepts.forEach(c => { if (priorProfileIds.has(c.id)) c.source = "profile"; });
   const next = JSON.parse(JSON.stringify(base));
-  const mentioned = fallbackScreenerSpec(message, profile).concepts.filter(c =>
+  const mentioned = fallbackScreenerSpec(message, null).concepts.filter(c => c.source !== "profile" && (
     text.includes(c.id.replaceAll("_", " ")) || text.split(/\s+/).some(w => w.length > 4 && (SCREENER_CATALOG[c.id]?.[0] || "").toLowerCase().includes(w))
+  )
   );
   const broaden = /broaden|more result|too strict|loosen|less strict|nothing|no match|zero/.test(text);
   const narrow = /narrow|fewer result|too many|stricter|more selective|best only/.test(text);
   const remove = /remove|without|drop|ignore|less emphasis/.test(text);
+  const requireMentioned = /\b(require|required|must|only)\b/.test(text);
   let reply;
   const removedFilters = [];
   if (remove && /price/.test(text)) { delete next.filters.price_min; delete next.filters.price_max; removedFilters.push("price limits"); }
   if (remove && /p\/?e|valuation limit/.test(text)) { delete next.filters.pe_max; removedFilters.push("the P/E limit"); }
-  if (remove && /sector|industry/.test(text)) { delete next.filters.sector; removedFilters.push("the sector filter"); }
-  if (remove && /volume limit|minimum volume/.test(text)) { delete next.filters.volume_min; removedFilters.push("the volume limit"); }
+  if (remove && /sector|industry/.test(text)) { delete next.filters.sector; delete next.filters.sectors; delete next.filters.exclude_sectors; removedFilters.push("the sector filter"); }
+  if (remove && /volume limit|minimum volume|liquidity/.test(text)) { delete next.filters.volume_min; delete next.filters.avg_dollar_volume_min; removedFilters.push("the volume limit"); }
   if (remove && /dividend|yield limit/.test(text)) { delete next.filters.dividend_yield_min; removedFilters.push("the dividend limit"); }
   if (remove && /theme|topic|industry theme/.test(text) && next.theme) { delete next.theme; removedFilters.push("the theme filter"); }
   const newTheme = !remove ? detectTheme(message) : null;
   if (newTheme) next.theme = newTheme;
   if (removedFilters.length) {
-    reply = `I removed ${removedFilters.join(", ")} and reran the remaining weighted recipe.`;
+    if (broaden) {
+      const amount = Number(resultCount) === 0 ? 12 : 8;
+      next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - amount);
+      next.concepts.forEach(c => { c.required = false; });
+    } else if (narrow) {
+      next.settings.match_threshold = Math.min(85, Number(next.settings.match_threshold || 49) + 8);
+    }
+    reply = `I removed ${removedFilters.join(", ")}${broaden ? " and loosened the match threshold" : narrow ? " and tightened the match threshold" : ""}, then reran the remaining weighted recipe.`;
   } else if (broaden) {
     const amount = Number(resultCount) === 0 ? 12 : 8;
     next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - amount);
@@ -372,11 +568,17 @@ function fallbackRefineScreener(message, existing, profile, resultCount) {
   } else if (mentioned.length) {
     for (const concept of mentioned) {
       const current = next.concepts.find(c => c.id === concept.id);
-      if (current) current.weight = Math.min(3, current.weight + .35);
-      else next.concepts.push({ ...concept, required:false });
+      if (current) {
+        current.weight = Math.min(3, current.weight + .35);
+        if (requireMentioned) current.required = true;
+      } else {
+        next.concepts.push({ ...concept, required:requireMentioned });
+      }
     }
-    next.concepts = next.concepts.slice(0, 8);
-    reply = `I added more emphasis to ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and reran the same S&P 500 universe.`;
+    next.concepts = next.concepts.slice(0, 10);
+    reply = requireMentioned
+      ? `I made ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} a required condition and reran the same market universe.`
+      : `I increased the emphasis on ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and reran the same market universe.`;
   } else {
     next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - (Number(resultCount) === 0 ? 6 : 0));
     reply = Number(resultCount) === 0
@@ -385,7 +587,7 @@ function fallbackRefineScreener(message, existing, profile, resultCount) {
   }
   next.summary = `Refined from the prior screen: ${String(message).trim().slice(0, 180)}`;
   next.interpretation_source = "rules + follow-up";
-  return { reply, spec:attachScreenerDefinitions(next) };
+  return { reply, spec:attachScreenerDefinitions(applyProfileCalibration(next, profile, baseQuery)) };
 }
 
 async function refineScreenerSpec(message, existing, profile, resultCount) {
@@ -397,7 +599,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
       body:JSON.stringify({ model:UTILITY_MODEL, temperature:.08, max_tokens:1100, messages:[
-        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 8 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords}. Keep the existing theme unless the user changes the subject or asks to drop it (then omit theme); if they name a new industry/technology theme, replace it with 6-16 lowercase description keywords. Include a filter key only when a real constraint applies — never emit 0/null placeholder filter values (they would exclude every stock). “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required.` },
+        { role:"system", content:`Revise an existing quantitative stock-screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 10 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one concise explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords, exclude_keywords, min_score}. Allowed filters are sectors, exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, and short_interest_min. Keep the existing theme unless the user changes the subject or asks to drop it; when replacing it, use specific lowercase terms and a 15-80 minimum relevance score. Include a filter key only when a real constraint applies — never emit 0/null placeholders. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required. Preserve explicit user concepts; MySquall is context only because the server reapplies its secondary calibration.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
     });
@@ -405,7 +607,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
     const data = await res.json();
     const raw = String(data?.choices?.[0]?.message?.content || "").replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
     const parsed = JSON.parse(raw);
-    const spec = sanitizeScreenerSpec(parsed, fallback.spec);
+    const spec = sanitizeScreenerSpec(parsed, fallback.spec, profile, existing?.query || message);
     spec.interpretation_source = "ai + follow-up";
     return { reply:String(parsed.reply || fallback.reply).replace(/[\u0000-\u001f]/g," ").trim().slice(0,500), spec };
   } catch { return fallback; }
@@ -466,7 +668,7 @@ function serveStatic(req, res) {
 }
 
 // ─── HTTP SERVER ──────────────────────────────────────────────────────────────
-http.createServer(async (req, res) => {
+const appServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.end(); return; }
@@ -478,20 +680,21 @@ http.createServer(async (req, res) => {
     return;
   }
 
-  // Natural-language S&P 500 screener. The model interprets intent; Python does
+  // Natural-language multi-index screener. The model interprets intent; Python does
   // every numerical comparison so results remain reproducible and explainable.
   if (req.method === "GET" && req.url.startsWith("/screen-stream")) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
+    const universeId = SCREEN_UNIVERSES.has(url.searchParams.get("universe")) ? url.searchParams.get("universe") : "combined";
     const profile = sanitizeProfile(url.searchParams.get("profile"));
     let existing = null;
     try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
     const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
     res.writeHead(200, { "Content-Type":"text/event-stream", "Cache-Control":"no-cache", "Connection":"keep-alive", "X-Accel-Buffering":"no" });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    if (query.length < 3) { send("screen_error", { error:"Describe the kind of S&P 500 stock you want in a little more detail." }); return res.end(); }
+    if (query.length < 3) { send("screen_error", { error:"Describe the companies you want to find in a little more detail." }); return res.end(); }
 
-    send("screen_progress", { stage:0, total:6, label:existing ? "Revising your measurable recipe" : "Turning your words into measurable rules" });
+    send("screen_progress", { percent:4, label:existing ? "Revising the measurable criteria" : "Translating the request into measurable criteria" });
     let spec;
     if (existing) {
       let refined;
@@ -503,11 +706,13 @@ http.createServer(async (req, res) => {
       try { spec = await interpretScreenerQuery(query, profile); }
       catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
     }
-    send("screen_interpretation", spec);
-
     let universe;
-    try { universe = readSp500Universe(); }
-    catch (e) { send("screen_error", { error:"Could not read the S&P 500 universe: " + e.message }); return res.end(); }
+    try { universe = readMarketUniverse(universeId); }
+    catch (e) { send("screen_error", { error:"Could not load the selected market universe: " + e.message }); return res.end(); }
+    spec.universe_id = universe.id;
+    spec.universe_label = universe.label;
+    send("screen_progress", { percent:8, label:`Preparing ${universe.label}` });
+    send("screen_interpretation", spec);
     const py = spawn(PYTHON, [SCREENER_PATH], { env:process.env });
     let stdout = "", stderr = "", buf = "";
     py.stdout.on("data", chunk => { stdout += chunk.toString(); });
@@ -516,8 +721,10 @@ http.createServer(async (req, res) => {
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        const m = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
-        if (m) send("screen_progress", { stage:Math.min(6, Number(m[1]) + 1), total:6, label:m[3] });
+        const progress = line.match(/^PROGRESS\|(\d+)\|(.*)$/);
+        const legacy = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
+        if (progress) send("screen_progress", { percent:Number(progress[1]), label:progress[2] });
+        else if (legacy) send("screen_progress", { stage:Math.min(6, Number(legacy[1]) + 1), total:6, label:legacy[3] });
       }
     });
     py.on("error", e => { send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
@@ -526,9 +733,13 @@ http.createServer(async (req, res) => {
       try { result = JSON.parse(stdout); }
       catch { send("screen_error", { error:"The screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
       if (code !== 0 || result.error) { send("screen_error", { error:result.error || "The screening engine failed.", detail:stderr.slice(-500) }); return res.end(); }
+      send("screen_progress", { percent:96, label:`Preparing ${result.results?.length || 0} matches for display` });
       send("screen_result", result); res.end();
     });
-    py.stdin.end(JSON.stringify({ tickers:universe.tickers, names:universe.names, spec }));
+    py.stdin.end(JSON.stringify({
+      tickers:universe.tickers, names:universe.names, memberships:universe.memberships,
+      universe_id:universe.id, universe_label:universe.label, spec
+    }));
     return;
   }
 
@@ -851,10 +1062,19 @@ http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end("Not found");
 
-}).listen(PORT, "0.0.0.0", () => {
-  console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
-  console.log(`   Model    : ${AI_MODEL}`);
-  console.log(`   Scraper  : ${path.resolve(SCRAPER_PATH)}`);
-  console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
-  console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}\n`);
 });
+
+if (require.main === module) {
+  appServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
+    console.log(`   Model    : ${AI_MODEL}`);
+    console.log(`   Scraper  : ${path.resolve(SCRAPER_PATH)}`);
+    console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
+    console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}\n`);
+  });
+}
+
+module.exports = {
+  applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
+  fallbackRefineScreener, readMarketUniverse
+};

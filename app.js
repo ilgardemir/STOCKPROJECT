@@ -7,7 +7,7 @@ const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false,
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
 const SCREENER_STORAGE_KEY = "squall-saved-screeners-v1";
-const screeners = {};   // saved natural-language S&P 500 screens
+const screeners = {};   // saved natural-language multi-index screens
 let activeScreen = null;
 let _screenES = null;
 const ANALYSIS_RUNS_KEY = "squall-analysis-runs-v1";
@@ -257,24 +257,33 @@ const jsAttr = s => String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 /* ════════════════ PROGRESS ════════════════ */
-function showProgress(stage, total, label, isErr = false) {
+function showProgressPercent(percent, label, isErr = false) {
   document.getElementById("progressWrap").classList.add("show");
-  const pct = Math.round((stage / total) * 100);
+  const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   const fill = document.getElementById("progressFill");
   fill.style.width = pct + "%"; fill.classList.toggle("error", isErr);
+  document.getElementById("progressTrack").setAttribute("aria-valuenow", String(pct));
   document.getElementById("progressStage").textContent = label;
   document.getElementById("progressMeta").classList.toggle("error", isErr);
   document.getElementById("progressPct").textContent = isErr ? "—" : pct + "%";
 }
+function showProgress(stage, total, label, isErr = false) {
+  // Market-data collection occupies the first 68%; the remaining progress is
+  // driven by dashboard rendering and live AI events below.
+  const pct = isErr ? 0 : Math.round((stage / Math.max(1, total)) * 68);
+  showProgressPercent(pct, label, isErr);
+}
 function hideProgress(delay = 600) { setTimeout(() => {
   document.getElementById("progressWrap").classList.remove("show");
-  document.getElementById("progressFill").style.width = "0%"; }, delay); }
+  document.getElementById("progressFill").style.width = "0%";
+  document.getElementById("progressTrack").setAttribute("aria-valuenow", "0"); }, delay); }
 
 /* ════════════════ ANALYSIS (SSE streaming — scraper stages, then live AI tokens) ════════════════ */
 function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); }
-// Pick a random S&P 500 constituent and analyze it (list in sp500.js → window.SP500).
+// Pick a random company from the combined large-cap screening universe.
 function randomAnalysis() {
-  const list = window.SP500;
+  const extra = window.MARKET_UNIVERSES || {};
+  const list = [...new Set([...(window.SP500 || []), ...(extra.nasdaq100 || []), ...(extra.dow30 || [])])];
   if (!Array.isArray(list) || !list.length) { quick("AAPL"); return; }
   quick(list[Math.floor(Math.random() * list.length)]);
 }
@@ -293,13 +302,13 @@ function prettyModel(id) {
 function setModelTag(id) { const el = document.getElementById("aiModelTag"); if (el && id) el.textContent = prettyModel(id); }
 fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() => {});
 
-/* ── Search typeahead — custom in-site dropdown over the S&P 500 list (sp500.js) ──
+/* ── Search typeahead — custom in-site dropdown over supported index constituents ──
    Records are lowercased once at boot; each keystroke is a single linear scan over
    503 entries with ranked buckets (ticker prefix → name prefix → substring), capped
    at 8 rows and painted with one innerHTML write — no per-item DOM churn. */
 (function () {
   const input = document.getElementById("ticker"), box = document.getElementById("tickerSuggest");
-  const names = window.SP500_NAMES;
+  const names = { ...(window.MARKET_UNIVERSES?.names || {}), ...(window.SP500_NAMES || {}) };
   if (!input || !box || !names) return;
 
   const REC = Object.keys(names).map(sym =>
@@ -469,7 +478,12 @@ function runAnalysis() {
 
   es.addEventListener("error", e => {
     if (!e.data && gotResult) {   // natural close (or drop) after data arrived — finalize quietly
-      finalizePartialStream(); es.close(); if (_es === es) _es = null; btn.disabled = false; return;
+      finalizePartialStream();
+      if (_es === es) {
+        showProgressPercent(100, "Dashboard ready");
+        hideProgress(900);
+      }
+      es.close(); if (_es === es) _es = null; btn.disabled = false; return;
     }
     let msg = "Connection lost. Is the server running? (node server.js)";
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
@@ -495,11 +509,7 @@ function runAnalysis() {
     renderAll(data);
     if (active === data.ticker) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
     btn.disabled = false;
-    // 100% → wind-streak sweep → bar collapses
-    showProgress(7, 7, "Data compiled — " + (data.company_name || data.ticker));
-    const wrap = document.getElementById("progressWrap");
-    wrap.classList.add("done");
-    setTimeout(() => { wrap.classList.remove("show"); setTimeout(() => { wrap.classList.remove("done"); document.getElementById("progressFill").style.width = "0%"; }, 400); }, 850);
+    showProgressPercent(72, "Dashboard ready · preparing the written analysis");
   });
 
   es.addEventListener("ai_start", e => {
@@ -509,6 +519,7 @@ function runAnalysis() {
     document.getElementById("aiModelTag")?.classList.add("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.add("streaming");
     if (active === key) buildStreamShell();
+    showProgressPercent(76, "Reviewing the compiled evidence");
   });
 
   es.addEventListener("ai_thinking", e => pushStream("thinking", JSON.parse(e.data).t));
@@ -523,6 +534,8 @@ function runAnalysis() {
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
     if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
+    showProgressPercent(100, "Analysis complete");
+    hideProgress(900);
     es.close(); if (_es === es) _es = null;
   });
 
@@ -535,6 +548,8 @@ function runAnalysis() {
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
     if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
+    showProgressPercent(100, "Dashboard ready · written analysis unavailable");
+    hideProgress(1600);
     es.close(); if (_es === es) _es = null;
   });
 }
@@ -593,6 +608,11 @@ function buildStreamShell() {
 function pushStream(kind, t) {
   if (!_stream || !t) return;
   _stream[kind] += t;
+  if (kind === "thinking") {
+    showProgressPercent(78 + Math.min(6, Math.floor(_stream.thinking.length / 800)), "Reasoning through the evidence");
+  } else {
+    showProgressPercent(85 + Math.min(14, Math.floor(_stream.answer.length / 450)), "Rendering the written analysis");
+  }
   if (kind === "answer" && !_stream.answerStarted) {
     _stream.answerStarted = true;
     if (active === _stream.ticker) {
@@ -667,9 +687,11 @@ function resumeSavedWorkspace() {
   showWorkspace(true); renderTickerPills(); renderAll(sessions[active].data);
 }
 
-/* ════════════════ NATURAL-LANGUAGE S&P 500 SCREENER ════════════════ */
+/* ════════════════ NATURAL-LANGUAGE MULTI-INDEX SCREENER ════════════════ */
 const SCREEN_CONCEPT_LABELS = {
   consolidation: "Consolidation", volatility_contraction: "Shrinking volatility", uptrend: "Uptrend",
+  vcp:"Volatility contraction pattern (VCP)", cup_and_handle:"Cup with handle",
+  flat_base:"Flat base", double_bottom:"Double bottom", bull_flag:"Bull flag",
   downtrend:"Downtrend", accumulation: "Accumulation", distribution:"Distribution", breakout: "Breakout", momentum: "Momentum",
   relative_strength:"Relative strength", risk_adjusted_momentum:"Efficient momentum", near_highs: "Near 52-week highs",
   low_volatility: "Lower volatility", high_volatility:"Higher volatility", trend_stability:"Stable trend",
@@ -677,7 +699,16 @@ const SCREEN_CONCEPT_LABELS = {
   volume_surge:"Unusual volume", volume_dryup:"Quiet volume", value: "Value", growth: "Growth", profitability:"Profitability",
   quality: "Business quality", balance_sheet:"Balance sheet", cash_generation:"Cash generation", high_margin:"High margins",
   income: "Income", analyst_upside:"Analyst upside", insider_ownership:"Insider ownership",
-  institutional_ownership:"Institutional ownership", mega_cap:"Mega-cap", smaller_cap:"Smaller S&P companies"
+  institutional_ownership:"Institutional ownership", mega_cap:"Mega-cap", smaller_cap:"Smaller companies",
+  profitable_growth:"Profitable growth", garp:"Growth at a reasonable price", quality_value:"Quality value",
+  steady_compounder:"Steady compounder", defensive_quality:"Defensive quality", speculative_growth:"Speculative growth",
+  revenue_growth:"Revenue growth", earnings_growth:"Earnings growth", high_roe:"High return on equity",
+  fcf_yield:"Free-cash-flow yield", cash_rich:"Cash-rich", low_debt:"Low debt",
+  capital_efficiency:"Capital efficiency", dividend_quality:"Dividend quality", liquidity:"Trading liquidity",
+  options_liquidity_proxy:"Options-liquidity proxy", low_beta:"Lower beta", high_beta:"Higher beta",
+  high_short_interest:"High short interest", squeeze:"Technical squeeze", bullish_pullback:"Healthy pullback",
+  mean_reversion:"Mean-reversion setup", turnaround:"Turnaround setup", technical_strength:"Technical strength",
+  short_squeeze_setup:"Short-squeeze setup"
 };
 function openScreener() {
   document.getElementById("hero").style.display = "none";
@@ -691,7 +722,30 @@ function openSavedScreener(id) {
   const s = screeners[id]; if (!s) return;
   activeScreen = id; active = null; openScreener();
   document.getElementById("screenQuery").value = s.query;
+  document.getElementById("screenUniverse").value = s.universe || s.spec?.universe_id || "combined";
   renderSavedScreener(s); renderTickerPills();
+}
+function showScreenProgress(percent, label, isErr = false) {
+  const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const wrap = document.getElementById("screenProgress");
+  wrap.classList.add("show");
+  wrap.classList.toggle("error", isErr);
+  document.getElementById("screenProgressText").textContent = label || "Preparing the screen…";
+  document.getElementById("screenProgressPct").textContent = isErr ? "—" : pct + "%";
+  document.getElementById("screenProgressFill").style.width = pct + "%";
+  wrap.querySelector('[role="progressbar"]')?.setAttribute("aria-valuenow", String(pct));
+}
+function hideScreenProgress(delay = 650) {
+  setTimeout(() => {
+    document.getElementById("screenProgress").classList.remove("show", "error");
+    document.getElementById("screenProgressFill").style.width = "0%";
+  }, delay);
+}
+function applyScreenProgressEvent(data, fallback) {
+  const pct = isNum(data.percent)
+    ? data.percent
+    : Math.round((Number(data.stage) || 0) / Math.max(1, Number(data.total) || 1) * 100);
+  showScreenProgress(pct, data.label || fallback);
 }
 function deleteScreener(id) {
   if (!screeners[id]) return;
@@ -707,22 +761,28 @@ function deleteScreener(id) {
   persistScreeners(); renderTickerPills();
 }
 function screenPct(v) { return isNum(v) ? (v * 100).toFixed(1) + "%" : "N/A"; }
+function screenSourceLabel(source) {
+  return ({ rules:"Rule-based interpretation", ai:"AI-assisted interpretation",
+    "rules + follow-up":"Rule-based revision", "ai + follow-up":"AI-assisted revision" })[source] || "Measured recipe";
+}
 function renderScreenRecipe(spec) {
   if (!spec) return "";
-  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.required ? "required · " : ""}${(Number(c.weight) || 1).toFixed(2)}× weight</span></div>`).join("");
+  const concepts = (spec.concepts || []).map(c => `<div class="recipe-chip"><b>${esc(SCREEN_CONCEPT_LABELS[c.id] || c.id)}</b><span>${c.source === "profile" ? "MySquall tilt · " : ""}${c.required ? "required · " : ""}${(Number(c.weight) || 1).toFixed(2)}× weight</span></div>`).join("");
   const filters = Object.entries(spec.filters || {}).filter(([, v]) => v !== null && v !== "" && v !== undefined)
-    .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(v)}</span></div>`).join("");
-  const adjustments = (spec.profile_adjustments || []).map(a => `<div class="recipe-adjust">MySquall adjustment · ${esc(a)}</div>`).join("");
+    .map(([k, v]) => `<div class="recipe-chip"><b>${esc(k.replaceAll("_", " "))}</b><span>${esc(Array.isArray(v) ? v.join(", ") : v)}</span></div>`).join("");
+  const adjustments = (spec.profile_adjustments || []).map(a => `<div class="recipe-adjust">Profile preference · ${esc(a)}</div>`).join("");
   const window = spec.settings?.consolidation_window;
-  const definitions = (spec.definitions || []).map(d => `<details class="recipe-definition"><summary>${esc(d.label || SCREEN_CONCEPT_LABELS[d.id] || d.id)}<span>How Squall measures it</span></summary><p>${esc(d.definition)}</p></details>`).join("");
+  const definitions = (spec.definitions || []).map(d => `<details class="recipe-definition"><summary>${esc(d.label || SCREEN_CONCEPT_LABELS[d.id] || d.id)}<span>Measurement</span></summary><p>${esc(d.definition)}</p></details>`).join("");
   const definition = (spec.concepts || []).some(c => c.id === "consolidation")
-    ? `<div class="recipe-adjust">MySquall structure window · ${esc(window || 30)} trading days</div>` : "";
+    ? `<div class="recipe-adjust">Profile-adjusted structure window · ${esc(window || 30)} trading days</div>` : "";
+  const momentumWindow = (spec.concepts || []).some(c => c.id === "momentum")
+    ? `<div class="recipe-adjust">Profile-adjusted momentum window · ${esc(spec.settings?.momentum_window || 60)} trading days</div>` : "";
   const theme = spec.theme && Array.isArray(spec.theme.keywords) && spec.theme.keywords.length ? spec.theme : null;
   const themeChip = theme
-    ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))}</span></div>` : "";
+    ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))} · minimum evidence ${esc(theme.min_score || 24)}/100${theme.exclude_keywords?.length ? ` · excludes ${esc(theme.exclude_keywords.join(", "))}` : ""}</span></div>` : "";
   const themeNote = theme
     ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations — it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
-  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Your screening recipe")}</h2><p>${esc(spec.summary || "Your words translated into measurable rules.")}</p></div><span class="recipe-source">${esc(spec.interpretation_source || "rules")}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">A <b>match score</b> measures how well a company fits <em>this recipe</em> — it is not a rating of the company, a prediction, or a recommendation.</div></div>`;
+  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Screening criteria")}</h2><p>${esc(spec.summary || "Your request translated into measurable rules.")}</p></div><span class="recipe-source">${esc(screenSourceLabel(spec.interpretation_source))}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${momentumWindow}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">The <b>match score</b> shows how closely a company fits these criteria. It is not a recommendation or a price forecast.</div></div>`;
 }
 // Per-result breakdown of the components behind the match score: the theme
 // relevance (if any) plus each concept's 0-100 sub-score. Makes the circle
@@ -748,9 +808,9 @@ function renderScreenResults(result) {
   if (!result) return "";
   const rows = result.results || [];
   const spec = result.spec || {};
-  if (!rows.length) return `<div class="screen-empty"><b>No stocks cleared every rule.</b><span>Try loosening one requirement or using broader wording. Squall will never invent a match just to fill the page.</span></div>`;
-  const cards = rows.map((r, i) => `<article class="screen-result" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Match score — how well this stock fits your recipe, not a rating of the company">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20 day</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>From high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
-  return `<div class="screen-results-head"><h2>${rows.length} measurable matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} S&P 500 companies scored${result.cache_hit ? " · cached market data" : ""}</span></div><div class="screen-grid">${cards}</div>`;
+  if (!rows.length) return `<div class="screen-empty"><b>No companies met every condition.</b><span>Broaden the match threshold or remove a required criterion, then run the screen again.</span></div>`;
+  const cards = rows.map((r, i) => `<article class="screen-result" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([(r.indexes || []).join(" / "), r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Match score: fit with this screen, not an investment rating">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20-day return</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>Below 52-week high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
+  return `<div class="screen-results-head"><h2>${rows.length} matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} companies scored in ${esc(result.universe || spec.universe_label || "the selected universe")}${result.cache_hit ? " · current cache used" : ""}</span></div><div class="screen-grid">${cards}</div>`;
 }
 /* Paint results and bring them to life: each match ring sweeps 0→score while
    the number counts up. Skipped (values set instantly) under reduced motion. */
@@ -762,7 +822,7 @@ function paintScreenResults(result) {
     const target = Math.max(0, Math.min(100, Number(ring.dataset.score) || 0));
     if (REDUCED_MOTION.matches) { ring.style.setProperty("--ring", target + "%"); return; }
     ring.textContent = "0"; ring.style.setProperty("--ring", "0%");
-    const t0 = performance.now() + Math.min(i, 14) * 50 + 150;   // ride the card's gust delay
+    const t0 = performance.now() + Math.min(i, 14) * 35 + 120;
     (function step(now) {
       const p = Math.max(0, Math.min(1, (now - t0) / 750));
       const v = (1 - Math.pow(1 - p, 3)) * target;               // ease-out cubic
@@ -783,32 +843,32 @@ function analyzeFromScreener(ticker) {
 }
 function runScreener() {
   const query = document.getElementById("screenQuery").value.trim();
-  if (query.length < 3) { document.getElementById("screenProgressText").textContent = "Describe what you want in a little more detail."; document.getElementById("screenProgress").classList.add("show"); return; }
+  const universe = document.getElementById("screenUniverse").value || "combined";
+  if (query.length < 3) { showScreenProgress(0, "Describe the companies you want to find in a little more detail.", true); hideScreenProgress(2400); return; }
   if (_screenES) _screenES.close();
   openScreener();
   const id = "screen-" + Date.now().toString(36), now = Date.now();
-  const s = screeners[id] = { id, query, title: "New S&P screen", spec: null, result: null, history:[], profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
+  const s = screeners[id] = { id, query, universe, title: "New stock screen", spec: null, result: null, history:[], profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
   activeScreen = id;
   document.getElementById("screenRun").disabled = true;
-  document.getElementById("screenProgressText").textContent = "Interpreting your request…";
-  document.getElementById("screenProgress").classList.add("show");
+  showScreenProgress(2, "Interpreting your request");
   document.getElementById("screenInterpretation").innerHTML = ""; document.getElementById("screenResults").innerHTML = ""; document.getElementById("screenRefine").innerHTML = "";
   renderTickerPills();
-  let url = "/screen-stream?q=" + encodeURIComponent(query);
+  let url = "/screen-stream?q=" + encodeURIComponent(query) + "&universe=" + encodeURIComponent(universe);
   if (s.profile) url += "&profile=" + encodeURIComponent(JSON.stringify(s.profile));
   const es = _screenES = new EventSource(url);
-  const finish = () => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; document.getElementById("screenProgress").classList.remove("show"); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
-  es.addEventListener("screen_progress", e => { const d = JSON.parse(e.data); document.getElementById("screenProgressText").textContent = d.label || "Screening the S&P 500…"; });
-  es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved S&P screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
-  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `I found ${count} matches. Tell me what feels too broad, too strict, or missing and I’ll revise the weights and rerun it.` : "Nothing cleared every rule. Ask me to broaden it, remove a requirement, or emphasize a different idea and I’ll revise the recipe instead of inventing matches."}); paintScreenResults(s.result); renderScreenRefine(s); finish(); });
-  es.addEventListener("screen_error", e => { let msg = "The screen could not finish."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screening stopped</b><span>${esc(msg)}</span></div>`; finish(); });
-  es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Make sure the Squall server is running, then try again.</span></div>`; finish(); } };
+  const finish = (delay = 650) => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; hideScreenProgress(delay); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
+  es.addEventListener("screen_progress", e => applyScreenProgressEvent(JSON.parse(e.data), "Screening the selected universe"));
+  es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved stock screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
+  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `This screen returned ${count} matches. Describe anything that should be broader, stricter, added, or removed, and the criteria will be rescored.` : "No companies met every required condition. You can broaden the threshold, remove a requirement, or emphasize a different factor without accepting weaker matches automatically."}); showScreenProgress(97, `Rendering ${count} matches`); paintScreenResults(s.result); renderScreenRefine(s); requestAnimationFrame(() => showScreenProgress(100, `Screen complete · ${count} matches`)); finish(900); });
+  es.addEventListener("screen_error", e => { let msg = "The screen could not be completed."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screen unavailable</b><span>${esc(msg)}</span></div>`; showScreenProgress(0, msg, true); finish(2200); });
+  es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Confirm that the Squall server is running, then try again.</span></div>`; showScreenProgress(0, "Connection lost before the screen completed.", true); finish(2200); } };
 }
 function renderScreenRefine(s) {
   const el = document.getElementById("screenRefine"); if (!el) return;
   if (!s?.spec) { el.innerHTML=""; return; }
   const messages=(s.history||[]).map(m => `<div class="screen-chat-msg ${m.role}"><span>${m.role === "user" ? "You" : "Squall"}</span><p>${esc(m.content)}</p></div>`).join("");
-  el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Refine this screen</h2><p>Keep talking normally. Squall changes the measurable recipe, then the backend reruns every stock.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden it and remove unnecessary hard requirements')">Broaden it</button><button type="button" onclick="refineScreener('Narrow it to the strongest matches')">Narrow it</button><button type="button" onclick="refineScreener('Add more emphasis to relative strength')">Add relative strength</button><button type="button" onclick="refineScreener('Add unusual volume')">Add unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="Try: remove value, care more about cash flow, make it less strict…" aria-label="Refine this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Rerunning…" : "Send & rerun"}</button></form></section>`;
+  el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Adjust this screen</h2><p>Describe what should be broader, stricter, added, or removed. The same market universe will be rescored.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden the criteria and remove unnecessary hard requirements')">Broaden criteria</button><button type="button" onclick="refineScreener('Limit the results to the strongest matches')">Show strongest matches</button><button type="button" onclick="refineScreener('Place more emphasis on relative strength')">Emphasize relative strength</button><button type="button" onclick="refineScreener('Require unusual trading volume')">Require unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="For example: remove value, emphasize cash flow, or make the pattern requirement less strict" aria-label="Adjust this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Updating…" : "Apply changes"}</button></form></section>`;
   const messagesEl=el.querySelector(".screen-chat-messages"); if(messagesEl) messagesEl.scrollTop=messagesEl.scrollHeight;
 }
 function refineScreener(rawMessage) {
@@ -817,18 +877,18 @@ function refineScreener(rawMessage) {
   if (_screenES) _screenES.close();
   s.history=(s.history||[]).concat({role:"user",content:message}).slice(-20); s.loading=true; s.updatedAt=Date.now();
   renderScreenRefine(s); persistScreeners();
-  document.getElementById("screenProgressText").textContent="Revising the recipe from your follow-up…";
-  document.getElementById("screenProgress").classList.add("show");
-  let url="/screen-stream?q="+encodeURIComponent(message)+"&existing="+encodeURIComponent(JSON.stringify(s.spec))+"&result_count="+encodeURIComponent((s.result?.results||[]).length);
+  showScreenProgress(2, "Revising the measurable criteria");
+  const universe=s.universe||s.spec?.universe_id||"combined";
+  let url="/screen-stream?q="+encodeURIComponent(message)+"&universe="+encodeURIComponent(universe)+"&existing="+encodeURIComponent(JSON.stringify(s.spec))+"&result_count="+encodeURIComponent((s.result?.results||[]).length);
   if(s.profile) url+="&profile="+encodeURIComponent(JSON.stringify(s.profile));
   const es=_screenES=new EventSource(url); let reply="";
-  const finish=()=>{s.loading=false;s.updatedAt=Date.now();document.getElementById("screenProgress").classList.remove("show");persistScreeners();renderScreenRefine(s);renderTickerPills();es.close();if(_screenES===es)_screenES=null;};
-  es.addEventListener("screen_progress",e=>{const d=JSON.parse(e.data);document.getElementById("screenProgressText").textContent=d.label||"Rerunning the screen…";});
+  const finish=(delay=650)=>{s.loading=false;s.updatedAt=Date.now();hideScreenProgress(delay);persistScreeners();renderScreenRefine(s);renderTickerPills();es.close();if(_screenES===es)_screenES=null;};
+  es.addEventListener("screen_progress",e=>applyScreenProgressEvent(JSON.parse(e.data),"Rescoring the selected universe"));
   es.addEventListener("screen_reply",e=>{reply=JSON.parse(e.data).reply||"";});
   es.addEventListener("screen_interpretation",e=>{s.spec=JSON.parse(e.data);s.title=s.spec.title||s.title;document.getElementById("screenInterpretation").innerHTML=renderScreenRecipe(s.spec);renderTickerPills();});
-  es.addEventListener("screen_result",e=>{s.result=JSON.parse(e.data);s.history.push({role:"assistant",content:reply||`I revised the recipe and found ${(s.result.results||[]).length} matches.`});s.history=s.history.slice(-20);paintScreenResults(s.result);finish();});
-  es.addEventListener("screen_error",e=>{let msg="I couldn’t rerun that revision.";try{msg=JSON.parse(e.data).error||msg;}catch(_){}s.history.push({role:"assistant",content:msg});finish();});
-  es.onerror=()=>{if(_screenES===es){s.history.push({role:"assistant",content:"The connection dropped before I could rerun the revised recipe. Please try that follow-up again."});finish();}};
+  es.addEventListener("screen_result",e=>{s.result=JSON.parse(e.data);const count=(s.result.results||[]).length;s.history.push({role:"assistant",content:reply||`The revised screen returned ${count} matches.`});s.history=s.history.slice(-20);showScreenProgress(97,`Rendering ${count} matches`);paintScreenResults(s.result);requestAnimationFrame(()=>showScreenProgress(100,`Screen updated · ${count} matches`));finish(900);});
+  es.addEventListener("screen_error",e=>{let msg="The revised screen could not be completed.";try{msg=JSON.parse(e.data).error||msg;}catch(_){}s.history.push({role:"assistant",content:msg});showScreenProgress(0,msg,true);finish(2200);});
+  es.onerror=()=>{if(_screenES===es){s.history.push({role:"assistant",content:"The connection ended before the revised screen completed. Please apply the change again."});showScreenProgress(0,"Connection lost before the revised screen completed.",true);finish(2200);}};
 }
 document.querySelectorAll("[data-screen-example]").forEach(button => button.addEventListener("click", () => { document.getElementById("screenQuery").value = button.dataset.screenExample; document.getElementById("screenQuery").focus(); }));
 
@@ -892,7 +952,7 @@ function renderTickerPills() {
     const label = item.kind === "analysis" ? item.key : (s.title || "Saved screen");
     const selected = item.kind === "analysis" ? (!activeScreen && item.key === active) : item.key === activeScreen;
     return `<div class="analysis-tab ${item.kind === "screen" ? "screener-tab" : ""} ${selected ? "active" : ""}" data-kind="${item.kind}" data-key="${esc(item.key)}">
-      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "⌁ " : ""}${esc(label)}</b><span>${esc(when)}</span></button>
+      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "Screen · " : ""}${esc(label)}</b><span>${esc(when)}</span></button>
       <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(label)}" title="Delete this saved item">×</button>
     </div>`;
   }).join("");
