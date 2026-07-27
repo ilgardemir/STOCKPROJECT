@@ -6,7 +6,7 @@ CLAUDE.md is named for Claude Code but its contents are tool-agnostic; everythin
 
 ## Quick reference
 
-Squall has two engines: a **single-ticker analyzer** (`scraperFinal.py`) and a **natural-language S&P 500 screener** (`screener.py`). Both are Python subprocesses that emit JSON on stdout and progress on stderr; `server.js` orchestrates them and layers OpenRouter LLM calls on top.
+Squall has two engines: a **single-ticker analyzer** (`scraperFinal.py`) and a **natural-language multi-index screener** (`screener.py`) covering the S&P 500, Nasdaq-100, and Dow 30. Both are Python subprocesses that emit JSON on stdout and progress on stderr; `server.js` orchestrates them and layers OpenRouter LLM calls on top.
 
 ```bash
 node server.js                 # run UI + API on PORT (default 3000)

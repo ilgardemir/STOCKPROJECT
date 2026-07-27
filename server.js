@@ -96,17 +96,22 @@ function buildAiMessages(prompt, profile) {
   ];
 }
 
-// ─── NATURAL-LANGUAGE S&P 500 SCREENER ───────────────────────────────────────
+// ─── NATURAL-LANGUAGE MULTI-INDEX SCREENER ───────────────────────────────────
 const SCREENER_CATALOG = {
   consolidation:["Consolidation", "Price-range width, ATR contraction, volume dry-up, and proximity to recent highs over the MySquall-selected window."],
   volatility_contraction:["Shrinking volatility", "Successively tighter 15/30/60-day ranges, falling ATR, and declining volume."],
+  vcp:["Volatility contraction pattern (VCP)", "A prior uptrend followed by successively tighter price ranges, contracting ATR, lighter volume, and price holding near a potential pivot."],
+  cup_and_handle:["Cup with handle", "A rounded 1-6 month base with comparable left and right highs, followed by a shorter and shallower handle in the upper part of the base."],
+  flat_base:["Flat base", "A shallow, orderly multi-week range near prior highs with subdued volume and an established trend."],
+  double_bottom:["Double bottom", "Two comparable lows separated by a meaningful rebound, with price returning toward the midpoint pivot."],
+  bull_flag:["Bull flag", "A strong prior advance followed by a short, controlled pullback on a tighter range and lighter volume."],
   uptrend:["Uptrend", "Price and moving-average alignment plus positive 60-day and one-year returns."],
   downtrend:["Downtrend", "Price below key moving averages with negative 60-day and one-year returns."],
   accumulation:["Accumulation", "Up-day volume share, on-balance-volume slope, and recent price strength."],
   distribution:["Distribution", "Down-day volume dominance, falling on-balance volume, and weakening price action."],
   breakout:["Breakout quality", "Price versus its prior 20-day high, accompanying volume, momentum, and trend alignment."],
   momentum:["Momentum", "Price strength over a MySquall-selected 20-, 60-, or 252-session window."],
-  relative_strength:["Relative strength", "Percentile rank of 60-day and one-year performance versus the rest of the S&P 500."],
+  relative_strength:["Relative strength", "Percentile rank of 60-day and one-year performance versus the rest of the selected universe."],
   risk_adjusted_momentum:["Efficient momentum", "Price strength rewarded only when it is large relative to realized volatility."],
   near_highs:["Near 52-week highs", "Distance from the highest traded price during the past year."],
   oversold:["Oversold pullback", "Negative 20-day return and distance below the 20-day moving average, without predicting a reversal."],
@@ -130,7 +135,7 @@ const SCREENER_CATALOG = {
   insider_ownership:["Insider ownership", "Reported percentage of shares held by insiders."],
   institutional_ownership:["Institutional ownership", "Reported percentage of shares held by institutions."],
   mega_cap:["Mega-cap scale", "Market capitalization, with the strongest score around $200B and above."],
-  smaller_cap:["Smaller S&P companies", "Lower market capitalization relative to other S&P 500 members; not true small-cap exposure."],
+  smaller_cap:["Smaller companies", "Lower market capitalization relative to the selected large-cap universe; not true small-cap exposure."],
   profitable_growth:["Profitable growth", "Revenue and earnings growth combined with positive margins so growth is not rewarded by itself."],
   garp:["Growth at a reasonable price", "Growth, valuation, and quality blended into a deterministic GARP score."],
   quality_value:["Quality value", "Cheap valuation rewarded only when profitability, cash generation, and leverage also hold up."],
@@ -201,11 +206,36 @@ function detectTheme(q) {
   return null;
 }
 
-function readSp500Universe() {
+const SCREEN_UNIVERSES = new Set(["combined", "sp500", "nasdaq100", "dow30"]);
+
+function readMarketUniverse(requested = "combined") {
   const src = fs.readFileSync(path.join(__dirname, "sp500.js"), "utf8");
   const tickers = src.match(/window\.SP500\s*=\s*(\[[\s\S]*?\]);/)?.[1];
   const names = src.match(/window\.SP500_NAMES\s*=\s*(\{[\s\S]*?\});/)?.[1];
-  return { tickers: tickers ? JSON.parse(tickers) : [], names: names ? JSON.parse(names) : {} };
+  const extraSrc = fs.readFileSync(path.join(__dirname, "market-universes.js"), "utf8");
+  const extraJson = extraSrc.match(/window\.MARKET_UNIVERSES\s*=\s*(\{[\s\S]*\});/)?.[1];
+  const sp500 = tickers ? JSON.parse(tickers) : [];
+  const spNames = names ? JSON.parse(names) : {};
+  const extra = extraJson ? JSON.parse(extraJson) : { nasdaq100:[], dow30:[], names:{} };
+  const universeId = SCREEN_UNIVERSES.has(requested) ? requested : "combined";
+  const lists = { sp500, nasdaq100:extra.nasdaq100 || [], dow30:extra.dow30 || [] };
+  const selected = universeId === "combined" ? ["sp500", "nasdaq100", "dow30"] : [universeId];
+  const selectedTickers = [...new Set(selected.flatMap(id => lists[id] || []))];
+  const memberships = {};
+  for (const ticker of selectedTickers) {
+    memberships[ticker] = [];
+    if (lists.sp500.includes(ticker)) memberships[ticker].push("S&P 500");
+    if (lists.nasdaq100.includes(ticker)) memberships[ticker].push("Nasdaq-100");
+    if (lists.dow30.includes(ticker)) memberships[ticker].push("Dow 30");
+  }
+  const labels = {
+    combined:"S&P 500 + Nasdaq-100 + Dow 30", sp500:"S&P 500",
+    nasdaq100:"Nasdaq-100", dow30:"Dow 30"
+  };
+  return {
+    id:universeId, label:labels[universeId], tickers:selectedTickers,
+    names:{ ...(extra.names || {}), ...spNames }, memberships
+  };
 }
 
 function applyProfileCalibration(spec, rawProfile, query) {
@@ -267,8 +297,13 @@ function fallbackScreenerSpec(query, rawProfile) {
   const profile = sanitizeProfile(rawProfile);
   const concepts = [];
   const add = (id, weight = 1, required = false) => { if (!concepts.some(c => c.id === id)) concepts.push({ id, weight, required, source:"request" }); };
-  if (/consolidat|tight range|base|coiling|sideways/.test(q)) add("consolidation", 1.35, true);
-  if (/volatility contraction|\bvcp\b|volatility.*shrink|getting tighter|contracting/.test(q)) add("volatility_contraction", 1.4, true);
+  if (/consolidat|tight range|coiling|sideways|price base/.test(q)) add("consolidation", 1.35, true);
+  if (/volatility.*shrink|shrinking volatility|getting tighter|contracting volatility/.test(q)) add("volatility_contraction", 1.25);
+  if (/\bvcp\b|volatility contraction pattern|minervini pattern/.test(q)) add("vcp", 1.5, true);
+  if (/cup (?:with|and) handle|cup.?and.?handle|\bcwh\b/.test(q)) add("cup_and_handle", 1.5, true);
+  if (/flat base|tight flat base/.test(q)) add("flat_base", 1.4, true);
+  if (/double bottom|w.?base|w.?pattern/.test(q)) add("double_bottom", 1.4, true);
+  if (/bull flag|bullish flag|flag pattern/.test(q)) add("bull_flag", 1.35, true);
   if (/uptrend|trending up|higher high|higher low|strong trend/.test(q)) add("uptrend", 1.15);
   if (/downtrend|trending down|lower high|lower low|bearish/.test(q)) add("downtrend", 1.15);
   if (/accumulat|institution.*buy|smart money|buying pressure/.test(q)) add("accumulation", 1.2);
@@ -283,7 +318,7 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (/recover|turnaround|bouncing back/.test(q) && !/turnaround setup|early turnaround/.test(q)) add("recovery", 1.05);
   if (/pullback.*(?:moving average|support)|near.*(?:20|50).day|buy.*dip.*uptrend/.test(q)) add("pullback_to_ma", 1.15);
   if (/golden cross|50.*above.*200/.test(q)) add("golden_cross", 1.1);
-  if (/unusual volume|volume surge|heavy volume|volume spike/.test(q)) add("volume_surge", 1.15);
+  if (/unusual(?:\s+\w+){0,2}\s+volume|volume surge|heavy volume|high trading volume|volume spike/.test(q)) add("volume_surge", 1.15);
   if (/volume dry|quiet volume|low volume base/.test(q)) add("volume_dryup", 1.1);
   if (/cheap|undervalued|value|low p.?e/.test(q)) add("value", 1.0);
   if (/growth|growing|revenue growth|earnings growth/.test(q) && !/profitable growth|speculative growth|cheap growth|growth at a reasonable price|revenue growth|sales growth|earnings growth|profit growth/.test(q)) add("growth", 1.0);
@@ -361,10 +396,10 @@ function fallbackScreenerSpec(query, rawProfile) {
   if (theme && !concepts.length) add("quality", 0.6);
 
   const spec = {
-    query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "S&P 500 screen",
+    query: String(query).trim().slice(0, 500), title: String(query).trim().slice(0, 54) || "Stock screen",
     summary: theme
-      ? `Find S&P 500 companies in the ${theme.label} theme${concepts.length ? ", ranked by " + concepts.map(c => c.id.replaceAll("_", " ")).join(", ") : ""}.`
-      : `Rank S&P 500 companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
+      ? `Find companies in the ${theme.label} theme${concepts.length ? ", ranked by " + concepts.map(c => c.id.replaceAll("_", " ")).join(", ") : ""}.`
+      : `Rank companies by ${concepts.map(c => c.id.replaceAll("_", " ")).join(", ")}.`,
     concepts, filters, settings: { consolidation_window: consolidationWindow, momentum_window:[10,20,60,126,252][horizon - 1], match_threshold: threshold },
     max_results: 20, profile_adjustments: profileAdjustments, interpretation_source: "rules"
   };
@@ -462,7 +497,7 @@ async function interpretScreenerQuery(query, profile) {
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
       body: JSON.stringify({ model: UTILITY_MODEL, temperature: .05, max_tokens: 900,
         messages: [
-          { role:"system", content:`Translate a layperson's S&P 500 stock-screening request into strict JSON. Never select stocks and never invent a metric. Choose up to 10 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Convert fuzzy language ("sleep-well", "cash cow", "moonshot", "healthy pullback", "cheap growth", etc.) into the closest measurable concept blend, using weights for emphasis. Mark required only when the user clearly says must/only.
+          { role:"system", content:`Translate a layperson's stock-screening request into strict JSON. Never select stocks and never invent a metric. Choose up to 10 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Convert fuzzy language and named chart formations (for example VCP, cup with handle, flat base, double bottom, and bull flag) into the closest measurable concept blend, using weights for emphasis. Mark required only when the user clearly says must/only.
 
 Output keys: title, summary, concepts (id, weight 0.25-3, required boolean), filters, settings, max_results, and optionally theme. Allowed filters: sectors (array using only ${JSON.stringify(SCREENER_SECTORS)}), exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, short_interest_min. Express percentages as fractions (15% = 0.15) and market caps/dollar volume as raw dollars. Include a filter ONLY when the user explicitly implies that hard constraint. Never emit 0, null, or placeholder defaults.
 
@@ -495,6 +530,7 @@ function fallbackRefineScreener(message, existing, profile, resultCount) {
   const broaden = /broaden|more result|too strict|loosen|less strict|nothing|no match|zero/.test(text);
   const narrow = /narrow|fewer result|too many|stricter|more selective|best only/.test(text);
   const remove = /remove|without|drop|ignore|less emphasis/.test(text);
+  const requireMentioned = /\b(require|required|must|only)\b/.test(text);
   let reply;
   const removedFilters = [];
   if (remove && /price/.test(text)) { delete next.filters.price_min; delete next.filters.price_max; removedFilters.push("price limits"); }
@@ -532,11 +568,17 @@ function fallbackRefineScreener(message, existing, profile, resultCount) {
   } else if (mentioned.length) {
     for (const concept of mentioned) {
       const current = next.concepts.find(c => c.id === concept.id);
-      if (current) current.weight = Math.min(3, current.weight + .35);
-      else next.concepts.push({ ...concept, required:false });
+      if (current) {
+        current.weight = Math.min(3, current.weight + .35);
+        if (requireMentioned) current.required = true;
+      } else {
+        next.concepts.push({ ...concept, required:requireMentioned });
+      }
     }
     next.concepts = next.concepts.slice(0, 10);
-    reply = `I added more emphasis to ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and reran the same S&P 500 universe.`;
+    reply = requireMentioned
+      ? `I made ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} a required condition and reran the same market universe.`
+      : `I increased the emphasis on ${mentioned.map(c => SCREENER_CATALOG[c.id][0]).join(", ")} and reran the same market universe.`;
   } else {
     next.settings.match_threshold = Math.max(20, Number(next.settings.match_threshold || 49) - (Number(resultCount) === 0 ? 6 : 0));
     reply = Number(resultCount) === 0
@@ -557,7 +599,7 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
       body:JSON.stringify({ model:UTILITY_MODEL, temperature:.08, max_tokens:1100, messages:[
-        { role:"system", content:`Revise an existing S&P 500 quantitative screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 10 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one short plain-English explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords, exclude_keywords, min_score}. Allowed filters are sectors, exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, and short_interest_min. Keep the existing theme unless the user changes the subject or asks to drop it; when replacing it, use specific lowercase terms and a 15-80 minimum relevance score. Include a filter key only when a real constraint applies — never emit 0/null placeholders. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required. Preserve explicit user concepts; MySquall is context only because the server reapplies its secondary calibration.` },
+        { role:"system", content:`Revise an existing quantitative stock-screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 10 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one concise explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords, exclude_keywords, min_score}. Allowed filters are sectors, exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, and short_interest_min. Keep the existing theme unless the user changes the subject or asks to drop it; when replacing it, use specific lowercase terms and a 15-80 minimum relevance score. Include a filter key only when a real constraint applies — never emit 0/null placeholders. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required. Preserve explicit user concepts; MySquall is context only because the server reapplies its secondary calibration.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
     });
@@ -638,20 +680,21 @@ const appServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // Natural-language S&P 500 screener. The model interprets intent; Python does
+  // Natural-language multi-index screener. The model interprets intent; Python does
   // every numerical comparison so results remain reproducible and explainable.
   if (req.method === "GET" && req.url.startsWith("/screen-stream")) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
+    const universeId = SCREEN_UNIVERSES.has(url.searchParams.get("universe")) ? url.searchParams.get("universe") : "combined";
     const profile = sanitizeProfile(url.searchParams.get("profile"));
     let existing = null;
     try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
     const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
     res.writeHead(200, { "Content-Type":"text/event-stream", "Cache-Control":"no-cache", "Connection":"keep-alive", "X-Accel-Buffering":"no" });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    if (query.length < 3) { send("screen_error", { error:"Describe the kind of S&P 500 stock you want in a little more detail." }); return res.end(); }
+    if (query.length < 3) { send("screen_error", { error:"Describe the companies you want to find in a little more detail." }); return res.end(); }
 
-    send("screen_progress", { stage:0, total:6, label:existing ? "Revising your measurable recipe" : "Turning your words into measurable rules" });
+    send("screen_progress", { percent:4, label:existing ? "Revising the measurable criteria" : "Translating the request into measurable criteria" });
     let spec;
     if (existing) {
       let refined;
@@ -663,11 +706,13 @@ const appServer = http.createServer(async (req, res) => {
       try { spec = await interpretScreenerQuery(query, profile); }
       catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
     }
-    send("screen_interpretation", spec);
-
     let universe;
-    try { universe = readSp500Universe(); }
-    catch (e) { send("screen_error", { error:"Could not read the S&P 500 universe: " + e.message }); return res.end(); }
+    try { universe = readMarketUniverse(universeId); }
+    catch (e) { send("screen_error", { error:"Could not load the selected market universe: " + e.message }); return res.end(); }
+    spec.universe_id = universe.id;
+    spec.universe_label = universe.label;
+    send("screen_progress", { percent:8, label:`Preparing ${universe.label}` });
+    send("screen_interpretation", spec);
     const py = spawn(PYTHON, [SCREENER_PATH], { env:process.env });
     let stdout = "", stderr = "", buf = "";
     py.stdout.on("data", chunk => { stdout += chunk.toString(); });
@@ -676,8 +721,10 @@ const appServer = http.createServer(async (req, res) => {
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        const m = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
-        if (m) send("screen_progress", { stage:Math.min(6, Number(m[1]) + 1), total:6, label:m[3] });
+        const progress = line.match(/^PROGRESS\|(\d+)\|(.*)$/);
+        const legacy = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
+        if (progress) send("screen_progress", { percent:Number(progress[1]), label:progress[2] });
+        else if (legacy) send("screen_progress", { stage:Math.min(6, Number(legacy[1]) + 1), total:6, label:legacy[3] });
       }
     });
     py.on("error", e => { send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
@@ -686,9 +733,13 @@ const appServer = http.createServer(async (req, res) => {
       try { result = JSON.parse(stdout); }
       catch { send("screen_error", { error:"The screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
       if (code !== 0 || result.error) { send("screen_error", { error:result.error || "The screening engine failed.", detail:stderr.slice(-500) }); return res.end(); }
+      send("screen_progress", { percent:96, label:`Preparing ${result.results?.length || 0} matches for display` });
       send("screen_result", result); res.end();
     });
-    py.stdin.end(JSON.stringify({ tickers:universe.tickers, names:universe.names, spec }));
+    py.stdin.end(JSON.stringify({
+      tickers:universe.tickers, names:universe.names, memberships:universe.memberships,
+      universe_id:universe.id, universe_label:universe.label, spec
+    }));
     return;
   }
 
@@ -1023,4 +1074,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec, fallbackRefineScreener };
+module.exports = {
+  applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
+  fallbackRefineScreener, readMarketUniverse
+};

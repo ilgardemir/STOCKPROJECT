@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""S&P 500 natural-language screener engine.
+"""Multi-index natural-language stock screener engine.
 
-stdin: {"tickers": [...], "names": {...}, "spec": {...}}
-stdout: one JSON payload. Progress is written to stderr as STAGE lines.
+stdin: {"tickers": [...], "names": {...}, "memberships": {...}, "spec": {...}}
+stdout: one JSON payload. Progress is written to stderr as PROGRESS lines.
 """
 import json
 import math
@@ -20,11 +20,15 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 4  # expanded fuzzy concepts, liquidity, short interest, and theme fields
+CACHE_VERSION = 5  # multi-index rows and deterministic chart-pattern measurements
 
 
 def stage(n, label):
     print(f"STAGE|{n}|{STAGES}|{label}", file=sys.stderr, flush=True)
+
+
+def progress(percent, label):
+    print(f"PROGRESS|{int(clamp(percent))}|{label}", file=sys.stderr, flush=True)
 
 
 def finite(v, default=None):
@@ -46,9 +50,118 @@ def scale(v, bad, good):
     return clamp((v - bad) / (good - bad) * 100.0)
 
 
+def band_score(v, ideal_low, ideal_high, outer_low, outer_high):
+    """Score a value highest inside an accepted band and taper to zero outside it."""
+    v = finite(v)
+    if v is None or v <= outer_low or v >= outer_high:
+        return 0.0
+    if ideal_low <= v <= ideal_high:
+        return 100.0
+    if v < ideal_low:
+        return scale(v, outer_low, ideal_low)
+    return scale(v, outer_high, ideal_high)
+
+
+def cup_handle_fit(close, volume, trend_score):
+    """Return a deterministic cup-with-handle shape score and its best-fit measurements.
+
+    This is a candidate detector, not a declaration that a subjective chart pattern
+    exists. It looks for a 1-6 month rounded base, comparable left/right lips, and a
+    shorter, shallower handle in the upper portion of the cup.
+    """
+    best = {"score": 0.0, "cup_depth": None, "handle_depth": None, "pivot": None}
+    last = finite(close.iloc[-1])
+    if last is None:
+        return best
+    for cup_len in (60, 90, 120, 150):
+        for handle_len in (5, 10, 15, 20):
+            if len(close) < cup_len + handle_len + 25:
+                continue
+            cup = close.iloc[-(cup_len + handle_len):-handle_len]
+            handle = close.iloc[-handle_len:]
+            cup_vol = volume.iloc[-(cup_len + handle_len):-handle_len]
+            handle_vol = volume.iloc[-handle_len:]
+            edge = max(4, min(10, cup_len // 10))
+            left_lip = finite(cup.iloc[:edge].mean())
+            right_lip = finite(cup.iloc[-edge:].mean())
+            bottom = finite(cup.min())
+            if not left_lip or not right_lip or not bottom:
+                continue
+            lip = (left_lip + right_lip) / 2
+            depth = finite((lip - bottom) / lip)
+            if depth is None or depth <= 0:
+                continue
+            bottom_pos = int(np.argmin(cup.values)) / max(1, len(cup) - 1)
+            symmetry = abs(left_lip - right_lip) / lip
+            middle = finite(cup.iloc[cup_len // 3:cup_len * 2 // 3].mean())
+            shoulders = finite(pd.concat([cup.iloc[:cup_len // 5], cup.iloc[-cup_len // 5:]]).mean())
+            rounded = scale(finite((shoulders - middle) / lip) if shoulders and middle else None, 0, max(.04, depth * .55))
+            handle_low = finite(handle.min())
+            handle_depth = finite((right_lip - handle_low) / right_lip) if handle_low else None
+            handle_ratio = finite(handle_depth / depth) if depth and handle_depth is not None else None
+            upper_half = scale(finite((handle_low - bottom) / max(lip - bottom, .0001)) if handle_low else None, .45, .82)
+            volume_ratio = finite(handle_vol.mean() / cup_vol.mean()) if finite(cup_vol.mean(), 0) else None
+            pivot = max(left_lip, right_lip)
+            pivot_distance = finite(last / pivot - 1) if pivot else None
+            score = np.mean([
+                band_score(depth, .12, .33, .06, .48),
+                scale(symmetry, .16, .015),
+                scale(abs(bottom_pos - .5), .42, .05),
+                rounded,
+                band_score(handle_ratio, .05, .33, 0, .65),
+                upper_half,
+                scale(volume_ratio, 1.2, .65),
+                scale(abs(pivot_distance) if pivot_distance is not None else None, .18, 0),
+                trend_score,
+            ])
+            if score > best["score"]:
+                best = {
+                    "score": round(clamp(score), 1), "cup_depth": depth,
+                    "handle_depth": handle_depth, "pivot": pivot,
+                    "cup_days": cup_len, "handle_days": handle_len
+                }
+    return best
+
+
+def double_bottom_fit(close, trend_score):
+    """Score a W-shaped base with two similar lows and a defined midpoint pivot."""
+    values = close.tail(min(140, len(close))).to_numpy(dtype=float)
+    if len(values) < 70:
+        return {"score": 0.0, "low_similarity": None, "pivot": None}
+    candidates = []
+    for i in range(5, len(values) - 5):
+        if values[i] == np.nanmin(values[i - 5:i + 6]):
+            candidates.append(i)
+    best = {"score": 0.0, "low_similarity": None, "pivot": None}
+    for a in candidates:
+        for b in candidates:
+            separation = b - a
+            if separation < 15 or separation > 75:
+                continue
+            first, second = values[a], values[b]
+            midpoint = float(np.nanmax(values[a:b + 1]))
+            if min(first, second) <= 0 or midpoint <= 0:
+                continue
+            similarity = abs(first - second) / max(first, second)
+            rebound = (midpoint - min(first, second)) / midpoint
+            latest = values[-1]
+            pivot_distance = latest / midpoint - 1
+            score = np.mean([
+                scale(similarity, .10, .01),
+                band_score(rebound, .10, .32, .05, .50),
+                scale(abs(pivot_distance), .20, 0),
+                scale(b / len(values), .45, .82),
+                trend_score,
+            ])
+            if score > best["score"]:
+                best = {"score": round(clamp(score), 1), "low_similarity": similarity, "pivot": midpoint}
+    return best
+
+
 def get_symbol_modules(tickers):
     out = {t: {} for t in tickers}
-    for start in range(0, len(tickers), 75):
+    starts = list(range(0, len(tickers), 75))
+    for completed, start in enumerate(starts, 1):
         batch = tickers[start:start + 75]
         try:
             tq = Ticker(batch, asynchronous=True, max_workers=10, timeout=20)
@@ -67,6 +180,7 @@ def get_symbol_modules(tickers):
                         out[symbol][kind] = values
         except Exception as exc:
             print(f"WARN|modules|{start}|{type(exc).__name__}", file=sys.stderr, flush=True)
+        progress(58 + 26 * completed / max(1, len(starts)), f"Loading company data · batch {completed} of {len(starts)}")
     return out
 
 
@@ -97,8 +211,10 @@ def get_history(tickers):
             elif len(batch) > 1:
                 for offset, symbol in enumerate(batch):
                     load_batch([symbol], f"{label}.{offset}", retry=False)
-    for start in range(0, len(tickers), 50):
+    starts = list(range(0, len(tickers), 50))
+    for completed, start in enumerate(starts, 1):
         load_batch(tickers[start:start + 50], start)
+        progress(12 + 44 * completed / max(1, len(starts)), f"Loading price history · batch {completed} of {len(starts)}")
     return frames
 
 
@@ -168,6 +284,33 @@ def history_features(df):
         100 if ma20 and ma50 and ma200 and last > ma20 > ma50 > ma200 else 45 if ma50 and ma200 and last > ma50 > ma200 else 10,
         scale(ret(60), -0.12, 0.28), scale(ret(252), -0.20, 0.50)
     ])
+    contraction_count = sum([
+        bool(width30 and width60 and width30 < width60 * .86),
+        bool(width15 and width30 and width15 < width30 * .80),
+        bool(atr14 and atr60 and atr14 < atr60 * .85),
+    ])
+    vcp_pattern = np.mean([
+        scale(contraction_count, 0, 3), scale(finite(width15 / width60) if width60 else None, .75, .25),
+        scale(dryup, 1.15, .55), scale(finite(atr14 / atr60) if atr60 else None, 1.10, .60),
+        scale(finite(last / high252 - 1) if high252 else None, -.28, -.02), trend
+    ])
+    cup_fit = cup_handle_fit(c, vol, trend)
+    double_fit = double_bottom_fit(c, trend)
+    flat_base = np.mean([
+        band_score(width60, .05, .16, .025, .25), scale(width30, .22, .06),
+        scale(dryup, 1.15, .62), scale(finite(last / high252 - 1) if high252 else None, -.20, -.015),
+        trend
+    ])
+    prior_flag_price = finite(c.iloc[-31]) if len(c) >= 31 else None
+    flag_peak = finite(c.iloc[-11:-4].max()) if len(c) >= 31 else None
+    flag_impulse = finite(flag_peak / prior_flag_price - 1) if prior_flag_price and flag_peak else None
+    flag_pullback = finite(last / flag_peak - 1) if flag_peak else None
+    flag_range = rng(10)
+    flag_volume = finite(vol.tail(10).mean() / vol.iloc[-30:-10].mean()) if finite(vol.iloc[-30:-10].mean(), 0) else None
+    bull_flag = np.mean([
+        band_score(flag_impulse, .10, .40, .04, .70), band_score(flag_pullback, -.12, -.01, -.22, .04),
+        scale(flag_range, .18, .04), scale(flag_volume, 1.25, .62), trend
+    ])
     accumulation = np.mean([scale(up_vol, 0.38, 0.68), scale(obv_norm, -1.5, 1.5), scale(ret(20), -0.08, 0.12)])
     breakout = np.mean([
         scale(finite(last / prior20 - 1) if prior20 else None, -0.06, 0.04),
@@ -194,6 +337,11 @@ def history_features(df):
         "distance_52w_low": finite(last / low252 - 1) if low252 else None,
         "ma20": ma20, "ma50": ma50, "ma200": ma200, "distance_ma20": distance_ma20,
         "distance_ma50": distance_ma50, "above_ma50": above_ma50, "obv_norm": obv_norm,
+        "vcp_contractions": contraction_count, "cup_depth": cup_fit.get("cup_depth"),
+        "handle_depth": cup_fit.get("handle_depth"), "cup_pivot": cup_fit.get("pivot"),
+        "cup_days": cup_fit.get("cup_days"), "handle_days": cup_fit.get("handle_days"),
+        "double_bottom_similarity": double_fit.get("low_similarity"), "double_bottom_pivot": double_fit.get("pivot"),
+        "bull_flag_impulse": flag_impulse, "bull_flag_pullback": flag_pullback,
         "scores": {
             "consolidation_short": round(clamp(contraction_short), 1),
             "consolidation_long": round(clamp(contraction_long), 1),
@@ -209,7 +357,10 @@ def history_features(df):
             "recovery": round(clamp(recovery), 1), "pullback_to_ma": round(clamp(pullback), 1),
             "golden_cross": round(clamp(golden), 1), "volume_surge": round(scale(volume_ratio, .6, 2.2), 1),
             "volume_dryup": round(np.mean([scale(dryup, 1.2, .55), contraction_short]), 1),
-            "trend_stability": round(clamp(stable), 1), "risk_adjusted_momentum": round(clamp(efficient), 1)
+            "trend_stability": round(clamp(stable), 1), "risk_adjusted_momentum": round(clamp(efficient), 1),
+            "vcp": round(clamp(vcp_pattern), 1), "cup_and_handle": cup_fit["score"],
+            "flat_base": round(clamp(flat_base), 1), "double_bottom": double_fit["score"],
+            "bull_flag": round(clamp(bull_flag), 1)
         }
     }
 
@@ -223,14 +374,17 @@ def build_universe(tickers, names):
             cached = json.loads(CACHE_PATH.read_text())
             cached_symbols = {r.get("ticker") for r in cached.get("rows", [])}
             if cached.get("version") == CACHE_VERSION and set(tickers).issubset(cached_symbols):
-                stage(2, "Using fresh S&P 500 market cache")
+                stage(2, "Using fresh market-data cache")
+                progress(84, "Using current cached market data")
                 return [r for r in cached["rows"] if r.get("ticker") in set(tickers)], True
     except Exception:
         pass
 
-    stage(1, f"Loading one year of prices for {len(tickers)} S&P stocks")
+    stage(1, f"Loading one year of prices for {len(tickers)} companies")
+    progress(12, f"Loading one year of prices for {len(tickers)} companies")
     histories = get_history(tickers)
     stage(2, "Loading sectors, valuation, and company statistics")
+    progress(58, "Loading sectors, valuation, and company statistics")
     modules = get_symbol_modules(tickers)
     rows = []
     for ticker in tickers:
@@ -334,6 +488,8 @@ def build_universe(tickers, names):
 
 CONCEPT_LABELS = {
     "consolidation": "Consolidation", "volatility_contraction": "Volatility contraction", "uptrend": "Uptrend",
+    "vcp":"Volatility contraction pattern (VCP)", "cup_and_handle":"Cup with handle",
+    "flat_base":"Flat base", "double_bottom":"Double bottom", "bull_flag":"Bull flag",
     "downtrend":"Downtrend", "accumulation": "Institutional accumulation", "distribution":"Distribution",
     "breakout": "Breakout quality", "momentum": "Momentum", "relative_strength":"Relative strength",
     "risk_adjusted_momentum":"Efficient momentum", "near_highs": "Near 52-week highs", "oversold": "Oversold pullback",
@@ -343,8 +499,8 @@ CONCEPT_LABELS = {
     "profitability":"Profitability", "quality": "Business quality", "balance_sheet":"Balance-sheet strength",
     "cash_generation":"Cash generation", "high_margin":"High margins", "income": "Income",
     "analyst_upside":"Analyst-implied upside", "insider_ownership":"Insider ownership",
-    "institutional_ownership":"Institutional ownership", "mega_cap":"Mega-cap scale", "smaller_cap":"Smaller S&P companies"
-    , "profitable_growth":"Profitable growth", "garp":"Growth at a reasonable price",
+    "institutional_ownership":"Institutional ownership", "mega_cap":"Mega-cap scale", "smaller_cap":"Smaller companies",
+    "profitable_growth":"Profitable growth", "garp":"Growth at a reasonable price",
     "quality_value":"Quality value", "steady_compounder":"Steady compounder", "defensive_quality":"Defensive quality",
     "speculative_growth":"Speculative growth", "revenue_growth":"Revenue growth", "earnings_growth":"Earnings growth",
     "high_roe":"High return on equity", "fcf_yield":"Free-cash-flow yield", "cash_rich":"Cash-rich balance sheet",
@@ -354,6 +510,40 @@ CONCEPT_LABELS = {
     "bullish_pullback":"Healthy pullback", "mean_reversion":"Mean-reversion setup", "turnaround":"Turnaround",
     "technical_strength":"Technical strength", "short_squeeze_setup":"Short-squeeze setup"
 }
+PATTERN_CONCEPTS = {"vcp", "cup_and_handle", "flat_base", "double_bottom", "bull_flag"}
+
+
+def qualifies_pattern(row, pattern):
+    """Apply structural minimums before a subjective chart pattern can match."""
+    score = finite(row.get("scores", {}).get(pattern), 0)
+    uptrend = finite(row.get("scores", {}).get("uptrend"), 0)
+    if pattern == "vcp":
+        return score >= 60 and uptrend >= 50 and finite(row.get("vcp_contractions"), 0) >= 2
+    if pattern == "cup_and_handle":
+        cup = finite(row.get("cup_depth"))
+        handle = finite(row.get("handle_depth"))
+        pivot = finite(row.get("cup_pivot"))
+        price = finite(row.get("price"))
+        pivot_distance = finite(price / pivot - 1) if price and pivot else None
+        return bool(
+            score >= 65 and uptrend >= 50 and cup is not None and .12 <= cup <= .35 and
+            handle is not None and .01 <= handle <= min(.15, cup / 3) and
+            pivot_distance is not None and -.10 <= pivot_distance <= .06
+        )
+    if pattern == "flat_base":
+        width = finite(row.get("range_60d"))
+        near_high = finite(row.get("distance_52w_high"))
+        return bool(score >= 65 and uptrend >= 50 and width is not None and .04 <= width <= .20 and
+                    near_high is not None and near_high >= -.20)
+    if pattern == "double_bottom":
+        similarity = finite(row.get("double_bottom_similarity"))
+        return bool(score >= 65 and similarity is not None and similarity <= .10)
+    if pattern == "bull_flag":
+        impulse = finite(row.get("bull_flag_impulse"))
+        pullback = finite(row.get("bull_flag_pullback"))
+        return bool(score >= 65 and uptrend >= 50 and impulse is not None and .08 <= impulse <= .55 and
+                    pullback is not None and -.20 <= pullback <= .02)
+    return False
 
 
 def concept_score(row, concept, settings):
@@ -416,9 +606,14 @@ def explain(row, concepts, settings):
         range_value = row.get("range_60d") if window == 60 else row.get("range_30d") if window == 30 else row.get("range_15d")
         if cid == "consolidation": reasons.append(f"Consolidation: {fmt_pct(range_value)} {window}-day range and ATR {fmt_num(row.get('atr_contraction'), '×', 2)} its 60-day norm")
         elif cid == "volatility_contraction": reasons.append(f"Volatility contraction: 15/60-day range ratio {fmt_num(finite(row.get('range_15d'))/max(finite(row.get('range_60d'), .0001), .0001) if row.get('range_15d') is not None else None, '', 2)} and volume {fmt_num(row.get('volume_dryup'), '×', 2)} normal")
+        elif cid == "vcp": reasons.append(f"VCP candidate: {int(row.get('vcp_contractions') or 0)} measurable contractions, with recent volume at {fmt_num(row.get('volume_dryup'), '×', 2)} its 60-day average")
+        elif cid == "cup_and_handle": reasons.append(f"Cup-with-handle candidate: {fmt_pct(row.get('cup_depth'))} cup depth, {fmt_pct(row.get('handle_depth'))} handle depth, and an estimated ${fmt_num(row.get('cup_pivot'), '', 2)} pivot")
+        elif cid == "flat_base": reasons.append(f"Flat-base candidate: {fmt_pct(row.get('range_60d'))} 60-day range, {fmt_pct(row.get('distance_52w_high'))} from its yearly high")
+        elif cid == "double_bottom": reasons.append(f"Double-bottom candidate: lows differ by {fmt_pct(row.get('double_bottom_similarity'))}; estimated midpoint pivot ${fmt_num(row.get('double_bottom_pivot'), '', 2)}")
+        elif cid == "bull_flag": reasons.append(f"Bull-flag candidate: prior advance {fmt_pct(row.get('bull_flag_impulse'))}, followed by a {fmt_pct(row.get('bull_flag_pullback'))} pullback")
         elif cid == "near_highs": reasons.append(f"Near highs: {fmt_pct(row['distance_52w_high'])} from its 52-week high")
         elif cid in ("uptrend", "downtrend", "momentum", "risk_adjusted_momentum", "technical_strength"): reasons.append(f"Trend: 20-day {fmt_pct(row['return_20d'])}, 60-day {fmt_pct(row['return_60d'])}")
-        elif cid == "relative_strength": reasons.append(f"Relative strength: {fmt_num(row.get('scores',{}).get(cid), '/100', 0)} versus the S&P 500")
+        elif cid == "relative_strength": reasons.append(f"Relative strength: {fmt_num(row.get('scores',{}).get(cid), '/100', 0)} versus {row.get('universe_label') or 'the selected universe'}")
         elif cid == "accumulation": reasons.append(f"Accumulation: {row['up_volume_ratio']:.0%} of recent volume occurred on up days")
         elif cid == "distribution": reasons.append(f"Distribution: {(1-row['up_volume_ratio']):.0%} of recent volume occurred on down days")
         elif cid == "breakout": reasons.append(f"Breakout quality: volume is {row['volume_ratio']:.2f}× its 20-day average")
@@ -516,10 +711,20 @@ def screen(rows, spec):
         score = 0.55 * theme_val + 0.45 * concept_blend if theme_val is not None else concept_blend
 
         must = [s for c, s in scores if c.get("required")]
-        if score < threshold or (must and min(must) < max(30, threshold - 12)):
+        requested_ids = {c.get("id") for c, _ in scores}
+        requested_patterns = requested_ids & PATTERN_CONCEPTS
+        required_patterns = {c.get("id") for c, _ in scores if c.get("required")} & PATTERN_CONCEPTS
+        if (score < threshold or
+                (must and min(must) < max(30, threshold - 12)) or
+                (requested_patterns and not any(qualifies_pattern(row, p) for p in requested_patterns)) or
+                (required_patterns and not all(qualifies_pattern(row, p) for p in required_patterns))):
             continue
 
-        result = {k: row.get(k) for k in ("ticker", "name", "sector", "industry", "price", "market_cap", "pe", "return_20d", "return_60d", "distance_52w_high", "volume_ratio", "volatility", "avg_dollar_volume")}
+        result = {k: row.get(k) for k in (
+            "ticker", "name", "sector", "industry", "indexes", "price", "market_cap", "pe",
+            "return_20d", "return_60d", "distance_52w_high", "volume_ratio", "volatility",
+            "avg_dollar_volume"
+        )}
         reasons = explain(row, concepts, settings)
         if theme_terms:
             reasons = [f"{theme.get('label', 'Theme')} evidence: {', '.join(theme_terms)} appears in its company identity or business description"] + reasons
@@ -536,19 +741,30 @@ def main():
     payload = json.load(sys.stdin)
     tickers = [str(t).upper() for t in payload.get("tickers", []) if t]
     names = payload.get("names") or {}
+    memberships = payload.get("memberships") or {}
+    universe_label = str(payload.get("universe_label") or "Selected market universe")
+    universe_id = str(payload.get("universe_id") or "combined")
     spec = payload.get("spec") or {}
-    stage(0, "Reading the S&P 500 universe")
+    stage(0, f"Preparing {universe_label}")
+    progress(8, f"Preparing {universe_label}")
     rows, cached = build_universe(tickers, names)
+    for row in rows:
+        row["indexes"] = memberships.get(row.get("ticker"), [])
+        row["universe_label"] = universe_label
     stage(3, "Scoring fuzzy concepts with deterministic rules")
+    progress(88, "Scoring each company against the measurable criteria")
     results = screen(rows, spec)
     stage(4, "Explaining why each company matched")
+    progress(94, "Preparing evidence for the strongest matches")
     output = {
-        "universe": "S&P 500", "universe_requested": len(tickers), "universe_scored": len(rows),
+        "universe": universe_label, "universe_id": universe_id,
+        "universe_requested": len(tickers), "universe_scored": len(rows),
         "cache_hit": cached, "spec": spec, "results": results,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "definitions_version": 3
+        "definitions_version": 4
     }
     stage(5, f"Found {len(results)} matching stocks")
+    progress(95, f"Screening calculations complete · {len(results)} matches")
     json.dump(output, sys.stdout, separators=(",", ":"), allow_nan=False)
 
 
