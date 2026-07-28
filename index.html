@@ -16,8 +16,8 @@
   --sans: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'Courier New', monospace;
   --display: 'Chakra Petch', 'Schibsted Grotesk', system-ui, sans-serif;
-  --radius: 10px; --radius-sm: 6px;
-  --header-h: 58px;
+  --radius: 10px; --radius-sm: 6px; --radius-md: 8px;
+  --header-h: 58px; --ctl-h: 36px;
   --ease: cubic-bezier(.22,.9,.32,1);
   --ease-out: cubic-bezier(.16,1,.3,1);
   --ease-spring: cubic-bezier(.34,1.4,.44,1);
@@ -69,7 +69,7 @@ button { font-family: inherit; }
 }
 
 /* HEADER */
-header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding: 0 22px; height: var(--header-h);
+header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 22px; height: var(--header-h);
   background: var(--surface); border-bottom: 1px solid var(--border-soft); position: relative; z-index: 30; transition: background .35s var(--ease); }
 .wordmark { display: flex; align-items: center; gap: 11px; user-select: none; cursor: pointer; background: none; border: none;
   padding: 4px 8px; margin-left: -8px; border-radius: var(--radius-sm); transition: background .2s var(--ease); }
@@ -83,14 +83,24 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 @keyframes gust { 0%{stroke-dashoffset:0;} 45%{stroke-dashoffset:60;opacity:0;} 46%{stroke-dashoffset:-60;} 100%{stroke-dashoffset:0;opacity:1;} }
 .wordmark .wm-title { font-family: var(--display); font-size: 18px; font-weight: 700; letter-spacing: .16em; color: var(--bright); text-transform: uppercase; }
 .wordmark small { font-size: 11px; color: var(--text-dim); letter-spacing: .02em; font-weight: 500; margin-left: 2px; transform: translateY(2px); }
-#searchForm { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.ticker-wrap { position: relative; }
-.ticker-wrap svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; stroke: var(--text-dim); pointer-events: none; }
-#ticker { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--bright);
-  font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase;
-  padding: 8px 12px 8px 32px; width: 170px; outline: none; transition: border-color .2s, box-shadow .2s, width .3s var(--ease); }
-#ticker:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); width: 250px; }
-#ticker::placeholder { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+/* Search instrument — the field and its own submit share one housing, so Analyze reads
+   as part of searching rather than as another peer button in the bar. The housing takes
+   the header's leftover width (to a cap) instead of sitting at a fixed size, which is
+   what keeps the placeholder from truncating as the bar narrows. */
+#searchForm { display: flex; align-items: center; flex: 1 1 auto; max-width: 420px; margin-left: auto; min-width: 0; }
+.ticker-wrap { position: relative; display: flex; align-items: center; width: 100%; height: var(--ctl-h); min-width: 0;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  transition: border-color .22s var(--ease), background .22s var(--ease), box-shadow .22s var(--ease); }
+.ticker-wrap:focus-within { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search-ico { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px;
+  fill: none; stroke: var(--text-dim); pointer-events: none; transition: stroke .22s var(--ease); }
+.ticker-wrap:focus-within .search-ico { stroke: var(--accent); }
+/* Flexes instead of animating its own width — the old focus expansion shoved every
+   control to its right sideways on every click into the field. */
+#ticker { flex: 1 1 0; min-width: 0; height: 100%; background: none; border: none; outline: none;
+  color: var(--bright); font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: .06em;
+  text-transform: uppercase; padding: 0 6px 0 31px; }
+#ticker::placeholder { color: var(--text-dim); font-family: var(--sans); text-transform: none; letter-spacing: 0; }
 /* Search typeahead — in-site dropdown (replaces the native datalist) */
 #tickerSuggest { position: absolute; top: calc(100% + 6px); right: 0; min-width: 100%; width: 300px; max-width: calc(100vw - 24px);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow);
@@ -105,33 +115,41 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .sug mark { background: none; color: var(--accent); font-weight: 700; }
 .sug:hover, .sug.active { background: var(--surface-2); }
 .sug.active .sym { color: var(--accent); }
-#randomBtn { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; background: var(--surface-2);
-  border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer;
-  transition: color .2s, border-color .2s, background .2s, transform .3s var(--ease); }
-#randomBtn:hover { color: var(--accent); border-color: var(--accent); }
-#randomBtn:active { transform: rotate(-10deg) scale(.93); }
-#randomBtn svg { transition: transform .45s var(--ease-spring); }
-#randomBtn:hover svg { transform: rotate(90deg); }
-#analyzeBtn { display: inline-flex; align-items: center; gap: 7px; background: var(--accent); color: var(--accent-ink);
-  border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: .02em;
-  padding: 8px 18px; height: 36px; transition: filter .15s, transform .12s var(--ease), opacity .2s; }
-#analyzeBtn:hover { filter: brightness(1.08); } #analyzeBtn:active { transform: scale(.96); }
-#analyzeBtn:disabled { opacity: .55; cursor: progress; }
-#themeBtn { display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-sm);
-  background: var(--surface-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; transition: color .2s, border-color .2s, transform .3s var(--ease); }
-#themeBtn:hover { color: var(--bright); border-color: var(--text-dim); } #themeBtn:active { transform: rotate(40deg) scale(.92); }
-#themeBtn svg { width: 16px; height: 16px; }
-#screenerNav { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 12px; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 12px; font-weight: 650; }
-#screenerNav:hover { color: var(--bright); border-color: var(--accent); }
-#screenerNav svg { width: 14px; height: 14px; }
+#analyzeBtn { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; height: calc(var(--ctl-h) - 10px);
+  margin: 0 4px 0 2px; padding: 0 12px; background: var(--accent); color: var(--accent-ink); border: none; border-radius: 5px;
+  cursor: pointer; font-size: 12.5px; font-weight: 700; letter-spacing: .02em;
+  transition: filter .18s var(--ease), transform .16s var(--ease), opacity .2s var(--ease); }
+#analyzeBtn:hover { filter: brightness(1.08); } #analyzeBtn:active { transform: scale(.94); }
+#analyzeBtn:disabled { opacity: .5; cursor: progress; }
+#analyzeBtn svg { width: 12px; height: 12px; flex-shrink: 0; }
+
+/* Utility rail — screener, profile and theme share one housing with hairline
+   separators, so three unrelated-looking buttons read as a single object. */
+.util-rail { display: flex; align-items: center; flex-shrink: 0; height: var(--ctl-h);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  transition: border-color .22s var(--ease), background .22s var(--ease); }
+.util-rail > button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  height: 100%; padding: 0 12px; background: none; border: none; cursor: pointer; color: var(--text);
+  font-size: 12px; font-weight: 650; white-space: nowrap;
+  transition: color .2s var(--ease), background .2s var(--ease); }
+.util-rail > button:first-of-type { border-radius: 7px 0 0 7px; }
+.util-rail > button:last-of-type { border-radius: 0 7px 7px 0; }
+.util-rail > button:hover { color: var(--bright); background: var(--surface-3); }
+.util-rail > button svg { width: 15px; height: 15px; flex-shrink: 0; transition: transform .3s var(--ease-spring); }
+.util-rail > button:active svg { transform: scale(.85); }
+.rail-div { width: 1px; height: 17px; flex-shrink: 0; background: var(--border); transition: background .22s var(--ease); }
+#screenerNav:hover svg { transform: translateX(2px); }
+#themeBtn { width: 38px; padding: 0; }
+/* applyTheme() swaps the icon by replacing the node, so a keyframe (not a transition)
+   is what animates it — it re-runs on each insert. */
+#themeBtn svg { width: 16px; height: 16px; animation: themeSwap .34s var(--ease-out); }
+@keyframes themeSwap { from { opacity: 0; transform: rotate(-55deg) scale(.55); } }
 
 /* MySquall — compact profile control + locally saved preference editor */
-#profileBtn { position: relative; display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; flex-shrink: 0;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text);
-  cursor: pointer; font-size: 12px; font-weight: 700; transition: color .2s, border-color .2s, background .2s; }
-#profileBtn:hover, #profileBtn.configured { color: var(--bright); border-color: var(--violet); }
-#profileBtn svg { width: 15px; height: 15px; stroke: var(--violet); }
-#profileDot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); transition: background .2s, box-shadow .2s; }
+#profileBtn svg { stroke: var(--violet); }
+#profileBtn.configured { color: var(--bright); }
+#profileDot { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; border-radius: 50%;
+  background: transparent; transition: background .25s var(--ease), box-shadow .25s var(--ease); }
 #profileBtn.configured #profileDot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 #profileModal { position: fixed; inset: 0; z-index: 100; display: none; place-items: center; padding: 20px;
   background: rgba(4,8,13,.68); backdrop-filter: blur(7px); }
@@ -144,7 +162,10 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 20px; padding:
 .profile-head h2 { font-family: var(--display); color: var(--bright); font-size: 19px; letter-spacing: .05em; }
 .profile-head p { color: var(--text-dim); font-size: 12px; margin-top: 3px; }
 .profile-close { margin-left: auto; width: 34px; height: 34px; display: grid; place-items: center; flex-shrink: 0; border-radius: var(--radius-sm);
-  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 20px; }
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
+  transition: color .2s var(--ease), border-color .2s var(--ease), background .2s var(--ease); }
+.profile-close:hover { color: var(--bright); border-color: var(--text-dim); background: var(--surface-3); }
+.profile-close svg { width: 15px; height: 15px; }
 #profileForm { padding: 20px 22px 22px; }
 .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .profile-field { padding: 14px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--surface-2); }
@@ -419,7 +440,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   .pane:not([data-hidden]) { animation: paneIn .28s var(--ease-out); }
   @keyframes paneIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   #summaryStrip { gap: 12px; padding: 12px 16px 10px; } #sPrice { font-size: 20px; }
-  header { gap: 10px; padding: 0 14px; } #ticker { width: 120px; font-size: 16px; } #ticker:focus { width: 140px; } .wordmark small { display: none; }
+  header { padding: 0 14px; } #ticker { font-size: 16px; } .wordmark small { display: none; }
   #chatInput { font-size: 16px; }
   #chatRow { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
   #chatGrip { height: 20px; } #chatGrip::before { width: 56px; height: 5px; }
@@ -428,24 +449,38 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   #rangeSel button { padding: 6px 11px; }
   .toggle { padding: 6px 12px 6px 10px; }
 }
+/* The header sheds labels one at a time as it narrows, rather than all at once. Each
+   step hands its width to the search field, which is the bar's real job — dropping them
+   together left a band around 560px where the field collapsed to ~120px. */
+@media (max-width: 900px) { #analyzeBtn { width: 30px; padding: 0; justify-content: center; } #analyzeBtn .btn-label { display: none; } }
 @media (max-width: 720px) {
-  #profileBtn span { display: none; } #profileBtn { width: 36px; padding: 0; justify-content: center; } #profileDot { position: absolute; transform: translate(10px,-10px); }
+  /* Rail collapses to icons — the labels go, the controls stay. */
+  #profileBtn span, #screenerNav span { display: none; }
+  .util-rail > button { width: 38px; padding: 0; }
   /* The search box sits far right in a crowded header, so a dropdown anchored to it
      overhangs the left edge of the screen. Anchor to the viewport instead. */
   #tickerSuggest { position: fixed; top: calc(var(--header-h) + 6px); right: 12px; left: auto;
     width: min(340px, calc(100vw - 24px)); min-width: 0; max-width: none; }
 }
+@media (max-width: 600px) { .wordmark .wm-title { display: none; } }
 @media (max-width: 520px) {
-  .wordmark .wm-title { display: none; } #analyzeBtn { padding: 8px 12px; } #analyzeBtn .btn-label { display: none; }
-  #ticker { width: 92px; } #ticker:focus { width: 108px; } #randomBtn { display: none; }
   #profileModal { padding: 0; place-items: stretch; } #profilePanel { max-height: 100dvh; height: 100dvh; width: 100%; border-radius: 0; }
   .profile-grid { grid-template-columns: 1fr; } .profile-wide { grid-column: auto; }
-  #screenerNav span { display: none; } #screenerNav { width: 36px; padding: 0; justify-content: center; }
   #screenForm { flex-direction: column; } #screenRun { min-height: 44px; }
   .screen-head { display: block; } .screen-grid { grid-template-columns: 1fr; }
   .screen-examples { grid-template-columns: 1fr 1fr; }
   .screen-controls { align-items: stretch; flex-direction: column; gap: 4px; }
   #screenUniverse { min-width: 0; width: 100%; }
+}
+/* Smallest phones (320–400px): the header used to overflow and scroll the page
+   sideways. Tighten the housings until the whole bar fits. */
+@media (max-width: 400px) {
+  header { gap: 7px; padding: 0 10px; }
+  #ticker { padding-left: 27px; letter-spacing: .02em; }
+  .search-ico { left: 9px; width: 13px; height: 13px; }
+  .util-rail > button { width: 33px; }
+  .util-rail > button svg { width: 14px; height: 14px; }
+  #themeBtn { width: 33px; }
 }
 
 /* CARDS */
@@ -898,10 +933,6 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
   transform: translate(-50%, -55%) rotate(45deg); }
 #tip.below::before { top: 0; border: 0; border-left: 1px solid var(--border); border-top: 1px solid var(--border); transform: translate(-50%, -45%) rotate(45deg); }
 
-/* Header chrome micro-interactions */
-#screenerNav, #profileBtn { transition: color .2s, border-color .2s, background .2s, transform .18s var(--ease); }
-#screenerNav:hover, #profileBtn:hover { transform: translateY(-1px); }
-#screenerNav:active, #profileBtn:active { transform: scale(.95); }
 .analysis-tab { transition: background .18s, color .18s, border-color .18s; }
 .analysis-tab:not(.active):hover { color: var(--text); background: var(--surface-3); }
 </style>
@@ -915,34 +946,37 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
   </button>
   <form id="searchForm" onsubmit="event.preventDefault(); runAnalysis();">
     <div class="ticker-wrap">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-      <input id="ticker" type="text" placeholder="Ticker or company — e.g. AAPL or Apple" maxlength="60" autocomplete="off" spellcheck="false"
+      <svg class="search-ico" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="ticker" type="text" placeholder="Ticker or company" maxlength="60" autocomplete="off" spellcheck="false"
              role="combobox" aria-expanded="false" aria-controls="tickerSuggest" aria-autocomplete="list" aria-label="Ticker symbol or company name" />
       <div id="tickerSuggest" role="listbox" aria-label="Ticker suggestions"></div>
+      <button id="analyzeBtn" type="submit">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        <span class="btn-label">Analyze</span>
+      </button>
     </div>
-    <button id="randomBtn" type="button" title="Analyze a random supported index company" aria-label="Random supported index company" onclick="randomAnalysis()">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8" cy="8" r="1.4" fill="currentColor"/><circle cx="16" cy="16" r="1.4" fill="currentColor"/><circle cx="16" cy="8" r="1.4" fill="currentColor"/><circle cx="8" cy="16" r="1.4" fill="currentColor"/></svg>
-    </button>
-    <button id="analyzeBtn" type="submit">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-      <span class="btn-label">Analyze</span>
-    </button>
   </form>
-  <button id="screenerNav" type="button" onclick="openScreener()" title="Screen supported market indexes in plain English">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 5h16M7 12h10M10 19h4"/></svg><span>Screener</span>
-  </button>
-  <button id="profileBtn" type="button" title="Personalize analysis with MySquall" aria-haspopup="dialog" onclick="openMySquall()">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6c0 4-2 5-2 5h16s-2-1-2-5a6 6 0 0 0-6-6Z"/><path d="M9 19h6M12 3V1"/></svg>
-    <span>MySquall</span><i id="profileDot" aria-hidden="true"></i>
-  </button>
-  <button id="themeBtn" type="button" title="Toggle light / dark" aria-label="Toggle theme"></button>
+  <div class="util-rail">
+    <button id="screenerNav" type="button" onclick="openScreener()" title="Screen supported market indexes in plain English">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4"/></svg><span>Screener</span>
+    </button>
+    <span class="rail-div" aria-hidden="true"></span>
+    <button id="profileBtn" type="button" title="Personalize analysis with MySquall" aria-haspopup="dialog" onclick="openMySquall()">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6c0 4-2 5-2 5h16s-2-1-2-5a6 6 0 0 0-6-6Z"/><path d="M9 19h6M12 3V1"/></svg>
+      <span>MySquall</span><i id="profileDot" aria-hidden="true"></i>
+    </button>
+    <span class="rail-div" aria-hidden="true"></span>
+    <button id="themeBtn" type="button" aria-label="Toggle theme"></button>
+  </div>
 </header>
 
 <div id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileTitle" aria-hidden="true">
   <section id="profilePanel">
     <div class="profile-head">
       <div><h2 id="profileTitle">MySquall</h2><p>Tell Squall how you invest. Your profile is saved in this browser and shapes the explanation—not the facts.</p></div>
-      <button class="profile-close" type="button" aria-label="Close MySquall" onclick="closeMySquall()">×</button>
+      <button class="profile-close" type="button" aria-label="Close MySquall" onclick="closeMySquall()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
     </div>
     <form id="profileForm" onsubmit="event.preventDefault(); saveMySquall();">
       <div class="profile-grid">

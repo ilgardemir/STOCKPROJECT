@@ -90,12 +90,25 @@ function analysisRunWait(ticker) {
 hydrateSavedSessions();
 hydrateSavedScreeners();
 
+/* Retitle a control safely. The tooltip layer below migrates [title] → data-tip on
+   first hover and drops the attribute, so writing .title afterwards would leave the
+   visible tooltip showing stale text. Write whichever one the element is using. */
+function setTip(el, text) {
+  if (!el) return;
+  if ("tip" in el.dataset) el.dataset.tip = text; else el.title = text;
+}
+
 /* ════════════════ THEME ════════════════ */
 const SUN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
 const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>';
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
-  document.getElementById("themeBtn").innerHTML = t === "dark" ? SUN : MOON;
+  const themeBtn = document.getElementById("themeBtn");
+  themeBtn.innerHTML = t === "dark" ? SUN : MOON;
+  // Name the destination, not the control — "Toggle theme" never says where you land.
+  const label = t === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  themeBtn.setAttribute("aria-label", label);
+  setTip(themeBtn, label);
   try { localStorage.setItem("squall-theme", t); } catch (e) {}
   // Defer the canvas repaint to the next frame so the CSS color transition starts
   // immediately — redrawing synchronously here blocks paint and makes the toggle stutter.
@@ -150,7 +163,7 @@ function mySquallKey(profile) { return profile ? JSON.stringify(profile) : "none
 function syncProfileButton() {
   const btn = document.getElementById("profileBtn");
   btn?.classList.toggle("configured", Boolean(mySquallProfile));
-  if (btn) btn.title = mySquallProfile ? "MySquall profile saved — click to edit" : "Personalize analysis with MySquall";
+  setTip(btn, mySquallProfile ? "MySquall profile saved — click to edit" : "Personalize analysis with MySquall");
 }
 function updateProfileLabels() {
   ["Risk", "Horizon", "Experience", "Depth"].forEach(name => {
@@ -280,6 +293,19 @@ function hideProgress(delay = 600) { setTimeout(() => {
 
 /* ════════════════ ANALYSIS (SSE streaming — scraper stages, then live AI tokens) ════════════════ */
 function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); }
+
+/* On phones the search field is too small for the full placeholder — and the font steps
+   up to 16px there to stop iOS zooming on focus, which makes the text wider still. A
+   truncated placeholder ("Ticker or compan…") reads as a bug, so shorten it instead.
+   The full intent stays in the field's aria-label, and the typeahead matches names too. */
+(function () {
+  const input = document.getElementById("ticker");
+  if (!input) return;
+  const narrow = matchMedia("(max-width: 520px)");
+  const sync = () => { input.placeholder = narrow.matches ? "Ticker" : "Ticker or company"; };
+  narrow.addEventListener("change", sync);
+  sync();
+})();
 // Pick a random company from the combined large-cap screening universe.
 function randomAnalysis() {
   const extra = window.MARKET_UNIVERSES || {};
