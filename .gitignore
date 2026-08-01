@@ -1,0 +1,7 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+__pycache__
+*.pyc
+.claude/settings.local.json
