@@ -2104,9 +2104,10 @@ document.getElementById("chartModalControls").addEventListener("change", functio
 });
 
 /* ════════════════ HERO WIND FIELD ════════════════
-   Passive, cursor-reactive wind behind the landing hero. Short accent-colored streaks
-   drift left→right (matching .hero-streaks); moving the cursor drags nearby streaks along
-   its path and parts them around it, then the field relaxes back to ambient drift. */
+   Passive, cursor-reactive wind behind the landing hero, and the hero's only streak layer
+   since the CSS .hero-streaks were removed. Short accent-colored streaks drift left→right;
+   moving the cursor drags nearby streaks along its path and parts them around it, then the
+   field relaxes back to ambient drift. */
 (function () {
   if (REDUCED) return;                                  // honor prefers-reduced-motion — no ambient motion
   const hero = document.getElementById("hero");

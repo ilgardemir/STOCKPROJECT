@@ -300,8 +300,9 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 #hero .wind { width: 64px; height: 52px; } #hero .wind path { stroke-width: 3; animation: gust 4.5s var(--ease) infinite; }
 #hero h1 { font-family: var(--display); font-size: clamp(32px, 6vw, 52px); font-weight: 700; letter-spacing: .2em; color: var(--bright); text-transform: uppercase; line-height: 1; margin-right: -.2em; }
 #hero p { max-width: 500px; font-size: 15px; color: var(--text); } #hero p b { color: var(--bright); font-weight: 600; }
-#hero .hero-fine { font-size: 12px; color: var(--text-dim); margin-top: -8px; animation: riseIn .6s var(--ease-out) backwards .36s; }
-#hero .examples { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+/* Wider than the pitch so the source list and the disclaimer stay on one line together. */
+#hero .hero-fine { max-width: 640px; font-size: 12px; color: var(--text-dim); margin-top: -8px; animation: riseIn .6s var(--ease-out) backwards .36s; }
+#hero .examples, #hero .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-family: var(--mono);
   font-size: 12px; font-weight: 550; padding: 7px 12px; cursor: pointer; transition: color .16s, border-color .16s, background .16s; }
 .chip:hover { color: var(--bright); border-color: var(--accent); background: var(--accent-soft); }
@@ -942,18 +943,16 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #hero p { animation: riseIn .6s var(--ease-out) backwards .3s; }
 #hero .examples { animation: riseIn .6s var(--ease-out) backwards .4s; }
 #hero .examples .chip { animation: riseIn .3s var(--ease-out) backwards .35s; }
+#hero .hero-actions { animation: riseIn .6s var(--ease-out) backwards .48s; }
 
-/* Hero ambience — dot grid drifts like wind-blown drizzle; streaks pass through */
+/* Hero ambience — dot grid drifts like wind-blown drizzle.
+   The three CSS .hero-streaks that used to cross the copy were removed: the wind-field
+   canvas below already draws drifting streaks, so they were a second, worse copy of the
+   same effect layered on top of it. One ambient layer, not two. */
 #hero::before { animation: dotDrift 70s linear infinite; }
 @keyframes dotDrift { to { background-position: 210px -30px; } }
-#hero .hero-streaks { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-.hero-streaks i { position: absolute; left: -220px; top: 20%; height: 2px; width: 150px; border-radius: 99px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: 0; animation: streakBy 9s linear infinite 1.2s; }
-.hero-streaks i:nth-child(2) { top: 58%; width: 90px; animation-duration: 12s; animation-delay: 4s; }
-.hero-streaks i:nth-child(3) { top: 80%; width: 200px; animation-duration: 7.5s; animation-delay: 6.5s; }
-@keyframes streakBy { 0% { left: -220px; opacity: 0; } 5% { opacity: .3; } 18% { left: 104%; opacity: .12; } 18.5%, 100% { left: 104%; opacity: 0; } }
-/* Cursor-reactive wind field (canvas, injected by app.js). Ambient streaks drift like
-   .hero-streaks and part around the cursor as it moves. Above the dot grid, below the copy. */
+/* Cursor-reactive wind field (canvas, injected by app.js). Ambient streaks drift and
+   part around the cursor as it moves. Above the dot grid, below the copy. */
 #hero .wind-field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
 /* Wordmark — ambient gust every ~11s (hover still triggers the fast one) */
@@ -1170,11 +1169,10 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 </div>
 
 <div id="hero">
-  <div class="hero-streaks" aria-hidden="true"><i></i><i></i><i></i></div>
   <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
   <h1>Squall</h1>
-  <p>Research a public company from one place. Squall combines <b>SEC filings</b>, <b>market data</b>, <b>options activity</b>, and <b>technical context</b>, then explains the evidence in clear language.</p>
-  <p class="hero-fine">Sources include SEC EDGAR, Finnhub, and Yahoo Finance · AI-assisted research, not financial advice</p>
+  <p>Research a public company from one place — SEC filings, market data, options activity and technical context, explained in clear language.</p>
+  <p class="hero-fine">SEC EDGAR · Finnhub · Yahoo Finance — AI-assisted research, not financial advice</p>
   <div class="examples">
     <button class="chip" onclick="quick('AAPL')">AAPL</button>
     <button class="chip" onclick="quick('NVDA')">NVDA</button>
@@ -1186,8 +1184,11 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
       Random
     </button>
   </div>
-  <button class="chip primary-link" onclick="openScreener()">Open stock screener</button>
-  <button class="chip resume" id="resumeChip" onclick="resumeSavedWorkspace()">Return to saved research</button>
+  <!-- Both entry points share one row; the resume chip only appears when saved work exists. -->
+  <div class="hero-actions">
+    <button class="chip primary-link" onclick="openScreener()">Open stock screener</button>
+    <button class="chip resume" id="resumeChip" onclick="resumeSavedWorkspace()">Return to saved research</button>
+  </div>
 </div>
 
 <div id="summaryStrip"></div>
