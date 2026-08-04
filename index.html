@@ -38,6 +38,11 @@
   --chart-fill-top:rgba(63,208,182,.22); --chart-fill-bot:rgba(63,208,182,0);
   --skeleton-shine:rgba(255,255,255,.06);
   color-scheme: dark;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 :root[data-theme="light"] {
   --bg:#eef2f5; --bg-deep:#e4eaef; --surface:#ffffff; --surface-2:#f2f5f8; --surface-3:#e8edf2;
@@ -49,6 +54,11 @@
   --shadow:0 1px 2px rgba(19,32,46,.06), 0 8px 24px -12px rgba(19,32,46,.14);
   --skeleton-shine:rgba(255,255,255,.65);
   color-scheme: light;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 /* The four palettes below are chrome-level restyles: every theme must define the same
    variable set, since the whole stylesheet reads only these names. The monochrome pairs
@@ -65,6 +75,11 @@
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 28px -12px rgba(0,0,0,.7);
   --skeleton-shine:rgba(255,255,255,.08);
   color-scheme: dark;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 :root[data-theme="paper"] {           /* white + black */
   --bg:#ffffff; --bg-deep:#f1f1f1; --surface:#ffffff; --surface-2:#f4f4f4; --surface-3:#e9e9e9;
@@ -76,6 +91,11 @@
   --shadow:0 1px 2px rgba(0,0,0,.07), 0 8px 24px -12px rgba(0,0,0,.18);
   --skeleton-shine:rgba(255,255,255,.7);
   color-scheme: light;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 :root[data-theme="lagoon"] {          /* turquoise + pink */
   --bg:#052b2b; --bg-deep:#032020; --surface:#0a3837; --surface-2:#0f4544; --surface-3:#155150;
@@ -87,6 +107,11 @@
   --shadow:0 1px 2px rgba(1,17,17,.4), 0 8px 28px -12px rgba(1,17,17,.6);
   --skeleton-shine:rgba(255,255,255,.09);
   color-scheme: dark;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 :root[data-theme="matrix"] {          /* black + lime */
   --bg:#000000; --bg-deep:#000000; --surface:#080c08; --surface-2:#0e150e; --surface-3:#162116;
@@ -98,6 +123,11 @@
   --shadow:0 1px 2px rgba(0,0,0,.6), 0 8px 28px -12px rgba(0,20,0,.8);
   --skeleton-shine:rgba(141,255,58,.10);
   color-scheme: dark;
+  --chrome-0: var(--bg); --chrome-1: var(--surface); --chrome-2: var(--surface-2);
+  --rule: var(--border-soft);
+  --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
+  --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
