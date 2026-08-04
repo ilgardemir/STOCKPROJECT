@@ -1053,12 +1053,30 @@ document.querySelectorAll("[data-screen-example]").forEach(button => button.addE
 
 /* ════════════════ RENDER HELPERS ════════════════ */
 let _cardN = 0;
-function card(id, icon, title, bodyHtml, { open = true, count = null } = {}) {
+function card(id, icon, title, bodyHtml, { open = true, count = null, source = null } = {}) {
   _cardN++;
+  const src = source
+    ? `<span class="src" data-src="${source.kind}" title="Extracted from ${esc(source.label)}">${esc(source.label)}</span>` : "";
   return `<details class="card" id="card-${id}" ${open ? "open" : ""} style="--d:${Math.min(_cardN * 0.03, 0.3)}s">
-    <summary>${icon}<span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}
+    <summary>${icon}<span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}${src}
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </summary><div class="card-body">${bodyHtml}</div></details>`;
+}
+/* Provenance for the two extraction paths the payload declares outright: the SEC EDGAR
+   filing read, and the price history yahooquery pulled. Read from d.data_sources rather
+   than hardcoded, so a card says "Finnhub" on the runs where history came from the
+   recovery path instead of Yahoo.
+   Valuation, Profitability and Financial Health are deliberately left unbadged — those
+   metrics fall back per-field across yahooquery → Finnhub → FMP, so no single source
+   label would be true for the whole card. */
+const YQ_SRC = { kind: "market", label: "Yahoo Finance" };          // pulled from yahooquery directly
+function secSrc(d) {
+  return d.sec_available === false ? null : { kind: "sec", label: d.data_sources?.sec || "SEC EDGAR" };
+}
+function histSrc(d) {
+  const h = d.data_sources?.history;
+  if (!h || h === "Unavailable") return null;
+  return { kind: "market", label: h === "Yahoo" ? "Yahoo Finance" : h };
 }
 const I = {
   bolt:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 11-12h-7l1-8z"/></svg>',
@@ -1229,7 +1247,7 @@ function renderAll(d) {
 
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
-    html += card("chart", I.chart, "Candlestick — Price Action", chartCardBody());
+    html += card("chart", I.chart, "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) });
   }
 
   /* Deterministic market regime — explains the current price/volume environment. */
@@ -1242,7 +1260,7 @@ function renderAll(d) {
     </div>`;
     if (Array.isArray(regime.evidence) && regime.evidence.length) body += `<div class="regime-evidence">${regime.evidence.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
     body += `<p class="learn-note"><b>How to use this:</b> regime describes the current environment; it does not predict the next move. Trend regimes favor continuation setups, while range or transition regimes reward patience and tighter risk controls.</p>`;
-    html += card("regime", I.gauge, "Market Regime", body, { count: regime.label });
+    html += card("regime", I.gauge, "Market Regime", body, { count: regime.label, source: histSrc(d) });
   }
 
   /* Price action / market structure */
@@ -1257,7 +1275,7 @@ function renderAll(d) {
       Object.entries(pa.fib).forEach(([k, val]) => body += `<span class="lvl" style="color:var(--violet);background:rgba(157,140,240,.12)">${k} · ${fUsd(val)}</span>`);
       body += `</div>`;
     }
-    html += card("priceaction", I.struct, "Price Action & Market Structure", body, { count: pa.trend });
+    html += card("priceaction", I.struct, "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) });
   }
 
   /* Institutional footprint */
@@ -1275,7 +1293,7 @@ function renderAll(d) {
       ${metric("Distrib. Days (25)", String(inst.distribution_days ?? 0), (inst.distribution_days || 0) >= 3 ? "red" : "")}
     </div>`;
     (inst.signals || []).forEach(sg => body += signalHtml(sg));
-    html += card("institutional", I.whale, "Institutional Footprint", body);
+    html += card("institutional", I.whale, "Institutional Footprint", body, { source: histSrc(d) });
   }
 
   /* Algorithmic signals */
@@ -1284,7 +1302,7 @@ function renderAll(d) {
 
   /* Chart patterns */
   const pats = d.chart_patterns || [];
-  if (pats.length) html += card("patterns", I.layers, "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length });
+  if (pats.length) html += card("patterns", I.layers, "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length, source: histSrc(d) });
 
   /* Valuation */
   html += card("valuation", I.scale, "Valuation", `<div class="mgrid">
@@ -1315,7 +1333,7 @@ function renderAll(d) {
     secBody += `<p style="margin-top:10px;font-size:12px;color:var(--text-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
   if (d.sec_available === false)
     secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker — figures rely on the market-data provider only.</div>` + secBody;
-  html += card("sec", I.bank, "SEC-Verified Fundamentals (Latest 10-K)", secBody);
+  html += card("sec", I.bank, "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) });
 
   /* Technicals */
   let tech = `<div class="mgrid">
@@ -1332,13 +1350,13 @@ function renderAll(d) {
   const resL = (kl.resistance || []).filter(isNum), supL = (kl.support || []).filter(isNum);
   if (resL.length || supL.length) tech += `<div class="lvl-label">Key price levels</div><div class="levels">
     ${resL.map(x => `<span class="lvl res">R ${fUsd(x)}</span>`).join("")}${supL.map(x => `<span class="lvl sup">S ${fUsd(x)}</span>`).join("")}</div>`;
-  html += card("tech", I.gauge, "Technicals & Key Levels", tech);
+  html += card("tech", I.gauge, "Technicals & Key Levels", tech, { source: histSrc(d) });
 
   /* Risk */
   html += card("risk", I.pulse, "Risk & Return (5Y)", `<div class="mgrid">
     ${metric("CAGR", fPct(rr.cagr), signCls(rr.cagr))}${metric("Annual Volatility", fPct(rr.annual_volatility))}
     ${metric("Sharpe Ratio", fRatio(rr.sharpe), signCls(rr.sharpe))}${metric("Max Drawdown", fPct(rr.max_drawdown), signCls(rr.max_drawdown, true))}
-    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`);
+    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`, { source: histSrc(d) });
 
   /* Sentiment */
   let sent = `<div class="mgrid">
@@ -1356,7 +1374,7 @@ function renderAll(d) {
       return `<tr><td class="hi">${esc(e.date)}</td><td>$${e.estimate.toFixed(2)}</td><td class="hi">$${e.reported.toFixed(2)}</td>
         <td class="${pos ? "pos" : "neg"}">${pos ? "+" : ""}${(e.surprise_pct * 100).toFixed(1)}%</td><td class="${pos ? "pos" : "neg"}">${pos ? "Beat" : "Miss"}</td></tr>`; }).join("");
     html += card("earnings", I.cal, "Recent Earnings Surprises",
-      `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length });
+      `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length, source: YQ_SRC });
   }
 
   /* Filing activity */
@@ -1369,7 +1387,7 @@ function renderAll(d) {
       ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
     body += `<div class="lvl-label">8-K events (last 90 days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--text);background:var(--surface-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--text-dim)">None filed.</span>`) + `</div>`;
-    html += card("filings", I.doc, "SEC Filing Activity (90 Days)", body);
+    html += card("filings", I.doc, "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
   }
 
   /* Options */
@@ -1385,12 +1403,12 @@ function renderAll(d) {
       });
       body += `</div>`;
     });
-    html += card("options", I.layers, "Live Options Chains", body, { open: false, count: od.chains.length + " exp" });
+    html += card("options", I.layers, "Live Options Chains", body, { open: false, count: od.chains.length + " exp", source: YQ_SRC });
   }
 
   /* MD&A */
   if (d.mda_excerpt && !/unavailable|Failed|not found/i.test(d.mda_excerpt))
-    html += card("mda", I.doc, "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false });
+    html += card("mda", I.doc, "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) });
 
   /* Raw prompt */
   if (d.ai_prompt)

@@ -588,6 +588,20 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 .card > summary .chev { margin-left: auto; width: 14px; height: 14px; stroke: var(--text-dim); transition: transform .25s var(--ease); }
 .card[open] > summary .chev { transform: rotate(180deg); }
 .card > summary .count { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--text-dim); background: var(--surface-2); border-radius: 4px; padding: 1px 7px; letter-spacing: 0; }
+/* Extraction provenance — names the pipeline a card's numbers came out of (SEC EDGAR's
+   filing read vs the yahooquery market pull). Pops in a beat after the card lands so the
+   card reads first and the attribution arrives behind it; --d is inherited from .card, so
+   each badge trails its own card through the stagger. Small and low-contrast on purpose:
+   it is a footnote, not a heading. */
+.card > summary .src { font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: .03em;
+  text-transform: none; padding: 1px 6px; border-radius: 4px; border: 1px solid transparent; white-space: nowrap;
+  animation: popIn .42s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .34s); }
+.card > summary .src[data-src="sec"] { color: var(--violet);
+  border-color: color-mix(in srgb, var(--violet) 34%, transparent);
+  background: color-mix(in srgb, var(--violet) 11%, transparent); }
+.card > summary .src[data-src="market"] { color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); }
+@media (max-width: 560px) { .card > summary .src { display: none; } }   /* title needs the room */
 .sec-icon { width: 15px; height: 15px; stroke: var(--accent); flex-shrink: 0; }
 .card-body { padding: 4px 16px 16px; }
 .card[open] .card-body { animation: bodyIn .3s var(--ease); }
