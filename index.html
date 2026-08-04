@@ -594,7 +594,8 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
    each badge trails its own card through the stagger. Small and low-contrast on purpose:
    it is a footnote, not a heading. */
 .card > summary .src { font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: .03em;
-  text-transform: none; padding: 1px 6px; border-radius: 4px; border: 1px solid transparent; white-space: nowrap;
+  text-transform: none; padding: 1px 6px; border-radius: 4px; border: 1px solid transparent;
+  white-space: nowrap; flex-shrink: 0;                       /* a narrow pane wraps the title, not this */
   animation: popIn .42s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .34s); }
 .card > summary .src[data-src="sec"] { color: var(--violet);
   border-color: color-mix(in srgb, var(--violet) 34%, transparent);
