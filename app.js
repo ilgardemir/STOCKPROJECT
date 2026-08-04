@@ -920,21 +920,73 @@ function renderScreenResults(result) {
 /* Paint results and bring them to life: each match ring sweeps 0→score while
    the number counts up. Skipped (values set instantly) under reduced motion. */
 const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)");
+function animateScoreRing(ring, delayMs) {
+  const target = Math.max(0, Math.min(100, Number(ring.dataset.score) || 0));
+  if (REDUCED_MOTION.matches) { ring.style.setProperty("--ring", target + "%"); return; }
+  if (ring._ringRun) return;                                    // a reveal never replays
+  ring._ringRun = true;
+  ring.textContent = "0"; ring.style.setProperty("--ring", "0%");
+  const t0 = performance.now() + delayMs;
+  (function step(now) {
+    const p = Math.max(0, Math.min(1, (now - t0) / 750));
+    const v = (1 - Math.pow(1 - p, 3)) * target;                // ease-out cubic
+    ring.textContent = String(Math.round(v));
+    ring.style.setProperty("--ring", v + "%");
+    if (p < 1) requestAnimationFrame(step);
+  })(performance.now());
+}
+
+/* ── Scroll reveal ───────────────────────────────────────────────────────────
+   #screenerView is its own scroll container, so it is the observer root. Only
+   elements below the first screenful are deferred; whatever is already on screen
+   keeps the render-time cascade, so the results still land as one piece.
+   Deferring is purely additive — if IntersectionObserver is missing or motion is
+   reduced, nothing is tagged and every card renders exactly as it did before. */
+let _screenRevealObs = null;
+function screenRevealObserver() {
+  if (_screenRevealObs) return _screenRevealObs;
+  const root = document.getElementById("screenerView");
+  if (!root || !("IntersectionObserver" in window)) return null;
+  _screenRevealObs = new IntersectionObserver((entries, obs) => {
+    // Stagger within the batch (a grid row reveals together), capped so a fast
+    // flick doesn't queue up a visible backlog of delayed cards.
+    entries.filter(e => e.isIntersecting).forEach((e, k) => {
+      const el = e.target, wait = Math.min(k, 3) * 55;
+      obs.unobserve(el);
+      setTimeout(() => {
+        el.classList.add("in");
+        const ring = el.querySelector(".match-score[data-score]");
+        if (ring) animateScoreRing(ring, 90);
+      }, wait);
+    });
+  }, { root, threshold: .12 });
+  return _screenRevealObs;
+}
+/* Returns the elements it deferred, so callers can skip their own entrance work. */
+function deferBelowFold(els) {
+  const view = document.getElementById("screenerView");
+  const obs = screenRevealObserver();
+  if (!obs || !view || REDUCED_MOTION.matches) return new Set();
+  const fold = view.getBoundingClientRect().bottom - 40;       // one layout read for the batch
+  const deferred = new Set();
+  els.forEach(el => {
+    if (el.getBoundingClientRect().top <= fold) return;         // already in view
+    el.classList.add("screen-reveal");
+    obs.observe(el);
+    deferred.add(el);
+  });
+  return deferred;
+}
+
 function paintScreenResults(result) {
   const el = document.getElementById("screenResults");
   el.innerHTML = renderScreenResults(result);
-  el.querySelectorAll(".match-score[data-score]").forEach((ring, i) => {
-    const target = Math.max(0, Math.min(100, Number(ring.dataset.score) || 0));
-    if (REDUCED_MOTION.matches) { ring.style.setProperty("--ring", target + "%"); return; }
-    ring.textContent = "0"; ring.style.setProperty("--ring", "0%");
-    const t0 = performance.now() + Math.min(i, 14) * 35 + 120;
-    (function step(now) {
-      const p = Math.max(0, Math.min(1, (now - t0) / 750));
-      const v = (1 - Math.pow(1 - p, 3)) * target;               // ease-out cubic
-      ring.textContent = String(Math.round(v));
-      ring.style.setProperty("--ring", v + "%");
-      if (p < 1) requestAnimationFrame(step);
-    })(performance.now());
+  const deferred = deferBelowFold([...el.querySelectorAll(".screen-result")]);
+  let shown = 0;
+  el.querySelectorAll(".screen-result").forEach(card => {
+    if (deferred.has(card)) return;                             // its ring runs on reveal
+    const ring = card.querySelector(".match-score[data-score]");
+    if (ring) animateScoreRing(ring, Math.min(shown++, 14) * 35 + 120);
   });
 }
 function renderSavedScreener(s) {
@@ -975,6 +1027,8 @@ function renderScreenRefine(s) {
   const messages=(s.history||[]).map(m => `<div class="screen-chat-msg ${m.role}"><span>${m.role === "user" ? "You" : "Squall"}</span><p>${esc(m.content)}</p></div>`).join("");
   el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Adjust this screen</h2><p>Describe what should be broader, stricter, added, or removed. The same market universe will be rescored.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden the criteria and remove unnecessary hard requirements')">Broaden criteria</button><button type="button" onclick="refineScreener('Limit the results to the strongest matches')">Show strongest matches</button><button type="button" onclick="refineScreener('Place more emphasis on relative strength')">Emphasize relative strength</button><button type="button" onclick="refineScreener('Require unusual trading volume')">Require unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="For example: remove value, emphasize cash flow, or make the pattern requirement less strict" aria-label="Adjust this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Updating…" : "Apply changes"}</button></form></section>`;
   const messagesEl=el.querySelector(".screen-chat-messages"); if(messagesEl) messagesEl.scrollTop=messagesEl.scrollHeight;
+  // Sits below a full grid of matches, so on a fresh screen it is almost always off-screen.
+  deferBelowFold([el.querySelector(".screen-refine")].filter(Boolean));
 }
 function refineScreener(rawMessage) {
   const message=String(rawMessage||"").trim(), s=screeners[activeScreen];
