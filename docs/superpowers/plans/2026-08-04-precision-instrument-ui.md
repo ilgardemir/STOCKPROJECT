@@ -251,7 +251,13 @@ Add these six lines inside **every** `:root[data-theme=...]` block, before the c
   --rule: var(--border-soft);
   --ink: var(--text); --ink-dim: var(--text-dim); --ink-bright: var(--bright);
   --up: var(--green); --down: var(--red); --warn: var(--amber);
+  --up-soft: var(--green-soft); --down-soft: var(--red-soft); --warn-soft: var(--amber-soft);
 ```
+
+The three `-soft` tint roles exist because `--green-soft`, `--red-soft` and `--amber-soft`
+have 12 live usages between them (signal backgrounds, level pills, tinted metrics). Without
+these roles, Task 6's deletion would strip those backgrounds in every theme. They are tints
+of the direction colors, not additional accents, so they do not violate the one-accent rule.
 
 `--accent` already exists in every theme and keeps its name — it is already the single load-bearing accent.
 
@@ -259,7 +265,7 @@ Add these six lines inside **every** `:root[data-theme=...]` block, before the c
 
 ```js
 const root = document.documentElement, prev = root.dataset.theme;
-const NAMES = ['--chrome-0','--chrome-1','--chrome-2','--rule','--ink','--ink-dim','--ink-bright','--accent','--up','--down','--warn'];
+const NAMES = ['--chrome-0','--chrome-1','--chrome-2','--rule','--ink','--ink-dim','--ink-bright','--accent','--up','--down','--warn','--up-soft','--down-soft','--warn-soft'];
 const out = THEMES.map(t => { root.dataset.theme = t.id;
   const cs = getComputedStyle(root); const miss = NAMES.filter(n => !cs.getPropertyValue(n).trim());
   return `${t.id}: ${miss.length ? 'MISSING ' + miss.join(',') : 'complete'}`; });
@@ -287,28 +293,39 @@ git push
 - Consumes: role tokens from Task 4
 - Produces: a stylesheet with no `--violet` and no legacy neutral references
 
-- [ ] **Step 1: Migrate the neutrals**
+**Ordering matters.** Literals are written into the theme blocks *before* the sed runs, so no
+commit ever contains a self-referential custom property. Do not reverse these two steps.
 
-Mechanical replacement, in this order (the longer names first, so prefixes don't collide):
+- [ ] **Step 1: Replace the Task 4 aliases with literal values, per theme**
 
-```bash
-sed -i 's/var(--surface-3)/var(--chrome-2)/g; s/var(--surface-2)/var(--chrome-2)/g; s/var(--surface)/var(--chrome-1)/g; s/var(--bg-deep)/var(--chrome-0)/g; s/var(--bg)/var(--chrome-0)/g; s/var(--border-soft)/var(--rule)/g; s/var(--border)/var(--rule)/g; s/var(--text-dim)/var(--ink-dim)/g; s/var(--text)/var(--ink)/g; s/var(--bright)/var(--ink-bright)/g; s/var(--green)/var(--up)/g; s/var(--red)/var(--down)/g; s/var(--amber)/var(--warn)/g' index.html
-```
-
-**This also rewrites the alias declarations added in Task 4 into self-references** (`--chrome-0: var(--chrome-0)`), which is invalid. Step 2 fixes that.
-
-- [ ] **Step 2: Restore the role declarations in all six theme blocks**
-
-In each theme block, the six role lines will now read `--chrome-0: var(--chrome-0);` etc. Replace each block's role lines with literal values copied from that theme's own legacy tokens. For `dark`, that is:
+In each of the six theme blocks, the role lines currently alias the legacy tokens
+(`--chrome-0: var(--bg)`). Replace them with that theme's own literal values, read from the
+legacy declarations a few lines above in the same block. For `dark`:
 
 ```css
   --chrome-0: #0a0e14; --chrome-1: #101723; --chrome-2: #18212f;
   --rule: #1a2535;
   --ink: #8c9db1; --ink-dim: #7a8ca1; --ink-bright: #eaf0f7;
   --up: #46c95d; --down: #f0716b; --warn: #e9b44c;
+  --up-soft: rgba(70,201,93,.10); --down-soft: rgba(240,113,107,.10); --warn-soft: rgba(233,180,76,.10);
 ```
 
-Repeat per theme using that theme's existing hex values — `light`, `noir`, `paper`, `lagoon`, `matrix` each have their own set already declared a few lines above.
+Repeat for `light`, `noir`, `paper`, `lagoon` and `matrix`, copying each theme's own hex and
+rgba values. Do not invent values — every one already exists in the block being edited.
+
+After this step the roles hold literals, so the sed in Step 2 cannot corrupt them: sed matches
+`var(--legacy)` *usages*, and these are now declarations of literals.
+
+- [ ] **Step 2: Migrate every usage to the role names**
+
+Longest names first so prefixes cannot collide, and the `-soft` tints before their base colors:
+
+```bash
+sed -i 's/var(--surface-3)/var(--chrome-2)/g; s/var(--surface-2)/var(--chrome-2)/g; s/var(--surface)/var(--chrome-1)/g; s/var(--bg-deep)/var(--chrome-0)/g; s/var(--bg)/var(--chrome-0)/g; s/var(--border-soft)/var(--rule)/g; s/var(--border)/var(--rule)/g; s/var(--text-dim)/var(--ink-dim)/g; s/var(--text)/var(--ink)/g; s/var(--bright)/var(--ink-bright)/g; s/var(--green-soft)/var(--up-soft)/g; s/var(--red-soft)/var(--down-soft)/g; s/var(--amber-soft)/var(--warn-soft)/g; s/var(--green)/var(--up)/g; s/var(--red)/var(--down)/g; s/var(--amber)/var(--warn)/g' index.html
+```
+
+`--accent`, `--accent-ink` and `--accent-soft` keep their names and are deliberately absent
+from this mapping.
 
 - [ ] **Step 3: Replace violet**
 
@@ -358,6 +375,10 @@ git push
 
 From each of the six blocks, remove `--bg`, `--bg-deep`, `--surface`, `--surface-2`, `--surface-3`, `--border`, `--border-soft`, `--text`, `--text-dim`, `--bright`, `--green`, `--green-soft`, `--red`, `--red-soft`, `--amber`, `--amber-soft`.
 
+Before deleting, confirm each is genuinely unreferenced — Task 5 migrated all of them,
+including the three `-soft` tints, so `grep -c "var(--green-soft)\|var(--red-soft)\|var(--amber-soft)" index.html`
+must print `0`. If it does not, Task 5 was incomplete; fix that first.
+
 Keep `--accent`, `--accent-ink`, `--accent-soft`, `--chart-fill-top`, `--chart-fill-bot`, `--skeleton-shine`, `--shadow`, `color-scheme`, and the ten role tokens.
 
 - [ ] **Step 2: Pull Lagoon's chrome toward neutral**
@@ -377,7 +398,7 @@ The teal cast survives; the saturation does not. Terminal is the reference for h
 
 ```js
 const root = document.documentElement, prev = root.dataset.theme;
-const DEAD = ['--bg','--surface','--surface-2','--surface-3','--border','--border-soft','--text','--text-dim','--bright','--green','--red','--amber','--violet'];
+const DEAD = ['--bg','--surface','--surface-2','--surface-3','--border','--border-soft','--text','--text-dim','--bright','--green','--green-soft','--red','--red-soft','--amber','--amber-soft','--violet'];
 const out = THEMES.map(t => { root.dataset.theme = t.id; const cs = getComputedStyle(root);
   const alive = DEAD.filter(n => cs.getPropertyValue(n).trim());
   return `${t.id}: ${alive.length ? 'STILL SET ' + alive.join(',') : 'clean'}`; });
