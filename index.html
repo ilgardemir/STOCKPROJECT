@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-mode="dark">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -43,6 +43,55 @@
   --shadow:0 1px 2px rgba(19,32,46,.06), 0 8px 24px -12px rgba(19,32,46,.14);
   --skeleton-shine:rgba(255,255,255,.65);
   color-scheme: light;
+}
+/* The four palettes below are chrome-level restyles: every theme must define the same
+   variable set, since the whole stylesheet reads only these names. The monochrome pairs
+   keep a hued (if desaturated) --green/--red — up and down have to stay distinguishable
+   at a glance in a stock app, so those two are never collapsed into grey. THEMES in
+   app.js mirrors each id plus its bg/accent swatch, and must stay in sync with this list. */
+:root[data-theme="noir"] {            /* black + white */
+  --bg:#000000; --bg-deep:#000000; --surface:#0c0c0c; --surface-2:#161616; --surface-3:#212121;
+  --border:#2f2f2f; --border-soft:#1c1c1c; --text:#a8a8a8; --text-dim:#8a8a8a; --bright:#ffffff;
+  --accent:#ffffff; --accent-ink:#000000; --accent-soft:rgba(255,255,255,.12);
+  --green:#7fd39a; --green-soft:rgba(127,211,154,.10); --red:#e08d88; --red-soft:rgba(224,141,136,.10);
+  --amber:#d9bd84; --amber-soft:rgba(217,189,132,.10); --violet:#bfb6e8;
+  --chart-fill-top:rgba(255,255,255,.16); --chart-fill-bot:rgba(255,255,255,0);
+  --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 28px -12px rgba(0,0,0,.7);
+  --skeleton-shine:rgba(255,255,255,.08);
+  color-scheme: dark;
+}
+:root[data-theme="paper"] {           /* white + black */
+  --bg:#ffffff; --bg-deep:#f1f1f1; --surface:#ffffff; --surface-2:#f4f4f4; --surface-3:#e9e9e9;
+  --border:#cdcdcd; --border-soft:#e4e4e4; --text:#4a4a4a; --text-dim:#5c5c5c; --bright:#000000;
+  --accent:#000000; --accent-ink:#ffffff; --accent-soft:rgba(0,0,0,.08);
+  --green:#1d6b33; --green-soft:rgba(29,107,51,.09); --red:#a83a33; --red-soft:rgba(168,58,51,.08);
+  --amber:#7f6210; --amber-soft:rgba(127,98,16,.10); --violet:#4b3f8f;
+  --chart-fill-top:rgba(0,0,0,.13); --chart-fill-bot:rgba(0,0,0,0);
+  --shadow:0 1px 2px rgba(0,0,0,.07), 0 8px 24px -12px rgba(0,0,0,.18);
+  --skeleton-shine:rgba(255,255,255,.7);
+  color-scheme: light;
+}
+:root[data-theme="lagoon"] {          /* turquoise + pink */
+  --bg:#052b2b; --bg-deep:#032020; --surface:#0a3837; --surface-2:#0f4544; --surface-3:#155150;
+  --border:#1d6a67; --border-soft:#134e4c; --text:#a2d9d3; --text-dim:#8ac6c0; --bright:#f0fffb;
+  --accent:#ff4fa3; --accent-ink:#2c0418; --accent-soft:rgba(255,79,163,.14);
+  --green:#4fe8b0; --green-soft:rgba(79,232,176,.12); --red:#ff7a59; --red-soft:rgba(255,122,89,.12);
+  --amber:#ffd166; --amber-soft:rgba(255,209,102,.12); --violet:#c79bff;
+  --chart-fill-top:rgba(255,79,163,.22); --chart-fill-bot:rgba(255,79,163,0);
+  --shadow:0 1px 2px rgba(1,17,17,.4), 0 8px 28px -12px rgba(1,17,17,.6);
+  --skeleton-shine:rgba(255,255,255,.09);
+  color-scheme: dark;
+}
+:root[data-theme="matrix"] {          /* black + lime */
+  --bg:#000000; --bg-deep:#000000; --surface:#080c08; --surface-2:#0e150e; --surface-3:#162116;
+  --border:#26492a; --border-soft:#162b19; --text:#83c98b; --text-dim:#6dab74; --bright:#d8ffd8;
+  --accent:#8dff3a; --accent-ink:#061a00; --accent-soft:rgba(141,255,58,.12);
+  --green:#5cff7a; --green-soft:rgba(92,255,122,.10); --red:#ff5f4a; --red-soft:rgba(255,95,74,.12);
+  --amber:#e8d44d; --amber-soft:rgba(232,212,77,.10); --violet:#b48cf0;
+  --chart-fill-top:rgba(141,255,58,.20); --chart-fill-bot:rgba(141,255,58,0);
+  --shadow:0 1px 2px rgba(0,0,0,.6), 0 8px 28px -12px rgba(0,20,0,.8);
+  --skeleton-shine:rgba(141,255,58,.10);
+  color-scheme: dark;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -124,8 +173,10 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 #analyzeBtn svg { width: 12px; height: 12px; flex-shrink: 0; }
 
 /* Utility rail — screener, profile and theme share one housing with hairline
-   separators, so three unrelated-looking buttons read as a single object. */
-.util-rail { display: flex; align-items: center; flex-shrink: 0; height: var(--ctl-h);
+   separators, so three unrelated-looking buttons read as a single object.
+   position:relative anchors the theme menu; #themeMenu is absolutely positioned so it
+   stays out of the flex flow and :last-of-type still resolves to #themeBtn. */
+.util-rail { position: relative; display: flex; align-items: center; flex-shrink: 0; height: var(--ctl-h);
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
   transition: border-color .22s var(--ease), background .22s var(--ease); }
 .util-rail > button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -140,10 +191,38 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .rail-div { width: 1px; height: 17px; flex-shrink: 0; background: var(--border); transition: background .22s var(--ease); }
 #screenerNav:hover svg { transform: translateX(2px); }
 #themeBtn { width: 38px; padding: 0; }
-/* applyTheme() swaps the icon by replacing the node, so a keyframe (not a transition)
-   is what animates it — it re-runs on each insert. */
-#themeBtn svg { width: 16px; height: 16px; animation: themeSwap .34s var(--ease-out); }
-@keyframes themeSwap { from { opacity: 0; transform: rotate(-55deg) scale(.55); } }
+#themeBtn svg { width: 16px; height: 16px; }
+/* The palette's largest well carries the live accent, so the button previews the
+   active theme instead of just naming the menu. */
+#themeBtn .well { fill: var(--accent); stroke: none; transition: fill .35s var(--ease);
+  transform-box: fill-box; transform-origin: center; }
+#themeBtn[aria-expanded="true"] { color: var(--bright); background: var(--surface-3); }
+#themeBtn[aria-expanded="true"] svg { transform: rotate(-14deg) scale(1.06); }
+
+/* Theme menu — one popover of full-palette choices, replacing the old binary toggle */
+#themeMenu { position: absolute; top: calc(100% + 8px); right: 0; width: 244px; max-width: calc(100vw - 20px);
+  padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  box-shadow: var(--shadow); z-index: 70; display: none; }
+#themeMenu.open { display: block; animation: themeMenuIn .16s var(--ease-out); transform-origin: top right; }
+@keyframes themeMenuIn { from { opacity: 0; transform: translateY(-7px) scale(.96); } }
+.theme-menu-head { padding: 5px 8px 7px; font-family: var(--display); font-size: 10px; font-weight: 600;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--text-dim); }
+.theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; text-align: left;
+  background: none; border: none; border-radius: var(--radius-sm); cursor: pointer; color: var(--text);
+  transition: background .16s var(--ease), color .16s var(--ease); }
+.theme-opt:hover, .theme-opt.cursor { background: var(--surface-2); color: var(--bright); }
+.theme-opt[aria-checked="true"] { color: var(--bright); }
+/* Swatches are literal hex from the THEMES table, not vars — each row has to show its
+   own palette, not the one currently applied. */
+.theme-swatch { width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px; border: 1px solid var(--border);
+  background: linear-gradient(135deg, var(--sw-bg) 0 50%, var(--sw-accent) 50% 100%); }
+.theme-opt .tl { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.theme-opt .tl b { font-size: 12.5px; font-weight: 650; letter-spacing: .01em; }
+.theme-opt .tl span { font-size: 10.5px; color: var(--text-dim); }
+.theme-opt .tick { margin-left: auto; width: 14px; height: 14px; flex-shrink: 0; fill: none; stroke: var(--accent);
+  stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(.6);
+  transition: opacity .18s var(--ease), transform .22s var(--ease-spring); }
+.theme-opt[aria-checked="true"] .tick { opacity: 1; transform: none; }
 
 /* MySquall — compact profile control + locally saved preference editor */
 #profileBtn svg { stroke: var(--violet); }
@@ -856,8 +935,11 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #analyzeBtn { transition: filter .15s, transform .18s var(--ease), opacity .2s, box-shadow .25s var(--ease); }
 #analyzeBtn:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 6px 18px -8px var(--accent); }
 #analyzeBtn:active { transform: translateY(0) scale(.96); box-shadow: none; }
-#themeBtn svg { animation: themePop .45s var(--ease-spring); }
-@keyframes themePop { from { transform: scale(.3) rotate(-110deg); opacity: 0; } }
+#themeBtn svg { transition: transform .3s var(--ease-spring); }
+/* Applying a theme pops the button's accent well, so the click has a visible receipt
+   even when the menu closes over the change. */
+#themeBtn.picked .well { animation: themePop .5s var(--ease-spring); }
+@keyframes themePop { 0% { transform: scale(.2); } 60% { transform: scale(1.5); } 100% { transform: scale(1); } }
 
 /* Progress — sheen sweeps the fill while the pipeline runs */
 #progressFill { overflow: hidden; }
@@ -966,7 +1048,17 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
       <span>MySquall</span><i id="profileDot" aria-hidden="true"></i>
     </button>
     <span class="rail-div" aria-hidden="true"></span>
-    <button id="themeBtn" type="button" aria-label="Toggle theme"></button>
+    <button id="themeBtn" type="button" aria-label="Appearance" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 21a9 9 0 1 1 9-9c0 1.9-1.55 3-3.2 3H16.2a1.9 1.9 0 0 0-1.45 3.13A1.9 1.9 0 0 1 13.3 21Z"/>
+        <circle class="well" cx="15.4" cy="8.1" r="1.45"/>
+        <circle cx="10.6" cy="7.1" r="1.15" fill="currentColor" stroke="none"/>
+        <circle cx="7.2" cy="10.8" r="1.15" fill="currentColor" stroke="none"/>
+        <circle cx="7.9" cy="15.4" r="1.15" fill="currentColor" stroke="none"/>
+      </svg>
+    </button>
+    <!-- Populated by app.js from the THEMES table so the palette list has one source. -->
+    <div id="themeMenu" role="menu" aria-label="Color theme"></div>
   </div>
 </header>
 

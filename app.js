@@ -98,35 +98,114 @@ function setTip(el, text) {
   if ("tip" in el.dataset) el.dataset.tip = text; else el.title = text;
 }
 
-/* ════════════════ THEME ════════════════ */
-const SUN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
-const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>';
-function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  const themeBtn = document.getElementById("themeBtn");
-  themeBtn.innerHTML = t === "dark" ? SUN : MOON;
-  // Name the destination, not the control — "Toggle theme" never says where you land.
-  const label = t === "dark" ? "Switch to light theme" : "Switch to dark theme";
-  themeBtn.setAttribute("aria-label", label);
-  setTip(themeBtn, label);
-  try { localStorage.setItem("squall-theme", t); } catch (e) {}
+/* ════════════════ THEME ════════════════
+   Each entry mirrors a :root[data-theme="…"] block in index.html — adding a palette means
+   editing both. `mode` is the light/dark family, published on <html data-mode> for the few
+   places that need to know (canvas candle alpha) instead of testing for one theme id.
+   `bg`/`accent` are literal hex for the menu swatches: a swatch has to show its own
+   palette, so it can't read the vars of the theme currently applied. */
+const THEMES = [
+  { id: "dark",   label: "Midnight", note: "Slate + teal",      mode: "dark",  bg: "#0a0e14", accent: "#3fd0b6" },
+  { id: "light",  label: "Daylight", note: "Fog + teal",        mode: "light", bg: "#eef2f5", accent: "#0b8a78" },
+  { id: "noir",   label: "Noir",     note: "Black + white",     mode: "dark",  bg: "#000000", accent: "#ffffff" },
+  { id: "paper",  label: "Paper",    note: "White + black",     mode: "light", bg: "#ffffff", accent: "#000000" },
+  { id: "lagoon", label: "Lagoon",   note: "Turquoise + pink",  mode: "dark",  bg: "#052b2b", accent: "#ff4fa3" },
+  { id: "matrix", label: "Terminal", note: "Black + lime",      mode: "dark",  bg: "#000000", accent: "#8dff3a" },
+];
+const THEME_STORAGE_KEY = "squall-theme";
+const themeBtn = document.getElementById("themeBtn");
+const themeMenu = document.getElementById("themeMenu");
+
+function themeDef(id) { return THEMES.find(t => t.id === id) || THEMES[0]; }
+
+/* One-shot uniform color crossfade. Only a few elements transition color by default, so
+   without this most of the UI snaps while those few fade — it reads as choppy. Skipped on
+   first paint (nothing to fade from) and under reduced-motion. */
+function flashThemeTransition() {
+  if (REDUCED) return;
+  const root = document.documentElement;
+  root.classList.add("theme-anim");
+  clearTimeout(root._themeAnimT);
+  root._themeAnimT = setTimeout(() => root.classList.remove("theme-anim"), 420);
+}
+
+function applyTheme(id, animate) {
+  const def = themeDef(id);
+  const root = document.documentElement;
+  if (animate && root.dataset.theme !== def.id) flashThemeTransition();
+  root.dataset.theme = def.id;
+  root.dataset.mode = def.mode;
+  themeBtn.setAttribute("aria-label", `Appearance — ${def.label} theme`);
+  setTip(themeBtn, `Appearance · ${def.label}`);
+  themeMenu.querySelectorAll(".theme-opt").forEach(b =>
+    b.setAttribute("aria-checked", String(b.dataset.theme === def.id)));
+  try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
+  // Anything that samples resolved colors (hero wind field, future canvases) listens here
+  // rather than on the button — the button click now only opens the menu.
+  document.dispatchEvent(new CustomEvent("squall:theme", { detail: def }));
   // Defer the canvas repaint to the next frame so the CSS color transition starts
-  // immediately — redrawing synchronously here blocks paint and makes the toggle stutter.
+  // immediately — redrawing synchronously here blocks paint and makes the switch stutter.
   if (active && sessions[active]) requestAnimationFrame(() => { if (active && sessions[active]) drawChart(); });
 }
-(function () { let t; try { t = localStorage.getItem("squall-theme"); } catch (e) {}
-  if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; applyTheme(t); })();
-document.getElementById("themeBtn").onclick = () => {
-  const root = document.documentElement;
-  // Enable the one-shot uniform color crossfade only for user toggles (not initial load,
-  // which would fade in from the markup default). Removed after the transition window.
-  if (!REDUCED) {
-    root.classList.add("theme-anim");
-    clearTimeout(root._themeAnimT);
-    root._themeAnimT = setTimeout(() => root.classList.remove("theme-anim"), 420);
-  }
-  applyTheme(root.dataset.theme === "dark" ? "light" : "dark");
-};
+
+themeMenu.innerHTML =
+  `<div class="theme-menu-head">Theme</div>` +
+  THEMES.map(t => `<button class="theme-opt" type="button" role="menuitemradio" aria-checked="false"
+      data-theme="${t.id}" style="--sw-bg:${t.bg}; --sw-accent:${t.accent}">
+      <i class="theme-swatch" aria-hidden="true"></i>
+      <span class="tl"><b>${t.label}</b><span>${t.note}</span></span>
+      <svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+    </button>`).join("");
+
+(function () {
+  let saved; try { saved = localStorage.getItem(THEME_STORAGE_KEY); } catch (e) {}
+  // An unknown id (older build, hand-edited storage) falls back to the OS preference.
+  if (!saved || !THEMES.some(t => t.id === saved))
+    saved = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  applyTheme(saved, false);
+})();
+
+/* Menu open/close + roving keyboard focus */
+function themeMenuOpen() { return themeMenu.classList.contains("open"); }
+function openThemeMenu() {
+  themeMenu.classList.add("open");
+  themeBtn.setAttribute("aria-expanded", "true");
+  const checked = themeMenu.querySelector('.theme-opt[aria-checked="true"]') || themeMenu.querySelector(".theme-opt");
+  if (checked) { checked.classList.add("cursor"); checked.focus(); }
+}
+function closeThemeMenu(refocus) {
+  if (!themeMenuOpen()) return;
+  themeMenu.classList.remove("open");
+  themeBtn.setAttribute("aria-expanded", "false");
+  themeMenu.querySelectorAll(".cursor").forEach(b => b.classList.remove("cursor"));
+  if (refocus) themeBtn.focus();
+}
+function moveThemeCursor(step) {
+  const opts = [...themeMenu.querySelectorAll(".theme-opt")];
+  const from = opts.indexOf(document.activeElement);
+  const next = opts[(from + step + opts.length) % opts.length] || opts[0];
+  opts.forEach(b => b.classList.toggle("cursor", b === next));
+  next.focus();
+}
+
+themeBtn.addEventListener("click", () => { themeMenuOpen() ? closeThemeMenu(false) : openThemeMenu(); });
+themeMenu.addEventListener("click", e => {
+  const opt = e.target.closest(".theme-opt");
+  if (!opt) return;
+  applyTheme(opt.dataset.theme, true);
+  themeBtn.classList.remove("picked"); void themeBtn.offsetWidth; themeBtn.classList.add("picked");
+  closeThemeMenu(true);
+});
+themeMenu.addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); moveThemeCursor(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); moveThemeCursor(-1); }
+  else if (e.key === "Home") { e.preventDefault(); moveThemeCursor(-[...themeMenu.querySelectorAll(".theme-opt")].indexOf(document.activeElement)); }
+  else if (e.key === "Tab") closeThemeMenu(false);
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && themeMenuOpen()) { e.stopPropagation(); closeThemeMenu(true); } }, true);
+document.addEventListener("pointerdown", e => {
+  if (themeMenuOpen() && !themeMenu.contains(e.target) && !themeBtn.contains(e.target)) closeThemeMenu(false);
+});
 
 /* ════════════════ MYSQUALL PROFILE ════════════════ */
 const PROFILE_STORAGE_KEY = "squall-profile-v1";
@@ -1554,7 +1633,7 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(x, Y(p.high)); ctx.lineTo(x, Y(p.low)); ctx.stroke();
     // body
     const yO = Y(p.open), yC = Y(p.close); const top = Math.min(yO, yC); const hgt = Math.max(1, Math.abs(yC - yO));
-    if (up) { ctx.globalAlpha = document.documentElement.dataset.theme === "dark" ? .85 : 1; ctx.fillRect(x - bodyW / 2, top, bodyW, hgt); ctx.globalAlpha = 1; }
+    if (up) { ctx.globalAlpha = document.documentElement.dataset.mode === "dark" ? .85 : 1; ctx.fillRect(x - bodyW / 2, top, bodyW, hgt); ctx.globalAlpha = 1; }
     else { ctx.fillRect(x - bodyW / 2, top, bodyW, hgt); }
   });
 
@@ -2072,7 +2151,7 @@ document.getElementById("chartModalControls").addEventListener("change", functio
   hero.addEventListener("pointerleave", () => { cur.active = false; });
 
   window.addEventListener("resize", resize);
-  document.getElementById("themeBtn").addEventListener("click", () => { strokeColor = readAccent(); });
+  document.addEventListener("squall:theme", () => { strokeColor = readAccent(); });
   // Resume when the hero is shown again (goHome flips display back on).
   new MutationObserver(() => { if (hero.style.display !== "none") start(); })
     .observe(hero, { attributes: true, attributeFilter: ["style"] });
