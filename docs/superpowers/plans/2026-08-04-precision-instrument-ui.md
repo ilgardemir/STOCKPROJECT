@@ -238,7 +238,7 @@ Additive. Each role is declared alongside the existing token it aliases, so noth
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: `--chrome-0`, `--chrome-1`, `--chrome-2`, `--rule`, `--ink`, `--ink-dim`, `--ink-bright`, `--up`, `--down`, `--warn` in every theme
+- Produces: `--chrome-0`, `--chrome-1`, `--chrome-2`, `--rule`, `--ink`, `--ink-dim`, `--ink-bright`, `--up`, `--down`, `--warn`, `--up-soft`, `--down-soft`, `--warn-soft` in every theme — 13 roles, matching Step 1's code block exactly
 
 - [ ] **Step 1: Append the role block to each of the six themes**
 
