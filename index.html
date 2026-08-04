@@ -10,12 +10,17 @@
 <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&family=Chakra+Petch:wght@600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&family=Chakra+Petch:wght@600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
 <style>
 :root {
   --sans: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'Courier New', monospace;
   --display: 'Chakra Petch', 'Schibsted Grotesk', system-ui, sans-serif;
+  --doc: 'Newsreader', Georgia, 'Times New Roman', serif;
+  /* Instrument register is dense; document register is for reading. */
+  --t-micro: 10px; --t-data: 12px; --t-body: 13px; --t-lead: 15px;
+  --t-doc: 16px; --t-doc-h: 20px; --t-title: 22px;
+  --lh-tight: 1.35; --lh-doc: 1.6; --measure: 66ch;
   /* Softer than the original 10/8/6 set. --radius-xs exists so micro-chips (counts,
      badges, code spans) round with the system instead of pinning themselves at 4px,
      which was where the UI still read as sharp. */
