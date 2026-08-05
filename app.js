@@ -1053,12 +1053,15 @@ document.querySelectorAll("[data-screen-example]").forEach(button => button.addE
 
 /* ════════════════ RENDER HELPERS ════════════════ */
 let _cardN = 0;
-function card(id, icon, title, bodyHtml, { open = true, count = null, source = null } = {}) {
+/* `icon` is accepted and ignored: an icon on every one of 19 section headers is
+   decoration when the header already names the section. Kept in the signature so the
+   call sites stay untouched; delete both together if the icons never come back. */
+function card(id, _icon, title, bodyHtml, { open = true, count = null, source = null } = {}) {
   _cardN++;
   const src = source
     ? `<span class="src" data-src="${source.kind}" title="Extracted from ${esc(source.label)}">${esc(source.label)}</span>` : "";
   return `<details class="card" id="card-${id}" ${open ? "open" : ""} style="--d:${Math.min(_cardN * 0.03, 0.3)}s">
-    <summary>${icon}<span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}${src}
+    <summary><span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}${src}
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </summary><div class="card-body">${bodyHtml}</div></details>`;
 }
