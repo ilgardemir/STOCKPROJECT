@@ -23,6 +23,12 @@
      badges, code spans) round with the system instead of pinning themselves at 4px,
      which was where the UI still read as sharp. */
   --radius: 12px; --radius-sm: 8px; --radius-md: 10px; --radius-xs: 6px;
+  /* Not a fourth surface — a state derived from the third. Collapsing the old five-step
+     neutral ramp to three left hover states and skeleton bars resolving to the same value
+     as the surface they sit on, so they vanished. This nudges --chrome-2 toward the text
+     color, which lightens in dark themes and darkens in light ones without a new literal
+     per theme. --rule is too near --chrome-2 in the dark palettes to do the job. */
+  --chrome-hi: color-mix(in srgb, var(--chrome-2) 89%, var(--ink));
   --header-h: 58px; --ctl-h: 36px;
   --ease: cubic-bezier(.22,.9,.32,1);
   --ease-out: cubic-bezier(.16,1,.3,1);
@@ -221,7 +227,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
   transition: color .2s var(--ease), background .2s var(--ease); }
 .util-rail > button:first-of-type { border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); }
 .util-rail > button:last-of-type { border-radius: 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0; }
-.util-rail > button:hover { color: var(--ink-bright); background: var(--chrome-2); }
+.util-rail > button:hover { color: var(--ink-bright); background: var(--chrome-hi); }
 .util-rail > button svg { width: 15px; height: 15px; flex-shrink: 0; transition: transform .3s var(--ease-spring); }
 .util-rail > button:active svg { transform: scale(.85); }
 .rail-div { width: 1px; height: 17px; flex-shrink: 0; background: var(--rule); transition: background .22s var(--ease); }
@@ -232,7 +238,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
    active theme instead of just naming the menu. */
 #themeBtn .well { fill: var(--accent); stroke: none; transition: fill .35s var(--ease);
   transform-box: fill-box; transform-origin: center; }
-#themeBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-2); }
+#themeBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
 #themeBtn[aria-expanded="true"] svg { transform: rotate(-14deg) scale(1.06); }
 
 /* Theme menu — one popover of full-palette choices, replacing the old binary toggle */
@@ -467,7 +473,11 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .screen-refine-head > span { flex-shrink: 0; color: var(--ink-dim); font: 9px var(--mono); }
 .screen-chat-messages { max-height: 290px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
 .screen-chat-msg { max-width: min(720px,88%); padding: 9px 11px; border-radius: var(--radius); background: var(--chrome-2); }
-.screen-chat-msg.user { align-self: flex-end; background: var(--chrome-2); }.screen-chat-msg.assistant { align-self: flex-start; }
+/* Same idiom as the main chat: the user's turn is the accent block, the model's is the
+   plain surface. Violet used to carry this; without it the two bubbles were identical. */
+.screen-chat-msg.user { align-self: flex-end; background: var(--accent); }
+.screen-chat-msg.user span, .screen-chat-msg.user p { color: var(--accent-ink); }
+.screen-chat-msg.assistant { align-self: flex-start; }
 .screen-chat-msg span { display: block; margin-bottom: 3px; color: var(--ink-dim); font: 8px var(--mono); text-transform: uppercase; }.screen-chat-msg p { color: var(--ink); font-size: 11px; line-height: 1.5; }
 .screen-refine-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 11px; }
 .screen-refine-prompts button { border: 1px solid var(--rule); border-radius: var(--radius-xs); background: transparent; color: var(--ink-dim); padding: 6px 9px; cursor: pointer; font-size: 10px; }.screen-refine-prompts button:hover { color: var(--ink-bright); border-color: var(--accent); background: var(--chrome-2); }
@@ -649,7 +659,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 
 .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; }
 .metric { background: var(--chrome-2); border-radius: var(--radius-sm); padding: 9px 11px; transition: background .2s, transform .2s var(--ease); }
-.metric:hover { background: var(--chrome-2); transform: translateY(-1px); }
+.metric:hover { background: var(--chrome-hi); transform: translateY(-1px); }
 .metric .k { font-size: 10px; font-weight: 600; color: var(--ink-dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
 .metric .v { font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--ink-bright); }
 .metric .v.green { color: var(--up); } .metric .v.red { color: var(--down); } .metric .v.amber { color: var(--warn); }
@@ -962,8 +972,8 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .sk-line { height: 10px; border-radius: var(--radius-xs); }
 .sk-title { width: 42%; max-width: 200px; }
 .sk-metric { background: var(--chrome-2); border-radius: var(--radius-sm); padding: 9px 11px; }
-.sk-metric .sk-k { width: 62%; height: 8px; margin-bottom: 8px; background: var(--chrome-2); }
-.sk-metric .sk-v { width: 84%; height: 13px; background: var(--chrome-2); }
+.sk-metric .sk-k { width: 62%; height: 8px; margin-bottom: 8px; background: var(--chrome-hi); }
+.sk-metric .sk-v { width: 84%; height: 13px; background: var(--chrome-hi); }
 .sk-chart { height: 220px; width: 100%; border-radius: var(--radius-sm); }
 .sk-prose { padding: 4px 2px; }
 .sk-prose .sk-h { width: 34%; height: 12px; margin: 20px 0 12px; background: var(--chrome-2); }
@@ -1088,7 +1098,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #tip.below::before { top: 0; border: 0; border-left: 1px solid var(--rule); border-top: 1px solid var(--rule); transform: translate(-50%, -45%) rotate(45deg); }
 
 .analysis-tab { transition: background .18s, color .18s, border-color .18s; }
-.analysis-tab:not(.active):hover { color: var(--ink); background: var(--chrome-2); }
+.analysis-tab:not(.active):hover { color: var(--ink); background: var(--chrome-hi); }
 </style>
 </head>
 <body>
