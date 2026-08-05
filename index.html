@@ -461,37 +461,20 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 
 /* ═══ SCREENER MOTION ═══ */
 /* View entrance */
-#screenerView.show .screen-kicker { animation: riseIn .4s var(--ease-out) backwards .04s; }
-#screenerView.show .screen-head h1 { animation: riseIn .5s var(--ease-out) backwards .1s; }
-#screenerView.show .screen-head p { animation: riseIn .5s var(--ease-out) backwards .16s; }
-#screenerView.show #screenForm { animation: riseIn .5s var(--ease-out) backwards .22s; }
 .screen-example { transition: color .15s, border-color .15s, background .15s; }
 #screenForm { transition: border-color .25s, box-shadow .25s; }
 #screenForm:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
 #screenRun { transition: filter .15s, background .15s; }
 #screenRun:hover:not(:disabled) { filter: brightness(1.08); }
 
-/* Recipe: container rises, chips pop in as a cascade */
-.recipe { animation: riseIn .45s var(--ease-out) backwards; }
-.recipe-chips > * { animation: popIn .38s var(--ease-spring) backwards; }
-.recipe-chips > :nth-child(1) { animation-delay: .05s; } .recipe-chips > :nth-child(2) { animation-delay: .09s; }
-.recipe-chips > :nth-child(3) { animation-delay: .13s; } .recipe-chips > :nth-child(4) { animation-delay: .17s; }
-.recipe-chips > :nth-child(5) { animation-delay: .21s; } .recipe-chips > :nth-child(6) { animation-delay: .25s; }
-.recipe-chips > :nth-child(7) { animation-delay: .29s; } .recipe-chips > :nth-child(8) { animation-delay: .33s; }
-.recipe-chips > :nth-child(9) { animation-delay: .37s; } .recipe-chips > :nth-child(10) { animation-delay: .41s; }
-
-/* Results enter sequentially so newly rendered matches are easy to track. */
-.screen-results-head { animation: riseIn .4s var(--ease-out) backwards; }
+/* Results */
 .screen-result { position: relative; overflow: hidden;
-  animation: resultIn .35s var(--ease-out) backwards; animation-delay: calc(min(var(--i, 0), 14) * .035s);
   transition: transform .2s var(--ease), border-color .2s, box-shadow .25s var(--ease); }
-@keyframes resultIn { from { opacity: 0; transform: translateY(5px); } }
 .screen-result:hover { transform: translateY(-3px); border-color: var(--rule); box-shadow: 0 12px 32px -14px rgba(5,12,20,.55); }
 .screen-symbol { transition: color .15s, border-color .15s; }
 /* Breakdown bars grow from zero after the card lands (from-only keyframe → animates to inline width) */
 .sb-bar b { animation: sbGrow .7s var(--ease-out) backwards; animation-delay: calc(min(var(--i, 0), 14) * .05s + .25s); }
 @keyframes sbGrow { from { width: 0; } }
-.screen-empty { animation: riseIn .45s var(--ease-out) backwards; }
 
 /* Scroll reveal — a screen can return 50+ matches, so most of the render-time cascade
    above used to play (and count its score ring up) far below the fold, where nobody saw
@@ -508,8 +491,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .screen-result.screen-reveal .sb-bar b { animation: none; transition: width .7s var(--ease-out) .14s; }
 .screen-result.screen-reveal:not(.in) .sb-bar b { width: 0 !important; }
 
-/* Refine panel: rises in; chat messages share the analyzer's msgIn; prompt chips lift */
-.screen-refine { animation: riseIn .5s var(--ease-out) backwards .12s; }
+/* Refine panel: chat messages share the analyzer's msgIn; prompt chips lift */
 .screen-chat-msg { animation: msgIn .3s var(--ease) backwards; }
 .screen-refine-prompts button { transition: color .15s, border-color .15s, background .15s; }
 
@@ -615,14 +597,11 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 .card[open] > summary .chev { transform: rotate(180deg); }
 .card > summary .count { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--ink-dim); background: var(--chrome-2); border-radius: var(--radius-xs); padding: 1px 7px; letter-spacing: 0; }
 /* Extraction provenance — names the pipeline a card's numbers came out of (SEC EDGAR's
-   filing read vs the yahooquery market pull). Pops in a beat after the card lands so the
-   card reads first and the attribution arrives behind it; --d is inherited from .card, so
-   each badge trails its own card through the stagger. Small and low-contrast on purpose:
-   it is a footnote, not a heading. */
+   filing read vs the yahooquery market pull). Small and low-contrast on purpose: it is a
+   footnote, not a heading. */
 .card > summary .src { font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: .03em;
   text-transform: none; padding: 1px 6px; border-radius: var(--radius-xs); border: 1px solid transparent;
-  white-space: nowrap; flex-shrink: 0;                       /* a narrow pane wraps the title, not this */
-  animation: popIn .42s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .34s); }
+  white-space: nowrap; flex-shrink: 0; }                     /* a narrow pane wraps the title, not this */
 /* The two pipelines are told apart by treatment, not hue: the market pull is accent-tinted,
    the filing read is a plain ruled chip. One accent, two readable states. */
 .card > summary .src[data-src="sec"] { color: var(--ink-dim);
@@ -973,11 +952,6 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 
 /* ═══ MOTION SYSTEM — entrance choreography, ambient wind, micro-interactions ═══ */
 @keyframes riseIn { from { opacity: 0; transform: translateY(8px); } }
-@keyframes slideGust { from { opacity: 0; transform: translateX(-14px); } }
-@keyframes popIn { from { opacity: 0; transform: scale(.55); } }
-@keyframes rowIn { from { opacity: 0; } }
-@keyframes growX { from { transform: scaleX(0); } }
-@keyframes markerPop { from { opacity: 0; transform: translate(-50%,-50%) scale(0); } }
 
 /* Hero — orchestrated page-load sequence: icon → title → copy → chips */
 #hero > .wind { animation: riseIn .6s var(--ease-out) backwards .05s; }
@@ -988,20 +962,9 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #hero .examples .chip { animation: riseIn .3s var(--ease-out) backwards .35s; }
 #hero .hero-actions { animation: riseIn .6s var(--ease-out) backwards .48s; }
 
-/* Hero ambience — dot grid drifts like wind-blown drizzle.
-   The three CSS .hero-streaks that used to cross the copy were removed: the wind-field
-   canvas below already draws drifting streaks, so they were a second, worse copy of the
-   same effect layered on top of it. One ambient layer, not two. */
-#hero::before { animation: dotDrift 70s linear infinite; }
-@keyframes dotDrift { to { background-position: 210px -30px; } }
 /* Cursor-reactive wind field (canvas, injected by app.js). Ambient streaks drift and
    part around the cursor as it moves. Above the dot grid, below the copy. */
 #hero .wind-field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
-/* Wordmark — ambient gust every ~11s (hover still triggers the fast one) */
-.wordmark .wind path { animation: gustIdle 11s var(--ease) infinite; }
-@keyframes gustIdle { 0% { stroke-dashoffset: 0; opacity: 1; } 5% { stroke-dashoffset: 60; opacity: 0; }
-  5.5% { stroke-dashoffset: -60; } 12% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: 1; } }
 
 /* Header controls */
 #analyzeBtn { transition: filter .15s, transform .18s var(--ease), opacity .2s, box-shadow .25s var(--ease); }
@@ -1019,43 +982,8 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
   background: linear-gradient(90deg, transparent, rgba(255,255,255,.28), transparent); animation: fillSheen 1.5s ease-in-out infinite; }
 @keyframes fillSheen { to { transform: translateX(100%); } }
 
-/* Summary strip — company → ticker → price → pill cascade */
-#summaryStrip.show > * { animation: riseIn .45s var(--ease-out) backwards; }
-#summaryStrip.show > :nth-child(1) { animation-delay: .03s; }
-#summaryStrip.show > :nth-child(2) { animation-delay: .08s; }
-#summaryStrip.show > :nth-child(3) { animation-delay: .13s; }
-#summaryStrip.show > :nth-child(4) { animation-delay: .19s; }
-#summaryStrip.show > :nth-child(5) { animation-delay: .25s; }
-#summaryStrip.show > :nth-child(6) { animation-delay: .3s; }
-#summaryStrip.show > :nth-child(7) { animation-delay: .35s; }
-#summaryStrip.show > .pill { animation: popIn .5s var(--ease-spring) backwards .22s; }
-
-/* Data pane choreography — inherits each card's stagger via --d */
-#dataBody .mgrid .metric { animation: riseIn .35s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .05s + var(--mi, 11) * .015s); }
-#dataBody .mgrid .metric:nth-child(1) { --mi: 0; } #dataBody .mgrid .metric:nth-child(2) { --mi: 1; }
-#dataBody .mgrid .metric:nth-child(3) { --mi: 2; } #dataBody .mgrid .metric:nth-child(4) { --mi: 3; }
-#dataBody .mgrid .metric:nth-child(5) { --mi: 4; } #dataBody .mgrid .metric:nth-child(6) { --mi: 5; }
-#dataBody .mgrid .metric:nth-child(7) { --mi: 6; } #dataBody .mgrid .metric:nth-child(8) { --mi: 7; }
-#dataBody .mgrid .metric:nth-child(9) { --mi: 8; } #dataBody .mgrid .metric:nth-child(10) { --mi: 9; }
-#dataBody .mgrid .metric:nth-child(11) { --mi: 10; }
-#dataBody .signal { animation: slideGust .32s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .05s + var(--si, 6) * .03s); }
-#dataBody .signal:nth-child(1) { --si: 0; } #dataBody .signal:nth-child(2) { --si: 1; }
-#dataBody .signal:nth-child(3) { --si: 2; } #dataBody .signal:nth-child(4) { --si: 3; }
-#dataBody .signal:nth-child(5) { --si: 4; } #dataBody .signal:nth-child(6) { --si: 5; }
-#dataBody .rb-fill { transform-origin: left center; animation: growX .5s var(--ease-out) backwards; animation-delay: calc(var(--d, 0s) + .15s); }
-#dataBody .rb-marker { animation: markerPop .45s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .4s); }
-#dataBody .lvl { animation: popIn .35s var(--ease-spring) backwards; animation-delay: calc(var(--d, 0s) + .08s + var(--li, 9) * .02s); }
-#dataBody .lvl:nth-child(1) { --li: 0; } #dataBody .lvl:nth-child(2) { --li: 1; }
-#dataBody .lvl:nth-child(3) { --li: 2; } #dataBody .lvl:nth-child(4) { --li: 3; }
-#dataBody .lvl:nth-child(5) { --li: 4; } #dataBody .lvl:nth-child(6) { --li: 5; }
-#dataBody .lvl:nth-child(7) { --li: 6; } #dataBody .lvl:nth-child(8) { --li: 7; }
-#dataBody .lvl:nth-child(9) { --li: 8; }
-#dataBody tbody tr { animation: rowIn .3s ease backwards; animation-delay: calc(var(--d, 0s) + .06s + var(--ri, 10) * .02s); }
-#dataBody tbody tr:nth-child(1) { --ri: 0; } #dataBody tbody tr:nth-child(2) { --ri: 1; }
-#dataBody tbody tr:nth-child(3) { --ri: 2; } #dataBody tbody tr:nth-child(4) { --ri: 3; }
-#dataBody tbody tr:nth-child(5) { --ri: 4; } #dataBody tbody tr:nth-child(6) { --ri: 5; }
-#dataBody tbody tr:nth-child(7) { --ri: 6; } #dataBody tbody tr:nth-child(8) { --ri: 7; }
-#dataBody tbody tr:nth-child(9) { --ri: 8; } #dataBody tbody tr:nth-child(10) { --ri: 9; }
+/* Data pane — .rb-fill keeps its transform-origin for the risk-bar fill's inline scaleX */
+#dataBody .rb-fill { transform-origin: left center; }
 
 /* Card micro-interactions */
 .sec-icon { transition: transform .35s var(--ease-spring); }
