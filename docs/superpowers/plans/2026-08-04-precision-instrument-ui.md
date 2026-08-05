@@ -288,6 +288,10 @@ git push
 
 **Files:**
 - Modify: `index.html` — 19 `var(--surface-3)` usages, all border/text usages, 33 violet usages
+- Modify: `app.js` — ~30 legacy references the original scoping missed: inline `style="…var(--text-dim)…"`
+  strings and the canvas `cssVar("--green")` / `cssVar("--violet")` reads. These are usages exactly
+  like the stylesheet's, and Task 6 deletes the declarations they resolve against, so they must be
+  migrated here or the chart silently loses its colors.
 
 **Interfaces:**
 - Consumes: role tokens from Task 4
@@ -378,6 +382,10 @@ From each of the six blocks, remove `--bg`, `--bg-deep`, `--surface`, `--surface
 Before deleting, confirm each is genuinely unreferenced — Task 5 migrated all of them,
 including the three `-soft` tints, so `grep -c "var(--green-soft)\|var(--red-soft)\|var(--amber-soft)" index.html`
 must print `0`. If it does not, Task 5 was incomplete; fix that first.
+
+Check `app.js` too, not just the stylesheet — it reads these tokens through `cssVar()` and inline
+styles. Task 5 migrated it; `grep -cE '\-\-(bg|surface|border|text|bright|green|red|amber|violet)\b' app.js`
+must also print `0`.
 
 Keep `--accent`, `--accent-ink`, `--accent-soft`, `--chart-fill-top`, `--chart-fill-bot`, `--skeleton-shine`, `--shadow`, `color-scheme`, and the ten role tokens.
 

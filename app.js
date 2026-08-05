@@ -593,7 +593,7 @@ function runAnalysis() {
     let msg = "Connection lost. Is the server running? (node server.js)";
     try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
     showProgress(0, 7, "Error: " + msg, true);
-    document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--red);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
+    document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--down);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
       <button class="retry-btn" onclick="retryAnalysis('${jsAttr(query)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
     btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(3000);
@@ -1272,7 +1272,7 @@ function renderAll(d) {
       ${metric("Recent Swing Low", fUsd(pa.recent_swing_low))}</div>`;
     if (pa.fib && Object.keys(pa.fib).length) {
       body += `<div class="lvl-label">Fibonacci retracement (last swing leg)</div><div class="levels">`;
-      Object.entries(pa.fib).forEach(([k, val]) => body += `<span class="lvl" style="color:var(--violet);background:rgba(157,140,240,.12)">${k} · ${fUsd(val)}</span>`);
+      Object.entries(pa.fib).forEach(([k, val]) => body += `<span class="lvl" style="color:var(--ink-dim);background:var(--chrome-2)">${k} · ${fUsd(val)}</span>`);
       body += `</div>`;
     }
     html += card("priceaction", I.struct, "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) });
@@ -1282,7 +1282,7 @@ function renderAll(d) {
   if (inst.signals || inst.net_bias) {
     const bias = inst.net_bias || "NEUTRAL";
     const biasCls = bias === "ACCUMULATION" ? "green" : bias === "DISTRIBUTION" ? "red" : "";
-    let body = `<label class="toggle ${chartOpts.instWindow ? "on" : ""}" style="--swatch:var(--violet);margin-bottom:10px">
+    let body = `<label class="toggle ${chartOpts.instWindow ? "on" : ""}" style="--swatch:var(--ink);margin-bottom:10px">
       <input type="checkbox" id="instToggle" ${chartOpts.instWindow ? "checked" : ""} onchange="toggleInstFocus(this.checked)">
       Focus the next question on institutional positioning</label>
       <div class="mgrid">
@@ -1330,7 +1330,7 @@ function renderAll(d) {
     ${metric("Equity", fUsd(sec.equity))}${metric("Operating CF", fUsd(sec.ocf), signCls(sec.ocf))}
     ${metric("Rev CAGR (3Y)", fPct(sec.rev_cagr_3y), signCls(sec.rev_cagr_3y))}</div>`;
   if (d.sec_filing && d.sec_filing.source_url)
-    secBody += `<p style="margin-top:10px;font-size:12px;color:var(--text-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
+    secBody += `<p style="margin-top:10px;font-size:12px;color:var(--ink-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
   if (d.sec_available === false)
     secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker — figures rely on the market-data provider only.</div>` + secBody;
   html += card("sec", I.bank, "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) });
@@ -1386,14 +1386,14 @@ function renderAll(d) {
       ${metric("Insider Sells <small>(90D)</small>", String(fa.insider_sells ?? 0), fa.insider_sells >= 5 ? "red" : "")}
       ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
     body += `<div class="lvl-label">8-K events (last 90 days)</div><div class="levels">` +
-      (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--text);background:var(--surface-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--text-dim)">None filed.</span>`) + `</div>`;
+      (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
     html += card("filings", I.doc, "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
   }
 
   /* Options */
   const od = d.options_data || {};
   if (od.chains && od.chains.length) {
-    let body = `<p style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Available expirations: <span style="font-family:var(--mono)">${(od.available_expirations || []).map(esc).join(" · ")}</span></p>`;
+    let body = `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:4px">Available expirations: <span style="font-family:var(--mono)">${(od.available_expirations || []).map(esc).join(" · ")}</span></p>`;
     od.chains.forEach(ch => {
       body += `<div class="opt-exp"><b>${esc(ch.expiration)}</b><span>${ch.days_to_exp} days out</span><span>ATM ${fUsd(ch.atm_strike)}</span>${isNum(od.iv_summary?.[ch.expiration]) ? `<span>IV ${fPct(od.iv_summary[ch.expiration], 1)}</span>` : ""}</div><div class="opt-pair">`;
       [["calls", ch.calls], ["puts", ch.puts]].forEach(([side, arr]) => {
@@ -1413,7 +1413,7 @@ function renderAll(d) {
   /* Raw prompt */
   if (d.ai_prompt)
     html += card("prompt", I.brain, "Exact Data Sent to the AI",
-      `<p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
+      `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
        <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
        <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
 
@@ -1474,13 +1474,13 @@ function chartCardBody() {
       ${dash ? `<span class="dash ${dotted ? "dotted" : ""}"></span>` : ""}${label}</label>`;
   return `<div id="chartControls">
     ${tog("ma20", "MA 20", "var(--accent)", true)}
-    ${tog("ma50", "MA 50", "var(--amber)", true)}
-    ${tog("ma200", "MA 200", "var(--text-dim)", true)}
-    ${tog("bb", "Bollinger", "var(--violet)", true, true)}
-    ${tog("fib", "Auto Fib", "var(--violet)", true, true)}
-    ${tog("sr", "Support / Resistance", "var(--red)", true, true)}
+    ${tog("ma50", "MA 50", "var(--warn)", true)}
+    ${tog("ma200", "MA 200", "var(--ink-dim)", true)}
+    ${tog("bb", "Bollinger", "var(--ink)", true, true)}
+    ${tog("fib", "Auto Fib", "var(--ink-dim)", true, true)}
+    ${tog("sr", "Support / Resistance", "var(--down)", true, true)}
     ${tog("pct", "% scale", "var(--accent)", false)}
-    ${tog("vol", "Volume", "var(--text-dim)", false)}
+    ${tog("vol", "Volume", "var(--ink-dim)", false)}
     <button class="chart-tool-btn" type="button" data-chart-action="draw-fib">Draw Fib</button>
     <button class="chart-tool-btn quiet" type="button" data-chart-action="clear-fib">Clear Fib</button>
     <span class="fib-status" data-fib-status></span>
@@ -1606,8 +1606,8 @@ function drawChart() {
   }
 
   const kl = d.raw_data?.key_levels || {};
-  const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(isNum).map(x => [x, cssVar("--red")]),
-                                   ...(kl.support || []).filter(isNum).map(x => [x, cssVar("--green")])] : [];
+  const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(isNum).map(x => [x, cssVar("--down")]),
+                                   ...(kl.support || []).filter(isNum).map(x => [x, cssVar("--up")])] : [];
   const manualAnchors = sess.fibAnchors;
   const fib = chartOpts.fib ? (manualFibLevels(manualAnchors) || d.price_action?.fib || null) : null;
 
@@ -1629,15 +1629,15 @@ function drawChart() {
   const bodyW = Math.max(1, Math.min(cw * 0.66, 13));
 
   // grid + y axis ($)
-  ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.fillStyle = cssVar("--text-dim"); ctx.strokeStyle = cssVar("--border-soft"); ctx.lineWidth = 1;
+  ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.fillStyle = cssVar("--ink-dim"); ctx.strokeStyle = cssVar("--rule"); ctx.lineWidth = 1;
   for (let g = 0; g <= 4; g++) { const val = lo + g / 4 * (hi - lo), y = Y(val);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
     ctx.textAlign = "left"; ctx.fillText(val >= 1000 ? "$" + (val / 1000).toFixed(1) + "k" : "$" + val.toFixed(val < 10 ? 2 : 0), 6, y + 3);
     if (chartOpts.pct) { const base = data[0].close; const pc = ((val - base) / base) * 100;
-      ctx.textAlign = "left"; ctx.fillStyle = cssVar("--text-dim"); ctx.fillText((pc >= 0 ? "+" : "") + pc.toFixed(0) + "%", W - padR + 6, y + 3); }
+      ctx.textAlign = "left"; ctx.fillStyle = cssVar("--ink-dim"); ctx.fillText((pc >= 0 ? "+" : "") + pc.toFixed(0) + "%", W - padR + 6, y + 3); }
   }
   // x axis (dates)
-  ctx.textAlign = "center"; ctx.fillStyle = cssVar("--text-dim");
+  ctx.textAlign = "center"; ctx.fillStyle = cssVar("--ink-dim");
   for (let g = 0; g <= 4; g++) { const i = Math.round(g / 4 * (data.length - 1)); ctx.fillText(data[i].date.slice(2), X(i), H - 8); }
 
   // everything painted after the axes is clipped to the reveal front
@@ -1648,7 +1648,7 @@ function drawChart() {
   if (chartOpts.vol) {
     const maxVol = Math.max(...data.map(p => p.volume || 0)) || 1;
     data.forEach((p, i) => { const h = (p.volume || 0) / maxVol * (volH - 6);
-      ctx.fillStyle = (p.close >= p.open ? cssVar("--green") : cssVar("--red")); ctx.globalAlpha = .35;
+      ctx.fillStyle = (p.close >= p.open ? cssVar("--up") : cssVar("--down")); ctx.globalAlpha = .35;
       ctx.fillRect(X(i) - bodyW / 2, H - 6 - h, bodyW, h); ctx.globalAlpha = 1; });
   }
 
@@ -1657,10 +1657,12 @@ function drawChart() {
     ctx.beginPath(); let started = false;
     bb.up.forEach((x, i) => { if (!isNum(x)) return; started ? ctx.lineTo(X(i), Y(x)) : ctx.moveTo(X(i), Y(x)); started = true; });
     for (let i = bb.lo.length - 1; i >= 0; i--) if (isNum(bb.lo[i])) ctx.lineTo(X(i), Y(bb.lo[i]));
-    ctx.closePath(); ctx.fillStyle = "rgba(157,140,240,.07)"; ctx.fill();
+    // Tint from the token rather than a literal, so the band tracks the theme. cssVar returns
+    // an opaque color, so the transparency comes from globalAlpha instead of an rgba().
+    ctx.closePath(); ctx.fillStyle = cssVar("--ink"); ctx.globalAlpha = .07; ctx.fill(); ctx.globalAlpha = 1;
     [["up", bb.up], ["lo", bb.lo]].forEach(([, arr]) => { ctx.beginPath(); let st = false;
       arr.forEach((x, i) => { if (!isNum(x)) return; st ? ctx.lineTo(X(i), Y(x)) : ctx.moveTo(X(i), Y(x)); st = true; });
-      ctx.strokeStyle = cssVar("--violet"); ctx.globalAlpha = .5; ctx.lineWidth = 1; ctx.stroke(); ctx.globalAlpha = 1; });
+      ctx.strokeStyle = cssVar("--ink"); ctx.globalAlpha = .5; ctx.lineWidth = 1; ctx.stroke(); ctx.globalAlpha = 1; });
   }
 
   // S/R lines
@@ -1670,9 +1672,9 @@ function drawChart() {
 
   // Fibonacci
   if (fib) { Object.entries(fib).forEach(([k, val]) => { if (!isNum(val)) return;
-    ctx.strokeStyle = cssVar("--violet"); ctx.globalAlpha = .4; ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .4; ctx.setLineDash([2, 3]);
     ctx.beginPath(); ctx.moveTo(padL, Y(val)); ctx.lineTo(W - padR, Y(val)); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
-    ctx.fillStyle = cssVar("--violet"); ctx.textAlign = "right"; ctx.fillText(k, W - padR - 3, Y(val) - 3); }); }
+    ctx.fillStyle = cssVar("--ink-dim"); ctx.textAlign = "right"; ctx.fillText(k, W - padR - 3, Y(val) - 3); }); }
 
   // A custom Fib has a visible swing leg and draggable endpoints.
   const anchorPoint = anchor => {
@@ -1682,15 +1684,15 @@ function drawChart() {
   };
   const startPoint = anchorPoint(manualAnchors?.start), endPoint = anchorPoint(manualAnchors?.end);
   if (startPoint && endPoint) {
-    ctx.strokeStyle = cssVar("--violet"); ctx.lineWidth = 1.4; ctx.globalAlpha = .8;
+    ctx.strokeStyle = cssVar("--accent"); ctx.lineWidth = 1.4; ctx.globalAlpha = .8;
     ctx.beginPath(); ctx.moveTo(startPoint.x, startPoint.y); ctx.lineTo(endPoint.x, endPoint.y); ctx.stroke(); ctx.globalAlpha = 1;
-    [startPoint, endPoint].forEach(point => { ctx.beginPath(); ctx.arc(point.x, point.y, 5, 0, Math.PI * 2); ctx.fillStyle = cssVar("--surface"); ctx.fill(); ctx.strokeStyle = cssVar("--violet"); ctx.lineWidth = 2; ctx.stroke(); });
+    [startPoint, endPoint].forEach(point => { ctx.beginPath(); ctx.arc(point.x, point.y, 5, 0, Math.PI * 2); ctx.fillStyle = cssVar("--chrome-1"); ctx.fill(); ctx.strokeStyle = cssVar("--accent"); ctx.lineWidth = 2; ctx.stroke(); });
   }
   const pendingPoint = fibInteraction.ticker === active ? anchorPoint(fibInteraction.pending) : null;
-  if (pendingPoint) { ctx.beginPath(); ctx.arc(pendingPoint.x, pendingPoint.y, 6, 0, Math.PI * 2); ctx.fillStyle = cssVar("--violet"); ctx.fill(); }
+  if (pendingPoint) { ctx.beginPath(); ctx.arc(pendingPoint.x, pendingPoint.y, 6, 0, Math.PI * 2); ctx.fillStyle = cssVar("--accent"); ctx.fill(); }
 
   // MA lines
-  const maSpec = [[chartOpts.ma200, ma200, cssVar("--text-dim"), 1.2], [chartOpts.ma50, ma50, cssVar("--amber"), 1.4], [chartOpts.ma20, ma20, cssVar("--accent"), 1.4]];
+  const maSpec = [[chartOpts.ma200, ma200, cssVar("--ink-dim"), 1.2], [chartOpts.ma50, ma50, cssVar("--warn"), 1.4], [chartOpts.ma20, ma20, cssVar("--accent"), 1.4]];
   maSpec.forEach(([on, arr, color, wgt]) => { if (!on) return; ctx.beginPath(); let st = false;
     arr.forEach((val, i) => { if (val === null) return; st ? ctx.lineTo(X(i), Y(val)) : ctx.moveTo(X(i), Y(val)); st = true; });
     ctx.strokeStyle = color; ctx.lineWidth = wgt; ctx.stroke(); });
@@ -1698,7 +1700,7 @@ function drawChart() {
   // CANDLES
   ctx.lineWidth = 1;
   data.forEach((p, i) => {
-    const up = p.close >= p.open, color = up ? cssVar("--green") : cssVar("--red");
+    const up = p.close >= p.open, color = up ? cssVar("--up") : cssVar("--down");
     const x = X(i);
     ctx.strokeStyle = color; ctx.fillStyle = color;
     // wick
@@ -1770,7 +1772,7 @@ function drawChart() {
   // draw crosshair if hovering
   if (isNum(drawChart._hover) && drawChart._hover < data.length) {
     const x = X(drawChart._hover);
-    ctx.strokeStyle = cssVar("--text-dim"); ctx.globalAlpha = .4; ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .4; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, plotB); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
   }
 
