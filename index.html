@@ -270,7 +270,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
   font-size: 12px; font-weight: 700; margin-bottom: 10px; }
 .profile-value { color: var(--accent); font-family: var(--mono); font-size: 11px; font-weight: 600; text-align: right; }
 .profile-field input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
-.profile-scale { display: flex; justify-content: space-between; margin-top: 5px; color: var(--ink-dim); font-family: var(--mono); font-size: 9px; }
+.profile-scale { display: flex; justify-content: space-between; margin-top: 5px; color: var(--ink-dim); font-family: var(--mono); font-size: var(--t-micro); }
 .profile-field select, .profile-field textarea { width: 100%; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--chrome-1);
   color: var(--ink-bright); font: inherit; outline: none; }
 .profile-field select { height: 38px; padding: 0 10px; }
@@ -353,7 +353,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .analysis-tab-main, .analysis-tab-close { appearance: none; border: 0; background: none; color: inherit; cursor: pointer; }
 .analysis-tab-main { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: 7px; padding: 8px 5px 8px 11px; text-align: left; }
 .analysis-tab-main b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
-.analysis-tab-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; color: var(--ink-dim); }
+.analysis-tab-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-micro); color: var(--ink-dim); }
 .analysis-tab-close { width: 30px; border-radius: var(--radius-sm); font-size: 17px; opacity: .65; }
 .analysis-tab-close:hover { opacity: 1; color: var(--down); background: var(--down-soft); }
 .analysis-tab.screener-tab:not(.active) .analysis-tab-main b { color: var(--ink); }
@@ -391,11 +391,11 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .recipe-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .recipe h2 { color: var(--ink-bright); font-family: var(--mono); font-size: 15px; }
 .recipe p { margin-top: 4px; color: var(--ink-dim); font-size: 12px; line-height: 1.55; }
-.recipe-source { flex-shrink: 0; color: var(--ink); background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-xs); padding: 4px 7px; font: 9px var(--mono); }
+.recipe-source { flex-shrink: 0; color: var(--ink); background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-xs); padding: 4px 7px; font: var(--t-micro) var(--mono); }
 .recipe-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 .recipe-chip { border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--chrome-2); padding: 7px 9px; }
 .recipe-chip b { display: block; color: var(--ink-bright); font-size: 11px; }
-.recipe-chip span { color: var(--ink-dim); font: 9px var(--mono); }
+.recipe-chip span { color: var(--ink-dim); font: var(--t-micro) var(--mono); }
 .recipe-adjust { margin-top: 10px; color: var(--accent); font-size: 10.5px; }
 /* A theme chip is fuzzy evidence (word matching over profile text), not a measured
    concept — the dashed rule says "approximate" without spending a second hue on it. */
@@ -406,7 +406,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .recipe-definitions { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 6px; margin-top: 12px; }
 .recipe-definition { border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--chrome-2); }
 .recipe-definition summary { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--ink); cursor: pointer; font-size: 10.5px; }
-.recipe-definition summary span { color: var(--ink-dim); font: 8px var(--mono); text-transform: uppercase; }
+.recipe-definition summary span { color: var(--ink-dim); font: var(--t-micro) var(--mono); text-transform: uppercase; }
 .recipe-definition p { margin: 0; padding: 0 10px 10px; color: var(--ink-dim); font-family: var(--doc); font-size: var(--t-body); line-height: var(--lh-doc); }
 .screen-results-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 24px 0 10px; }
 .screen-results-head h2 { color: var(--ink-bright); font-family: var(--mono); font-size: 16px; }
@@ -426,7 +426,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
   color: var(--ink-bright); font: 700 12px var(--mono); }
 .screen-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin: 11px 0; }
 .screen-metric { padding: 6px; border-radius: var(--radius-sm); background: var(--chrome-2); }
-.screen-metric small { display: block; color: var(--ink-dim); font-size: 8px; text-transform: uppercase; }
+.screen-metric small { display: block; color: var(--ink-dim); font-size: var(--t-micro); text-transform: uppercase; }
 .screen-metric b { color: var(--ink); font: 10.5px var(--mono); }
 .screen-reasons { display: flex; flex-direction: column; gap: 5px; }
 .screen-reason { color: var(--ink-dim); font-size: 10.5px; line-height: 1.4; }
@@ -435,7 +435,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .score-breakdown { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 11px; }
 .sb-head { color: var(--ink-dim); font: 700 8px var(--mono); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 2px; cursor: help; }
 .sb-row { display: grid; grid-template-columns: 78px 1fr 22px; align-items: center; gap: 8px; }
-.sb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); font-size: 9.5px; }
+.sb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); font-size: var(--t-micro); }
 .sb-bar { height: 4px; border-radius: 99px; background: var(--chrome-2); overflow: hidden; }
 .sb-bar b { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .sb-val { text-align: right; color: var(--ink); font: 10px var(--mono); }
@@ -446,7 +446,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .screen-refine { margin-top: 24px; border: 1px solid var(--rule); border-radius: 16px; background: var(--chrome-1); box-shadow: var(--shadow); overflow: hidden; }
 .screen-refine-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 15px 16px; border-bottom: 1px solid var(--rule); }
 .screen-refine-head h2 { color: var(--ink-bright); font-family: var(--mono); font-size: 15px; }.screen-refine-head p { margin-top: 3px; color: var(--ink-dim); font-size: 10.5px; }
-.screen-refine-head > span { flex-shrink: 0; color: var(--ink-dim); font: 9px var(--mono); }
+.screen-refine-head > span { flex-shrink: 0; color: var(--ink-dim); font: var(--t-micro) var(--mono); }
 .screen-chat-messages { max-height: 290px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
 .screen-chat-msg { max-width: min(720px,88%); padding: 9px 11px; border-radius: var(--radius); background: var(--chrome-2); }
 /* Same idiom as the main chat: the user's turn is the accent block, the model's is the
@@ -454,7 +454,7 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 .screen-chat-msg.user { align-self: flex-end; background: var(--accent); }
 .screen-chat-msg.user span, .screen-chat-msg.user p { color: var(--accent-ink); }
 .screen-chat-msg.assistant { align-self: flex-start; }
-.screen-chat-msg span { display: block; margin-bottom: 3px; color: var(--ink-dim); font: 8px var(--mono); text-transform: uppercase; }.screen-chat-msg p { color: var(--ink); font-size: 11px; line-height: 1.5; }
+.screen-chat-msg span { display: block; margin-bottom: 3px; color: var(--ink-dim); font: var(--t-micro) var(--mono); text-transform: uppercase; }.screen-chat-msg p { color: var(--ink); font-size: 11px; line-height: 1.5; }
 .screen-refine-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 11px; }
 .screen-refine-prompts button { border: 1px solid var(--rule); border-radius: var(--radius-xs); background: transparent; color: var(--ink-dim); padding: 6px 9px; cursor: pointer; font-size: 10px; }.screen-refine-prompts button:hover { color: var(--ink-bright); border-color: var(--accent); background: var(--chrome-2); }
 .screen-refine-form { display: flex; gap: 8px; padding: 11px; border-top: 1px solid var(--rule); background: var(--chrome-2); }.screen-refine-form input { flex: 1; min-width: 0; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--chrome-0); color: var(--ink-bright); padding: 9px 10px; outline: 0; font-size: 11px; transition: border-color .2s, box-shadow .2s; }.screen-refine-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }.screen-refine-form button { border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); padding: 0 13px; cursor: pointer; font-weight: 700; font-size: 10.5px; transition: filter .15s; }.screen-refine-form button:hover:not(:disabled) { filter: brightness(1.08); }.screen-refine-form button:disabled { opacity: .5; }
@@ -599,7 +599,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 /* Extraction provenance — names the pipeline a card's numbers came out of (SEC EDGAR's
    filing read vs the yahooquery market pull). Small and low-contrast on purpose: it is a
    footnote, not a heading. */
-.card > summary .src { font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: .03em;
+.card > summary .src { font-family: var(--mono); font-size: var(--t-micro); font-weight: 500; letter-spacing: .03em;
   text-transform: none; padding: 1px 6px; border-radius: var(--radius-xs); border: 1px solid transparent;
   white-space: nowrap; flex-shrink: 0; }                     /* a narrow pane wraps the title, not this */
 /* The two pipelines are told apart by treatment, not hue: the market pull is accent-tinted,
@@ -679,7 +679,7 @@ td { text-align: right; padding: 6px 11px; border-top: 1px solid var(--rule); co
 td.hi { color: var(--ink-bright); font-weight: 500; }
 tr.itm td { background: var(--accent-soft); } tr:hover td { background: var(--chrome-2); }
 td.pos { color: var(--up); } td.neg { color: var(--down); }
-.itm-badge { font-size: 9px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+.itm-badge { font-size: var(--t-micro); font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 
 .opt-exp { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 0 8px; font-family: var(--mono); font-size: 12px; }
 .opt-exp:first-child { margin-top: 4px; } .opt-exp b { color: var(--ink-bright); font-size: 13px; font-weight: 600; } .opt-exp span { color: var(--ink-dim); }
@@ -855,7 +855,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
   border-radius: var(--radius-sm); background: var(--chrome-0); padding: 12px 14px; max-height: 340px; overflow-y: auto;
   font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--ink-dim); white-space: pre-wrap; word-break: break-word; }
 #thinkingPanel.show { display: block; animation: bodyIn .25s var(--ease); }
-#thinkingPanel .tk-label { display: block; font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+#thinkingPanel .tk-label { display: block; font-size: var(--t-micro); font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   color: var(--accent); margin-bottom: 7px; }
 
 /* CHAT — resizable, per-ticker */
