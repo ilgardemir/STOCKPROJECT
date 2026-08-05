@@ -633,13 +633,22 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 .card[open] .card-body { animation: bodyIn .3s var(--ease); }
 @keyframes bodyIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 
-.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; }
-.metric { background: var(--chrome-2); border-radius: var(--radius-sm); padding: 9px 11px; transition: background .2s, transform .2s var(--ease); }
-.metric:hover { background: var(--chrome-hi); transform: translateY(-1px); }
-.metric .k { font-size: 10px; font-weight: 600; color: var(--ink-dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
-.metric .v { font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--ink-bright); }
+/* Rows, not tiles: values share a right-hand axis so a reader can compare down a
+   column. Tiles made that impossible, which is the whole reason for the change. */
+.mgrid { display: block; }
+.metric { display: flex; align-items: baseline; gap: 10px; min-height: 22px; padding: 2px 0; }
+.metric + .metric { border-top: 1px solid var(--rule); }
+.metric .k { flex: 1; min-width: 0; font-size: var(--t-data); font-weight: 400; color: var(--ink-dim);
+  text-transform: lowercase; letter-spacing: 0; }
+.metric .v { flex-shrink: 0; font-family: var(--mono); font-size: var(--t-data); font-weight: 500;
+  color: var(--ink-bright); font-variant-numeric: tabular-nums; text-align: right; }
 .metric .v.green { color: var(--up); } .metric .v.red { color: var(--down); } .metric .v.amber { color: var(--warn); }
-.metric .v small { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+.metric .v small { font-size: var(--t-micro); color: var(--ink-dim); font-weight: 400; }
+/* Narrow panes: the left pane drags to 360px, where a shared axis stops working. */
+@media (max-width: 460px) { .metric { flex-direction: column; gap: 0; align-items: stretch; }
+  .metric .v { text-align: left; } }
+#dataPane.stack-metrics .metric { flex-direction: column; gap: 0; align-items: stretch; }
+#dataPane.stack-metrics .metric .v { text-align: left; }
 .regime-summary { border: 1px solid var(--rule); border-left: 3px solid var(--warn); background: var(--chrome-2); border-radius: var(--radius-sm); padding: 12px 14px; }
 .regime-summary.green { border-left-color: var(--up); } .regime-summary.red { border-left-color: var(--down); }
 .regime-summary > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -947,9 +956,12 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .sk-icon { width: 15px; height: 15px; border-radius: var(--radius-xs); flex-shrink: 0; }
 .sk-line { height: 10px; border-radius: var(--radius-xs); }
 .sk-title { width: 42%; max-width: 200px; }
-.sk-metric { background: var(--chrome-2); border-radius: var(--radius-sm); padding: 9px 11px; }
-.sk-metric .sk-k { width: 62%; height: 8px; margin-bottom: 8px; background: var(--chrome-hi); }
-.sk-metric .sk-v { width: 84%; height: 13px; background: var(--chrome-hi); }
+/* Skeleton mirrors the row shape it resolves into: a key bar and a value bar sharing
+   the same hairline and row height as the real .metric rows, not a filled tile. */
+.sk-metric { display: flex; align-items: center; gap: 10px; min-height: 22px; padding: 2px 0; }
+.sk-metric + .sk-metric { border-top: 1px solid var(--rule); }
+.sk-metric .sk-k { flex: 1; max-width: 100px; height: 8px; background: var(--chrome-hi); }
+.sk-metric .sk-v { flex-shrink: 0; width: 46px; height: 8px; background: var(--chrome-hi); }
 .sk-chart { height: 220px; width: 100%; border-radius: var(--radius-sm); }
 .sk-prose { padding: 4px 2px; }
 .sk-prose .sk-h { width: 34%; height: 12px; margin: 20px 0 12px; background: var(--chrome-2); }

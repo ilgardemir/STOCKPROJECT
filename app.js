@@ -1095,7 +1095,7 @@ const I = {
   whale:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c2 0 3-2 3-2s2 4 6 4 7-3 9-3M3 12c0 4 4 7 9 7 6 0 9-5 9-9 0-1-.3-2-1-3"/></svg>',
   brain:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>'
 };
-const metric = (label, value, cls = "") => `<div class="metric"><div class="k">${label}</div><div class="v ${cls}">${value}</div></div>`;
+const metric = (label, value, cls = "") => `<div class="metric"><span class="k">${label}</span><span class="v ${cls}">${value}</span></div>`;
 function rangeBar(title, lo, hi, val, fmt = fUsd, altVal = null, altName = "") {
   if (!isNum(lo) || !isNum(hi) || !isNum(val) || hi <= lo) return "";
   const pos = Math.min(100, Math.max(0, ((val - lo) / (hi - lo)) * 100));
@@ -1783,7 +1783,7 @@ function drawChart() {
 }
 drawChart._hover = null;
 window.chartRedrawCallback = function () { drawChart(); };
-window.addEventListener("resize", () => { clearTimeout(window._rz); window._rz = setTimeout(() => { if (active) drawChart(); }, 120); });
+window.addEventListener("resize", () => { syncMetricDensity(); clearTimeout(window._rz); window._rz = setTimeout(() => { if (active) drawChart(); }, 120); });
 
 /* ════════════════ MARKDOWN ════════════════ */
 function renderMarkdown(text) {
@@ -1975,9 +1975,14 @@ document.getElementById("ticker").addEventListener("keydown", e => { if (e.key =
 renderTickerPills();
 
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
+// Rows need a shared axis; below ~380px of pane there isn't room for one.
+const syncMetricDensity = () => { const p = document.getElementById("dataPane");
+  if (p) p.classList.toggle("stack-metrics", p.getBoundingClientRect().width < 380); };
+
 (function () {
   const rz = document.getElementById("resizer"), split = document.getElementById("split"), badge = document.getElementById("rzBadge");
   try { const saved = localStorage.getItem("squall-split"); if (saved) split.style.setProperty("--left-w", saved); } catch (e) {}
+  syncMetricDensity();
   let dragging = false, pendingX = null, raf = null;
   const SNAPS = [40, 50, 60];
 
@@ -1990,6 +1995,7 @@ renderTickerPills();
     pct = Math.max(30, Math.min(70, pct));
     split.style.setProperty("--left-w", pct.toFixed(2) + "%");
     badge.textContent = Math.round(pct) + " / " + Math.round(100 - pct);
+    syncMetricDensity();
     if (active) drawChart();          // chart follows the drag live
   }
   rz.addEventListener("pointerdown", e => {
@@ -2012,6 +2018,7 @@ renderTickerPills();
   rz.addEventListener("dblclick", () => {
     split.style.setProperty("--left-w", "50%");
     try { localStorage.removeItem("squall-split"); } catch (e) {}
+    syncMetricDensity();
     if (active) requestAnimationFrame(drawChart);
   });
   // Keyboard: arrows nudge the split, Enter resets — mirrors drag/double-click.
@@ -2025,6 +2032,7 @@ renderTickerPills();
     split.style.setProperty("--left-w", pct + "%");
     badge.textContent = Math.round(pct) + " / " + Math.round(100 - pct);
     try { localStorage.setItem("squall-split", pct + "%"); } catch (err) {}
+    syncMetricDensity();
     if (active) requestAnimationFrame(drawChart);
   });
 })();
