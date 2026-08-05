@@ -1977,7 +1977,18 @@ renderTickerPills();
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
 // Rows need a shared axis; below ~380px of pane there isn't room for one.
 const syncMetricDensity = () => { const p = document.getElementById("dataPane");
-  if (p) p.classList.toggle("stack-metrics", p.getBoundingClientRect().width < 380); };
+  if (!p) return;
+  const w = p.getBoundingClientRect().width;
+  // Zero width means the pane isn't laid out yet — the hero is still up, or it's the
+  // hidden pane on mobile. That is not "narrow": treating it as narrow stacks every
+  // metric and nothing widens it back until you happen to drag or resize.
+  if (!w) return;
+  p.classList.toggle("stack-metrics", w < 380); };
+
+// The pane's width changes from the drag, from the viewport, and from the hero giving way
+// to the dashboard. One observer catches all three; the explicit calls below are belt-and-braces.
+if (window.ResizeObserver) { const p = document.getElementById("dataPane");
+  if (p) new ResizeObserver(syncMetricDensity).observe(p); }
 
 (function () {
   const rz = document.getElementById("resizer"), split = document.getElementById("split"), badge = document.getElementById("rzBadge");
