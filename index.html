@@ -36,11 +36,7 @@
   --shadow: 0 1px 2px rgba(5,12,20,.25), 0 8px 28px -12px rgba(5,12,20,.35);
 }
 :root[data-theme="dark"] {
-  --bg:#0a0e14; --bg-deep:#070a0f; --surface:#101723; --surface-2:#18212f; --surface-3:#1f2a3b;
-  --border:#233146; --border-soft:#1a2535; --text:#8c9db1; --text-dim:#7a8ca1; --bright:#eaf0f7;
   --accent:#3fd0b6; --accent-ink:#06251f; --accent-soft:rgba(63,208,182,.10);
-  --green:#46c95d; --green-soft:rgba(70,201,93,.10); --red:#f0716b; --red-soft:rgba(240,113,107,.10);
-  --amber:#e9b44c; --amber-soft:rgba(233,180,76,.10);
   --chart-fill-top:rgba(63,208,182,.22); --chart-fill-bot:rgba(63,208,182,0);
   --skeleton-shine:rgba(255,255,255,.06);
   color-scheme: dark;
@@ -51,11 +47,7 @@
   --up-soft: rgba(70,201,93,.10); --down-soft: rgba(240,113,107,.10); --warn-soft: rgba(233,180,76,.10);
 }
 :root[data-theme="light"] {
-  --bg:#eef2f5; --bg-deep:#e4eaef; --surface:#ffffff; --surface-2:#f2f5f8; --surface-3:#e8edf2;
-  --border:#d3dce4; --border-soft:#e0e7ed; --text:#54677b; --text-dim:#5f7285; --bright:#13202e;
-  --accent:#0b8a78; --accent-ink:#ffffff; --accent-soft:rgba(11,138,120,.09);
-  --green:#1a7f37; --green-soft:rgba(26,127,55,.09); --red:#cf3f38; --red-soft:rgba(207,63,56,.08);
-  --amber:#a2740e; --amber-soft:rgba(162,116,14,.10);
+  --accent:#0a8372; --accent-ink:#ffffff; --accent-soft:rgba(11,138,120,.09);
   --chart-fill-top:rgba(11,138,120,.16); --chart-fill-bot:rgba(11,138,120,0);
   --shadow:0 1px 2px rgba(19,32,46,.06), 0 8px 24px -12px rgba(19,32,46,.14);
   --skeleton-shine:rgba(255,255,255,.65);
@@ -72,11 +64,7 @@
    at a glance in a stock app, so those two are never collapsed into grey. THEMES in
    app.js mirrors each id plus its bg/accent swatch, and must stay in sync with this list. */
 :root[data-theme="noir"] {            /* black + white */
-  --bg:#000000; --bg-deep:#000000; --surface:#0c0c0c; --surface-2:#161616; --surface-3:#212121;
-  --border:#2f2f2f; --border-soft:#1c1c1c; --text:#a8a8a8; --text-dim:#8a8a8a; --bright:#ffffff;
   --accent:#ffffff; --accent-ink:#000000; --accent-soft:rgba(255,255,255,.12);
-  --green:#7fd39a; --green-soft:rgba(127,211,154,.10); --red:#e08d88; --red-soft:rgba(224,141,136,.10);
-  --amber:#d9bd84; --amber-soft:rgba(217,189,132,.10);
   --chart-fill-top:rgba(255,255,255,.16); --chart-fill-bot:rgba(255,255,255,0);
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 28px -12px rgba(0,0,0,.7);
   --skeleton-shine:rgba(255,255,255,.08);
@@ -88,11 +76,7 @@
   --up-soft: rgba(127,211,154,.10); --down-soft: rgba(224,141,136,.10); --warn-soft: rgba(217,189,132,.10);
 }
 :root[data-theme="paper"] {           /* white + black */
-  --bg:#ffffff; --bg-deep:#f1f1f1; --surface:#ffffff; --surface-2:#f4f4f4; --surface-3:#e9e9e9;
-  --border:#cdcdcd; --border-soft:#e4e4e4; --text:#4a4a4a; --text-dim:#5c5c5c; --bright:#000000;
   --accent:#000000; --accent-ink:#ffffff; --accent-soft:rgba(0,0,0,.08);
-  --green:#1d6b33; --green-soft:rgba(29,107,51,.09); --red:#a83a33; --red-soft:rgba(168,58,51,.08);
-  --amber:#7f6210; --amber-soft:rgba(127,98,16,.10);
   --chart-fill-top:rgba(0,0,0,.13); --chart-fill-bot:rgba(0,0,0,0);
   --shadow:0 1px 2px rgba(0,0,0,.07), 0 8px 24px -12px rgba(0,0,0,.18);
   --skeleton-shine:rgba(255,255,255,.7);
@@ -104,27 +88,19 @@
   --up-soft: rgba(29,107,51,.09); --down-soft: rgba(168,58,51,.08); --warn-soft: rgba(127,98,16,.10);
 }
 :root[data-theme="lagoon"] {          /* turquoise + pink */
-  --bg:#052b2b; --bg-deep:#032020; --surface:#0a3837; --surface-2:#0f4544; --surface-3:#155150;
-  --border:#1d6a67; --border-soft:#134e4c; --text:#a2d9d3; --text-dim:#8ac6c0; --bright:#f0fffb;
   --accent:#ff4fa3; --accent-ink:#2c0418; --accent-soft:rgba(255,79,163,.14);
-  --green:#4fe8b0; --green-soft:rgba(79,232,176,.12); --red:#ff7a59; --red-soft:rgba(255,122,89,.12);
-  --amber:#ffd166; --amber-soft:rgba(255,209,102,.12);
   --chart-fill-top:rgba(255,79,163,.22); --chart-fill-bot:rgba(255,79,163,0);
   --shadow:0 1px 2px rgba(1,17,17,.4), 0 8px 28px -12px rgba(1,17,17,.6);
   --skeleton-shine:rgba(255,255,255,.09);
   color-scheme: dark;
-  --chrome-0: #052b2b; --chrome-1: #0a3837; --chrome-2: #0f4544;
-  --rule: #134e4c;
-  --ink: #a2d9d3; --ink-dim: #8ac6c0; --ink-bright: #f0fffb;
+  --chrome-0: #0b1a1a; --chrome-1: #122525; --chrome-2: #1a3130;
+  --rule: #1f3b3a;
+  --ink: #a8c4c1; --ink-dim: #8fadaa; --ink-bright: #f0fffb;
   --up: #4fe8b0; --down: #ff7a59; --warn: #ffd166;
   --up-soft: rgba(79,232,176,.12); --down-soft: rgba(255,122,89,.12); --warn-soft: rgba(255,209,102,.12);
 }
 :root[data-theme="matrix"] {          /* black + lime */
-  --bg:#000000; --bg-deep:#000000; --surface:#080c08; --surface-2:#0e150e; --surface-3:#162116;
-  --border:#26492a; --border-soft:#162b19; --text:#83c98b; --text-dim:#6dab74; --bright:#d8ffd8;
   --accent:#8dff3a; --accent-ink:#061a00; --accent-soft:rgba(141,255,58,.12);
-  --green:#5cff7a; --green-soft:rgba(92,255,122,.10); --red:#ff5f4a; --red-soft:rgba(255,95,74,.12);
-  --amber:#e8d44d; --amber-soft:rgba(232,212,77,.10);
   --chart-fill-top:rgba(141,255,58,.20); --chart-fill-bot:rgba(141,255,58,0);
   --shadow:0 1px 2px rgba(0,0,0,.6), 0 8px 28px -12px rgba(0,20,0,.8);
   --skeleton-shine:rgba(141,255,58,.10);
