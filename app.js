@@ -517,16 +517,18 @@ function finalizePartialStream() {
 function skMetric() {
   return `<div class="sk-metric"><div class="skeleton sk-line sk-k"></div><div class="skeleton sk-line sk-v"></div></div>`;
 }
-function skCard(n, { chart = false, delay = 0 } = {}) {
+function skCard(n, { chart = false } = {}) {
   const body = chart
     ? `<div class="skeleton sk-chart"></div>`
     : `<div class="mgrid">${Array.from({ length: n }, skMetric).join("")}</div>`;
-  return `<div class="card sk-card" style="--d:${delay}s">
-    <div class="sk-summary"><div class="skeleton sk-icon"></div><div class="skeleton sk-line sk-title"></div></div>
+  // No icon placeholder: headers lost their icons, so reserving space for one made the
+  // title jump sideways the moment real content replaced the skeleton.
+  return `<div class="card sk-card">
+    <div class="sk-summary"><div class="skeleton sk-line sk-title"></div></div>
     <div class="card-body">${body}</div></div>`;
 }
 function dataSkeleton() {
-  return skCard(8, { delay: 0 }) + skCard(0, { chart: true, delay: .05 }) + skCard(6, { delay: .1 }) + skCard(6, { delay: .15 });
+  return skCard(8) + skCard(0, { chart: true }) + skCard(6) + skCard(6);
 }
 function aiSkeleton() {
   const line = w => `<div class="skeleton sk-line" style="width:${w}"></div>`;
@@ -1052,15 +1054,13 @@ function refineScreener(rawMessage) {
 document.querySelectorAll("[data-screen-example]").forEach(button => button.addEventListener("click", () => { document.getElementById("screenQuery").value = button.dataset.screenExample; document.getElementById("screenQuery").focus(); }));
 
 /* ════════════════ RENDER HELPERS ════════════════ */
-let _cardN = 0;
-/* `icon` is accepted and ignored: an icon on every one of 19 section headers is
-   decoration when the header already names the section. Kept in the signature so the
-   call sites stay untouched; delete both together if the icons never come back. */
-function card(id, _icon, title, bodyHtml, { open = true, count = null, source = null } = {}) {
-  _cardN++;
+/* The `icon` parameter and the `I` map of section SVGs are gone: an icon on every one of
+   19 headers is decoration when the header already names the section. The `--d` stagger
+   went with them — it only ever fed the entrance cascade, and nothing reads it now. */
+function card(id, title, bodyHtml, { open = true, count = null, source = null } = {}) {
   const src = source
     ? `<span class="src" data-src="${source.kind}" title="Extracted from ${esc(source.label)}">${esc(source.label)}</span>` : "";
-  return `<details class="card" id="card-${id}" ${open ? "open" : ""} style="--d:${Math.min(_cardN * 0.03, 0.3)}s">
+  return `<details class="card" id="card-${id}" ${open ? "open" : ""}>
     <summary><span>${title}</span>${count !== null ? `<span class="count">${count}</span>` : ""}${src}
       <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </summary><div class="card-body">${bodyHtml}</div></details>`;
@@ -1081,23 +1081,6 @@ function histSrc(d) {
   if (!h || h === "Unavailable") return null;
   return { kind: "market", label: h === "Yahoo" ? "Yahoo Finance" : h };
 }
-const I = {
-  bolt:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 11-12h-7l1-8z"/></svg>',
-  chart:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><path d="m7 14 4-4 3 3 5-6"/></svg>',
-  scale:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M5 7l7-4 7 4M3 13l2-6 2 6a3 3 0 0 1-4 0zM17 13l2-6 2 6a3 3 0 0 1-4 0z"/></svg>',
-  margin:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>',
-  shield:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg>',
-  bank:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M4 18h16M6 18V10M10 18V10M14 18V10M18 18V10M2 10l10-7 10 7z"/></svg>',
-  gauge:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 14 8 8"/><path d="M3.3 17a10 10 0 1 1 17.4 0"/></svg>',
-  pulse:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
-  eye:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>',
-  cal:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
-  doc:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>',
-  layers:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg>',
-  struct:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l4-6 4 3 4-8 6 9"/></svg>',
-  whale:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c2 0 3-2 3-2s2 4 6 4 7-3 9-3M3 12c0 4 4 7 9 7 6 0 9-5 9-9 0-1-.3-2-1-3"/></svg>',
-  brain:'<svg class="sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>'
-};
 const metric = (label, value, cls = "") => `<div class="metric"><span class="k">${label}</span><span class="v ${cls}">${value}</span></div>`;
 function rangeBar(title, lo, hi, val, fmt = fUsd, altVal = null, altName = "") {
   if (!isNum(lo) || !isNum(hi) || !isNum(val) || hi <= lo) return "";
@@ -1201,7 +1184,6 @@ function renderStrip(d) {
 /* ════════════════ RENDER: EVERYTHING ════════════════ */
 function renderAll(d) {
   renderStrip(d);
-  _cardN = 0;
   const r = d.raw_data || {};
   const v = r.valuation || {}, p = r.profitability || {}, fh = r.financial_health || {}, sec = r.sec_fundamentals || {},
         t = r.technicals || {}, rr = r.risk_return || {}, s = r.sentiment || {}, kl = r.key_levels || {};
@@ -1225,7 +1207,7 @@ function renderAll(d) {
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
-  html += card("snapshot", I.bolt, "Live Snapshot", snap);
+  html += card("snapshot", "Live Snapshot", snap);
 
   /* Sourced company news — the model explains these records but does not search for them. */
   const news = Array.isArray(d.company_news) ? d.company_news : [];
@@ -1245,12 +1227,12 @@ function renderAll(d) {
         ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
       </article>`;
     }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
-    html += card("news", I.doc, "Recent Company News", newsBody, { count: news.length });
+    html += card("news", "Recent Company News", newsBody, { count: news.length });
   }
 
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
-    html += card("chart", I.chart, "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) });
+    html += card("chart", "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) });
   }
 
   /* Deterministic market regime — explains the current price/volume environment. */
@@ -1263,7 +1245,7 @@ function renderAll(d) {
     </div>`;
     if (Array.isArray(regime.evidence) && regime.evidence.length) body += `<div class="regime-evidence">${regime.evidence.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
     body += `<p class="learn-note"><b>How to use this:</b> regime describes the current environment; it does not predict the next move. Trend regimes favor continuation setups, while range or transition regimes reward patience and tighter risk controls.</p>`;
-    html += card("regime", I.gauge, "Market Regime", body, { count: regime.label, source: histSrc(d) });
+    html += card("regime", "Market Regime", body, { count: regime.label, source: histSrc(d) });
   }
 
   /* Price action / market structure */
@@ -1278,7 +1260,7 @@ function renderAll(d) {
       Object.entries(pa.fib).forEach(([k, val]) => body += `<span class="lvl" style="color:var(--ink-dim);background:var(--chrome-2)">${k} · ${fUsd(val)}</span>`);
       body += `</div>`;
     }
-    html += card("priceaction", I.struct, "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) });
+    html += card("priceaction", "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) });
   }
 
   /* Institutional footprint */
@@ -1296,32 +1278,32 @@ function renderAll(d) {
       ${metric("Distrib. Days (25)", String(inst.distribution_days ?? 0), (inst.distribution_days || 0) >= 3 ? "red" : "")}
     </div>`;
     (inst.signals || []).forEach(sg => body += signalHtml(sg));
-    html += card("institutional", I.whale, "Institutional Footprint", body, { source: histSrc(d) });
+    html += card("institutional", "Institutional Footprint", body, { source: histSrc(d) });
   }
 
   /* Algorithmic signals */
   const flags = d.algorithmic_signals || [];
-  html += card("signals", I.pulse, "Algorithmic Signals", flags.length ? flags.map(signalHtml).join("") : signalHtml("NEUTRAL: No strong signals triggered."), { count: flags.length });
+  html += card("signals", "Algorithmic Signals", flags.length ? flags.map(signalHtml).join("") : signalHtml("NEUTRAL: No strong signals triggered."), { count: flags.length });
 
   /* Chart patterns */
   const pats = d.chart_patterns || [];
-  if (pats.length) html += card("patterns", I.layers, "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length, source: histSrc(d) });
+  if (pats.length) html += card("patterns", "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length, source: histSrc(d) });
 
   /* Valuation */
-  html += card("valuation", I.scale, "Valuation", `<div class="mgrid">
+  html += card("valuation", "Valuation", `<div class="mgrid">
     ${metric("P/E Trailing", fRatio(v.pe_trailing))}${metric("P/E Forward", fRatio(v.pe_forward))}
     ${metric("PEG", fRatio(v.peg_ratio), isNum(v.peg_ratio) ? (v.peg_ratio > 0 && v.peg_ratio < 1 ? "green" : v.peg_ratio > 3 ? "red" : "") : "")}
     ${metric("Price / Book", fRatio(v.price_to_book))}${metric("Price / Sales", fRatio(v.price_to_sales))}
     ${metric("EV / EBITDA", fRatio(v.ev_ebitda))}${metric("FCF Yield", fPct(v.fcf_yield), signCls(v.fcf_yield))}</div>`);
 
   /* Profitability */
-  html += card("profit", I.margin, "Profitability & Margins", `<div class="mgrid">
+  html += card("profit", "Profitability & Margins", `<div class="mgrid">
     ${metric("Gross Margin", fPct(p.gross_margin))}${metric("Operating Margin", fPct(p.operating_margin), signCls(p.operating_margin))}
     ${metric("Net Margin", fPct(p.net_margin), signCls(p.net_margin))}${metric("FCF Margin", fPct(p.fcf_margin), signCls(p.fcf_margin))}
     ${metric("ROE", fPct(p.roe), signCls(p.roe))}${metric("ROA", fPct(p.roa), signCls(p.roa))}</div>`);
 
   /* Health */
-  html += card("health", I.shield, "Financial Health", `<div class="mgrid">
+  html += card("health", "Financial Health", `<div class="mgrid">
     ${metric("Current Ratio", fRatio(fh.current_ratio), isNum(fh.current_ratio) ? (fh.current_ratio >= 1.5 ? "green" : fh.current_ratio < 1 ? "red" : "amber") : "")}
     ${metric("Debt / Equity", fRatio(fh.debt_to_equity), isNum(fh.debt_to_equity) && fh.debt_to_equity > 200 ? "red" : "")}
     ${metric("Earnings Quality <small>(OCF/NI)</small>", fRatio(fh.earnings_quality), isNum(fh.earnings_quality) ? (fh.earnings_quality >= 1 ? "green" : fh.earnings_quality < 0.5 ? "red" : "amber") : "")}</div>`);
@@ -1336,7 +1318,7 @@ function renderAll(d) {
     secBody += `<p style="margin-top:10px;font-size:12px;color:var(--ink-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
   if (d.sec_available === false)
     secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker — figures rely on the market-data provider only.</div>` + secBody;
-  html += card("sec", I.bank, "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) });
+  html += card("sec", "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) });
 
   /* Technicals */
   let tech = `<div class="mgrid">
@@ -1353,10 +1335,10 @@ function renderAll(d) {
   const resL = (kl.resistance || []).filter(isNum), supL = (kl.support || []).filter(isNum);
   if (resL.length || supL.length) tech += `<div class="lvl-label">Key price levels</div><div class="levels">
     ${resL.map(x => `<span class="lvl res">R ${fUsd(x)}</span>`).join("")}${supL.map(x => `<span class="lvl sup">S ${fUsd(x)}</span>`).join("")}</div>`;
-  html += card("tech", I.gauge, "Technicals & Key Levels", tech, { source: histSrc(d) });
+  html += card("tech", "Technicals & Key Levels", tech, { source: histSrc(d) });
 
   /* Risk */
-  html += card("risk", I.pulse, "Risk & Return (5Y)", `<div class="mgrid">
+  html += card("risk", "Risk & Return (5Y)", `<div class="mgrid">
     ${metric("CAGR", fPct(rr.cagr), signCls(rr.cagr))}${metric("Annual Volatility", fPct(rr.annual_volatility))}
     ${metric("Sharpe Ratio", fRatio(rr.sharpe), signCls(rr.sharpe))}${metric("Max Drawdown", fPct(rr.max_drawdown), signCls(rr.max_drawdown, true))}
     ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`, { source: histSrc(d) });
@@ -1368,7 +1350,7 @@ function renderAll(d) {
     ${metric("Institutional Own.", fPct(s.inst_ownership))}
     ${metric("Short Interest", fPct(s.short_percent), isNum(s.short_percent) && s.short_percent > 0.10 ? "red" : "")}</div>`;
   sent += rangeBar("Analyst targets vs price (amber = mean target)", s.target_low, s.target_high, t.current_price, fUsd, s.target_mean, "Mean target");
-  html += card("sentiment", I.eye, "Sentiment & Ownership", sent);
+  html += card("sentiment", "Sentiment & Ownership", sent);
 
   /* Earnings */
   const earn = r.earnings_surprises || [];
@@ -1376,7 +1358,7 @@ function renderAll(d) {
     const rows = earn.map(e => { const pos = e.surprise_pct >= 0;
       return `<tr><td class="hi">${esc(e.date)}</td><td>$${e.estimate.toFixed(2)}</td><td class="hi">$${e.reported.toFixed(2)}</td>
         <td class="${pos ? "pos" : "neg"}">${pos ? "+" : ""}${(e.surprise_pct * 100).toFixed(1)}%</td><td class="${pos ? "pos" : "neg"}">${pos ? "Beat" : "Miss"}</td></tr>`; }).join("");
-    html += card("earnings", I.cal, "Recent Earnings Surprises",
+    html += card("earnings", "Recent Earnings Surprises",
       `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length, source: YQ_SRC });
   }
 
@@ -1390,7 +1372,7 @@ function renderAll(d) {
       ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
     body += `<div class="lvl-label">8-K events (last 90 days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
-    html += card("filings", I.doc, "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
+    html += card("filings", "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
   }
 
   /* Options */
@@ -1406,16 +1388,16 @@ function renderAll(d) {
       });
       body += `</div>`;
     });
-    html += card("options", I.layers, "Live Options Chains", body, { open: false, count: od.chains.length + " exp", source: YQ_SRC });
+    html += card("options", "Live Options Chains", body, { open: false, count: od.chains.length + " exp", source: YQ_SRC });
   }
 
   /* MD&A */
   if (d.mda_excerpt && !/unavailable|Failed|not found/i.test(d.mda_excerpt))
-    html += card("mda", I.doc, "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) });
+    html += card("mda", "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) });
 
   /* Raw prompt */
   if (d.ai_prompt)
-    html += card("prompt", I.brain, "Exact Data Sent to the AI",
+    html += card("prompt", "Exact Data Sent to the AI",
       `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
        <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
        <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
