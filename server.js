@@ -750,14 +750,31 @@ function isPrivateAddr(ip) {
  * anyone mint unlimited fresh buckets. We skip private hops on the way left so an extra
  * internal proxy can't collapse every visitor into one shared bucket and lock out the
  * whole internet on the first burst.
+ *
+ * Forwarding headers are only consulted when the TCP peer is itself private — i.e. when
+ * something in front of us actually terminated the connection. If the container is ever
+ * reachable directly, the peer is public, every forwarding header is attacker-controlled
+ * noise, and we ignore all of them and use the socket address.
+ *
+ * If Railway's edge ever connects from a public address, this would collapse all traffic
+ * into one bucket. Set SQUALL_CLIENT_IP_HEADER to the platform's single-value header
+ * (it wins outright when present) rather than loosening the rule above.
  */
 function clientIp(req) {
+  const peer = String(req.socket?.remoteAddress || "unknown");
+  const single = process.env.SQUALL_CLIENT_IP_HEADER;
+  if (single) {
+    const v = String(req.headers[single.toLowerCase()] || "").split(",")[0].trim();
+    if (v) return v;
+  }
+  if (LIM.TRUST_PROXY <= 0 || !isPrivateAddr(peer)) return peer;
+
   const chain = String(req.headers["x-forwarded-for"] || "").split(",").map(s => s.trim()).filter(Boolean);
   const start = chain.length - 1 - Math.max(0, LIM.TRUST_PROXY - 1);
   for (let i = Math.min(start, chain.length - 1); i >= 0; i--) {
     if (!isPrivateAddr(chain[i])) return chain[i];
   }
-  return String(req.socket?.remoteAddress || "unknown");
+  return peer;
 }
 
 /** Expand "2001:db8::1" to eight zero-padded hextets so a prefix compare is exact. */
@@ -1058,6 +1075,37 @@ function acquirePy(abortSrc, onWait) {
   });
 }
 
+// ── Responses ─────────────────────────────────────────────────────────────────
+/**
+ * SSE headers plus advisory rate-limit headers. The headers are for curl and any future
+ * non-browser client only — a browser EventSource can't read them, and can't read a
+ * non-200 body at all, which is why an SSE denial still goes out at 200 with the detail
+ * carried in the event payload.
+ */
+function sseHeaders(gate) {
+  const h = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "X-RateLimit-Limit": String(LIM.IP_DAILY)
+  };
+  if (gate && gate.ok) h["X-RateLimit-Remaining"] = String(gate.remaining);
+  if (gate && !gate.ok) { h["X-Squall-Limit"] = gate.rule; h["Retry-After"] = String(gate.retryAfter); }
+  return h;
+}
+
+/** JSON denial for the POST routes, where a real status code is still available. */
+function sendDenial(res, gate, status) {
+  res.writeHead(status || 429, {
+    "Content-Type": "application/json",
+    "Retry-After": String(gate.retryAfter),
+    "X-Squall-Limit": gate.rule
+  });
+  res.end(JSON.stringify({ error: gate.message, limited: true, rule: gate.rule,
+                           retry_after_s: gate.retryAfter, resets_at: gate.resetsAt }));
+}
+
 // ── Request bodies ────────────────────────────────────────────────────────────
 /**
  * Byte-capped body reader. Resolves to the body string, or null when the request was
@@ -1162,8 +1210,20 @@ const appServer = http.createServer(async (req, res) => {
     let existing = null;
     try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
     const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
-    res.writeHead(200, { "Content-Type":"text/event-stream", "Cache-Control":"no-cache", "Connection":"keep-alive", "X-Accel-Buffering":"no" });
+
+    // A refinement costs a full universe rescore, so it is charged as a fresh screen
+    // rather than discounted as "just a follow-up".
+    const gate = admit(req, "screen");
+    res.writeHead(200, sseHeaders(gate));
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!gate.ok) {
+      // Reported in-band at HTTP 200 on purpose: EventSource cannot read a non-200 body,
+      // so a real 429 here would surface in app.js as "Connection lost. Is the server
+      // running?" — exactly the wrong message. `limited:true` is the discriminator, which
+      // keeps the SSE event-name contract intact.
+      send("screen_error", { error: gate.message, limited: true, rule: gate.rule, retry_after_s: gate.retryAfter, resets_at: gate.resetsAt });
+      return res.end();
+    }
     if (query.length < 3) { send("screen_error", { error:"Describe the companies you want to find in a little more detail." }); return res.end(); }
 
     send("screen_progress", { percent:4, label:existing ? "Revising the measurable criteria" : "Translating the request into measurable criteria" });
@@ -1242,14 +1302,14 @@ const appServer = http.createServer(async (req, res) => {
     const raw = url.searchParams.get("ticker") || "";
     const profile = sanitizeProfile(url.searchParams.get("profile"));
 
-    res.writeHead(200, {
-      "Content-Type":  "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection":    "keep-alive",
-      "X-Accel-Buffering": "no"
-    });
+    const gate = admit(req, "analyze");
+    res.writeHead(200, sseHeaders(gate));
     const send = (event, data) =>
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!gate.ok) {
+      send("error", { error: gate.message, limited: true, rule: gate.rule, retry_after_s: gate.retryAfter, resets_at: gate.resetsAt });
+      return res.end();
+    }
 
     const s = sanitizeQuery(raw);
     if (!s.ok) { send("error", { error: s.reason, invalid_ticker: s.invalid_ticker }); res.end(); return; }
@@ -1407,10 +1467,14 @@ const appServer = http.createServer(async (req, res) => {
   if (req.method === "GET") { serveStatic(req, res); return; }
 
   // ── BATCH ANALYZE (non-streaming) ───────────────────────────────────────────
+  // A non-streaming duplicate of the most expensive path, kept as a fallback. It carries
+  // exactly the same cost, so it is gated exactly the same way.
   if (req.method === "POST" && req.url === "/analyze") {
-    let body = "";
-    req.on("data", chunk => (body += chunk));
-    req.on("end", async () => {
+    const gate = admit(req, "analyze_post");
+    if (!gate.ok) { sendDenial(res, gate); return; }
+    const body = await readBody(req, res, LIM.MAX_ANALYZE_BODY);
+    if (body === null) return;   // 413 already written, or the client vanished
+    {
       try {
         const { ticker, profile } = JSON.parse(body);
         const s = sanitizeQuery(ticker);
@@ -1489,15 +1553,19 @@ const appServer = http.createServer(async (req, res) => {
         res.writeHead(400, {"Content-Type":"application/json"});
         res.end(JSON.stringify({ error: e.message }));
       }
-    });
+    }
     return;
   }
 
   // ── FOLLOW-UP CHAT (SSE streaming over POST) ─────────────────────────────────
   if (req.method === "POST" && req.url === "/chat") {
-    let body = "";
-    req.on("data", chunk => (body += chunk));
-    req.on("end", async () => {
+    // Gated before the body is read and before writeHead, so this route can still answer
+    // with a real status code — unlike the SSE GETs, whose client can't read one.
+    const gate = admit(req, "chat");
+    if (!gate.ok) { sendDenial(res, gate); return; }
+    const rawBody = await readBody(req, res, LIM.MAX_CHAT_BODY);
+    if (rawBody === null) return;   // 413 already written, or the client vanished
+    {
       res.writeHead(200, {
         "Content-Type":  "text/event-stream",
         "Cache-Control": "no-cache",
@@ -1507,9 +1575,12 @@ const appServer = http.createServer(async (req, res) => {
       const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
       let parsed;
-      try { parsed = JSON.parse(body); }
+      try { parsed = JSON.parse(rawBody); }
       catch { send("error", { error: "Malformed request." }); return res.end(); }
-      const { messages, context, analysis, think, profile } = parsed;   // analysis: the initial AI write-up so follow-ups have continuity; think: request model reasoning
+      // analysis: the initial AI write-up so follow-ups have continuity; think: request model reasoning.
+      // Everything here is client-supplied and lands in a prompt, so it is bounded and
+      // role-filtered first — see validateChatPayload.
+      const { messages, context, analysis, think, profile } = validateChatPayload(parsed);
       const profileText = formatProfile(profile);
 
       // Abort the upstream ONLY if the client actually drops the response.
@@ -1584,7 +1655,7 @@ const appServer = http.createServer(async (req, res) => {
         if (e.name !== "AbortError") send("error", { error: "Chat request failed: " + e.message });
         try { res.end(); } catch (_) {}
       }
-    });
+    }
     return;
   }
 
