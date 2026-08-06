@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -480,7 +481,12 @@ def build_universe(tickers, names):
                 row["scores"]["relative_strength"], row["scores"]["accumulation"]
             ]), 1)
     try:
-        CACHE_PATH.write_text(json.dumps({"version":CACHE_VERSION, "created_at": time.time(), "rows": rows}, separators=(",", ":")))
+        # allow_nan=False so a NaN can never reach the cache. The default would write a
+        # bare NaN, json.loads would happily read it back, and the poisoned rows would
+        # then fail the stdout encode on every screen for the full 30-minute TTL. Failing
+        # the write is caught below and simply means no cache this round.
+        CACHE_PATH.write_text(json.dumps({"version":CACHE_VERSION, "created_at": time.time(), "rows": rows},
+                                         separators=(",", ":"), allow_nan=False))
     except Exception:
         pass
     return rows, False
@@ -765,12 +771,23 @@ def main():
     }
     stage(5, f"Found {len(results)} matching stocks")
     progress(95, f"Screening calculations complete · {len(results)} matches")
-    json.dump(output, sys.stdout, separators=(",", ":"), allow_nan=False)
+    # Serialize fully BEFORE writing a byte. json.dump streams into the file object, so a
+    # value it cannot encode (allow_nan=False rejects NaN/Infinity) raised partway through
+    # -- leaving half an object on stdout, after which the handler below appended its own
+    # JSON and produced a stream nothing could parse. Building the string first means a
+    # serialization failure surfaces as a clean error instead of a corrupt payload.
+    sys.stdout.write(json.dumps(output, separators=(",", ":"), allow_nan=False))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        json.dump({"error": str(exc)}, sys.stdout)
+        # This string is rendered verbatim in the UI, so a bare library message reads as
+        # gibberish with no stated cause. Keep the detail, but name what failed. The
+        # traceback goes to stderr, which the server tails into its error detail.
+        traceback.print_exc(file=sys.stderr)
+        sys.stdout.write(json.dumps({
+            "error": f"The screening engine failed ({type(exc).__name__}: {exc})."
+        }))
         sys.exit(1)

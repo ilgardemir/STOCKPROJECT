@@ -1695,7 +1695,12 @@ if __name__ == "__main__":
     # argv[1] may be a ticker OR a company name (possibly multi-word / quoted).
     q = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else "AAPL"
     try:
-        print(json.dumps(generate_analysis_payload(q), indent=2))
+        # allow_nan=False on purpose. The default emits bare NaN/Infinity, which is not
+        # valid JSON: Python raises nothing, and the failure only shows up downstream as
+        # "Failed to parse Python output" with no clue which field caused it. Failing
+        # here instead names the problem. Serialized in full before anything is written,
+        # so a mid-encode failure can't leave a half-written payload on stdout.
+        print(json.dumps(generate_analysis_payload(q), indent=2, allow_nan=False))
     except Exception as e:
         # This string is rendered verbatim in the dashboard, so a bare library message
         # ("expected name token at '<![...'") reads as gibberish with no stated cause.
