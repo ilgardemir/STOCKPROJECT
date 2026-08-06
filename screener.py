@@ -606,7 +606,7 @@ def explain(row, concepts, settings):
         range_value = row.get("range_60d") if window == 60 else row.get("range_30d") if window == 30 else row.get("range_15d")
         if cid == "consolidation": reasons.append(f"Consolidation: {fmt_pct(range_value)} {window}-day range and ATR {fmt_num(row.get('atr_contraction'), '×', 2)} its 60-day norm")
         elif cid == "volatility_contraction": reasons.append(f"Volatility contraction: 15/60-day range ratio {fmt_num(finite(row.get('range_15d'))/max(finite(row.get('range_60d'), .0001), .0001) if row.get('range_15d') is not None else None, '', 2)} and volume {fmt_num(row.get('volume_dryup'), '×', 2)} normal")
-        elif cid == "vcp": reasons.append(f"VCP candidate: {int(row.get('vcp_contractions') or 0)} measurable contractions, with recent volume at {fmt_num(row.get('volume_dryup'), '×', 2)} its 60-day average")
+        elif cid == "vcp": reasons.append(f"VCP candidate: {int(finite(row.get('vcp_contractions'), 0))} measurable contractions, with recent volume at {fmt_num(row.get('volume_dryup'), '×', 2)} its 60-day average")
         elif cid == "cup_and_handle": reasons.append(f"Cup-with-handle candidate: {fmt_pct(row.get('cup_depth'))} cup depth, {fmt_pct(row.get('handle_depth'))} handle depth, and an estimated ${fmt_num(row.get('cup_pivot'), '', 2)} pivot")
         elif cid == "flat_base": reasons.append(f"Flat-base candidate: {fmt_pct(row.get('range_60d'))} 60-day range, {fmt_pct(row.get('distance_52w_high'))} from its yearly high")
         elif cid == "double_bottom": reasons.append(f"Double-bottom candidate: lows differ by {fmt_pct(row.get('double_bottom_similarity'))}; estimated midpoint pivot ${fmt_num(row.get('double_bottom_pivot'), '', 2)}")

@@ -55,6 +55,13 @@ def safe_float(v):
         return None if (math.isnan(f) or math.isinf(f)) else f
     except: return None
 
+def safe_int(v, default: int = 0) -> int:
+    """int() that survives NaN. `v or 0` does NOT: NaN is truthy in Python, so it passes
+    straight through the `or` and int(NaN) raises ValueError — which, from a provider
+    that routinely returns NaN volume, was enough to fail an entire analysis."""
+    f = safe_float(v)
+    return default if f is None else int(f)
+
 def safe_fraction(v):
     """Normalize provider percentages (25.4) and ratios (0.254) to a fraction."""
     value = safe_float(v)
@@ -782,8 +789,8 @@ def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
                 def row_to_opt(r):
                     return {"strike": safe_float(r.get("strike")), "bid": safe_float(r.get("bid")),
                             "ask": safe_float(r.get("ask")), "iv": safe_float(r.get("impliedVolatility")),
-                            "open_interest": int(r.get("openInterest", 0) or 0),
-                            "volume": int(r.get("volume", 0) or 0),
+                            "open_interest": safe_int(r.get("openInterest")),
+                            "volume": safe_int(r.get("volume")),
                             "in_the_money": bool(r.get("inTheMoney", False))}
 
                 chain_data = {"expiration": exp_str, "days_to_exp": days_out,
@@ -814,7 +821,7 @@ def get_price_history_series(hist: pd.DataFrame, days: int = 1260) -> list:
         out.append({"date": dt, "open": safe_float(row.get("Open")),
                     "high": safe_float(row.get("High")), "low": safe_float(row.get("Low")),
                     "close": safe_float(row.get("Close")),
-                    "volume": int(row.get("Volume", 0) or 0)})
+                    "volume": safe_int(row.get("Volume"))})
     return out
 
 
