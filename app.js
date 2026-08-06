@@ -560,9 +560,12 @@ function runAnalysis() {
   if (sessions[direct] && sessions[direct].data.aiSummary && sessions[direct].profileKey === profileKey) {
     active = direct; showWorkspace(); renderTickerPills(); renderAll(sessions[direct].data); return;
   }
+  // Courtesy pre-check only — it saves a wasted scrape on an obvious re-run. The server
+  // holds the authoritative limits; this one is per-ticker, per-browser and trivially
+  // bypassed, and it doesn't fire at all for company-name queries.
   const wait = /^[A-Z.\-]{1,10}$/.test(direct) ? analysisRunWait(direct) : 0;
   if (wait) {
-    showProgress(0, 7, `You've already run ${RUN_LIMIT} ${direct} analyses recently. Reopen its saved tab or try again in about ${wait} min.`, true);
+    showProgress(0, 7, `You've run ${RUN_LIMIT} ${direct} analyses recently — reopen its saved tab, or try again in about ${wait} min.`, true);
     hideProgress(4200); return;
   }
 
@@ -592,8 +595,22 @@ function runAnalysis() {
       }
       es.close(); if (_es === es) _es = null; btn.disabled = false; return;
     }
-    let msg = "Connection lost. Is the server running? (node server.js)";
-    try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch (x) {}
+    let d = {};
+    try { if (e.data) d = JSON.parse(e.data); } catch (x) {}
+
+    // A rate/capacity limit is not a broken connection. Say so plainly and offer no
+    // Retry button — retrying is exactly what the limit is asking them not to do.
+    if (d.limited) {
+      showProgress(0, 7, d.error, true);
+      // Neutral, not a hue: a limit is informational, not directional, and --warn falls
+      // to 3.7:1 on Daylight's surface. --ink holds >=5.18:1 in all six themes.
+      document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--ink);font-family:var(--mono);font-size:12px">${esc(d.error)}</span></div>`;
+      ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Written analysis paused — saved tabs still open instantly.</span></div>`;
+      btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(6000);
+      return;
+    }
+
+    const msg = d.error || "Connection lost. Is the server running? (node server.js)";
     showProgress(0, 7, "Error: " + msg, true);
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--down);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
       <button class="retry-btn" onclick="retryAnalysis('${jsAttr(query)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
@@ -649,7 +666,13 @@ function runAnalysis() {
   es.addEventListener("ai_error", e => {
     const d = JSON.parse(e.data);
     const sess = sessions[key];
-    if (sess) { sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || ""; touchSession(sess); persistSessions(); }
+    if (sess) {
+      sess.data.aiError = d.error; sess.data.aiSummary = _stream?.answer || ""; sess.data.aiReasoning = _stream?.thinking || "";
+      // A capacity limit is a different banner from a failed stream: there is nothing to
+      // retry until the budget resets, so aiWarnHtml drops the Retry button.
+      sess.data.aiLimited = Boolean(d.limited); sess.data.aiResetsAt = d.resets_at || null;
+      touchSession(sess); persistSessions();
+    }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
     document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
@@ -670,13 +693,17 @@ const RETRY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 // so runAnalysis doesn't short-circuit to the cached-result path.
 function retryAnalysis(t) {
   if (!t) return;
-  if (sessions[t]) { sessions[t].data.aiSummary = ""; touchSession(sessions[t]); persistSessions(); }
+  if (sessions[t]) { sessions[t].data.aiSummary = ""; sessions[t].data.aiLimited = false; touchSession(sessions[t]); persistSessions(); }
   document.getElementById("ticker").value = t;
   runAnalysis();
 }
 // Shared AI-error banner (with a retry affordance) used by both the live stream and final render.
 function aiWarnHtml(d) {
   if (!d || !d.aiError) return "";
+  // Out of daily AI capacity: no Retry button. Retrying would re-spend a scrape and
+  // still can't produce a write-up until the budget resets, and the message already
+  // says the dashboard is live, so the usual suffix would be redundant.
+  if (d.aiLimited) return `<div class="ai-warn">${esc(d.aiError)}</div>`;
   return `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.
     <button class="retry-btn" onclick="retryAnalysis('${jsAttr(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
 }
@@ -1913,7 +1940,17 @@ async function streamChatReply(sess) {
     const res = await fetch("/chat", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: outbound, context: sess.context, analysis: sess.data.aiSummary || "",
         think: chatThink, profile: sess.profile || null }) });
-    if (!res.ok || !res.body) throw new Error("server responded " + res.status);
+    // A limited/refused request answers with a JSON body carrying a real explanation.
+    // Throwing the bare status would surface it as "⚠️ Connection error: server responded
+    // 429" and hide what the server actually said. Thrown rather than handled inline
+    // because the cleanup below this try is not a finally — returning early would leave
+    // _chatBusy set and wedge the thread.
+    if (!res.ok || !res.body) {
+      const info = await res.json().catch(() => null);
+      const err = new Error((info && info.error) || ("server responded " + res.status));
+      err.fromServer = Boolean(info && info.error);
+      throw err;
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -1938,6 +1975,11 @@ async function streamChatReply(sess) {
     if (e.name === "AbortError") {
       // User stopped it — keep whatever streamed; note it if nothing arrived.
       if (!aiMsg.content.trim()) aiMsg.content = "_Stopped._";
+    } else if (e.fromServer) {
+      // The server explained itself (rate limit, capacity, budget) — quote it verbatim
+      // rather than dressing it up as a connection failure.
+      aiMsg.error = true;
+      aiMsg.content = "⚠️ " + e.message;
     } else {
       aiMsg.error = true;
       if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + " — please try again.";
