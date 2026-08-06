@@ -1125,10 +1125,25 @@ const appServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.end(); return; }
 
-  // Health
+  // Health. Deliberately unchanged and deliberately dumb: it is Railway's healthcheck
+  // target, it is public, and publishing remaining budget here would tell an attacker
+  // exactly how much headroom is left to burn. Spend lives behind /stats instead.
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, {"Content-Type":"application/json"});
     res.end(JSON.stringify({ status: "ok", model: AI_MODEL, finnhub_configured: Boolean(process.env.FINNHUB_API_KEY) }));
+    return;
+  }
+
+  // Owner-only spend snapshot. Fails CLOSED — with SQUALL_STATS_KEY unset it 404s and is
+  // indistinguishable from a route that doesn't exist. Exempt from the limiter (it's yours).
+  if (req.method === "GET" && req.url.startsWith("/stats")) {
+    const key = new URL(req.url, `http://${req.headers.host}`).searchParams.get("key");
+    const expected = process.env.SQUALL_STATS_KEY || "";
+    const ok = expected && key && key.length === expected.length
+               && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(expected));
+    if (!ok) { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); return; }
+    res.writeHead(200, {"Content-Type":"application/json", "Cache-Control":"no-store"});
+    res.end(JSON.stringify(limitStats(), null, 2));
     return;
   }
 
