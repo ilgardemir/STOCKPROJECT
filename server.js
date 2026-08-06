@@ -1,7 +1,9 @@
 const http = require("http");
 const { exec, spawn } = require("child_process");
 const fs   = require("fs");
+const os   = require("os");
 const path = require("path");
+const crypto = require("crypto");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -18,6 +20,54 @@ const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 // ANALYSIS_MAX caps total output (thinking + answer share it).
 const REASON_EFFORT = "medium"; // was "high" — dropped to cut how long the model spends before writing
 const ANALYSIS_MAX  = 6000;     // total output cap
+
+// ─── ABUSE LIMIT CONFIG ───────────────────────────────────────────────────────
+// Every knob is env-tunable so Railway variables retune the site without a code
+// deploy. See the "Abuse limits" section in CLAUDE.md for the reasoning.
+const envInt = (name, dflt) => { const v = parseInt(process.env[name], 10); return Number.isFinite(v) ? v : dflt; };
+const LIM = {
+  BURST_CAP:           envInt("SQUALL_BURST_CAP", 4),            // tokens per key
+  BURST_REFILL_MS:     envInt("SQUALL_BURST_REFILL_MS", 60000),  // time to refill from empty to full
+  IP_HOURLY:           envInt("SQUALL_IP_HOURLY", 20),           // cost-requests / key / hour
+  IP_DAILY:            envInt("SQUALL_IP_DAILY", 60),            // cost-requests / key / UTC day
+  IP_ANALYZE_DAILY:    envInt("SQUALL_IP_ANALYZE_DAILY", 25),    // scrapes / key / UTC day
+  GLOBAL_AI_DAILY:     envInt("SQUALL_GLOBAL_AI_DAILY", 1500),   // weighted AI credits / UTC day
+  GLOBAL_SCRAPE_DAILY: envInt("SQUALL_GLOBAL_SCRAPE_DAILY", 300),// scraperFinal.py runs / UTC day
+  GLOBAL_SCREEN_DAILY: envInt("SQUALL_GLOBAL_SCREEN_DAILY", 120),// screener.py runs / UTC day
+  MAX_PY:              envInt("SQUALL_MAX_PY", 2),               // concurrent Python subprocesses
+  MAX_QUEUE:           envInt("SQUALL_MAX_QUEUE", 4),            // waiters beyond that before 503
+  QUEUE_TIMEOUT_MS:    envInt("SQUALL_QUEUE_TIMEOUT_MS", 45000),
+  IDLE_EVICT_MS:       envInt("SQUALL_IDLE_EVICT_MS", 7200000),  // drop keys idle > 2h
+  MAX_KEYS:            envInt("SQUALL_MAX_KEYS", 20000),         // hard backstop vs. an IPv6 spray
+  STATE_FLUSH_MS:      envInt("SQUALL_STATE_FLUSH_MS", 15000),
+  MAX_CHAT_BODY:       envInt("SQUALL_MAX_CHAT_BODY", 262144),   // 256 KiB
+  MAX_ANALYZE_BODY:    envInt("SQUALL_MAX_ANALYZE_BODY", 4096),
+  MAX_CHAT_MESSAGES:   envInt("SQUALL_MAX_CHAT_MESSAGES", 24),
+  MAX_MESSAGE_CHARS:   envInt("SQUALL_MAX_MESSAGE_CHARS", 8000),
+  MAX_HISTORY_CHARS:   envInt("SQUALL_MAX_HISTORY_CHARS", 60000),
+  // ai_prompt is structurally bounded (15 fixed sections, 10 news records capped at
+  // 280 chars, MD&A capped at 500) and lands around 15-20 KB — 120 KB is ~6x headroom.
+  MAX_CONTEXT_CHARS:   envInt("SQUALL_MAX_CONTEXT_CHARS", 120000),
+  MAX_ANALYSIS_CHARS:  envInt("SQUALL_MAX_ANALYSIS_CHARS", 40000),
+  TRUST_PROXY:         envInt("SQUALL_TRUST_PROXY", 1),
+  // os.tmpdir() rather than a hardcoded "/tmp" (which screener.py uses): identical on
+  // Railway, but on a Windows dev box "/tmp" resolves to a nonexistent C:\tmp and would
+  // silently disable the mirror during local verification. Do not "fix" this back.
+  STATE_PATH:          process.env.SQUALL_STATE_PATH || path.join(os.tmpdir(), "squall-limits.json")
+};
+// Per-request cost weights. `ai` is the weighted LLM credit; `scrape`/`screen` count
+// subprocess runs against their own separate ceilings.
+//   analyze — ai_prompt is the largest prompt in the app (~20-30k in) against a
+//             6000-token output cap, plus 4 Finnhub calls, SEC fetches and yahooquery.
+//   chat    — carries the whole context + prior analysis in its system message, so
+//             input is comparable to an analyze but output is a third to a half.
+//   screen  — cheap in tokens, but drags a ~600-ticker yahooquery pull behind it.
+const COST = {
+  analyze:       { ai: 10, scrape: 1, screen: 0 },
+  analyze_post:  { ai: 10, scrape: 1, screen: 0 },
+  chat:          { ai: 3,  scrape: 0, screen: 0 },
+  screen:        { ai: 2,  scrape: 0, screen: 1 }
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -667,6 +717,408 @@ function serveStatic(req, res) {
   });
 }
 
+// ─── ABUSE LIMITS ─────────────────────────────────────────────────────────────
+// The site is public and anonymous, and every cost path (an analysis, a chat turn,
+// a screen) spends real OpenRouter/Finnhub credit plus a Python subprocess. These
+// gates are deliberately invisible to a normal visitor: they cap what one client can
+// spend, cap what the whole site can spend in a day, and cap how many subprocesses
+// run at once. When the daily AI budget is gone the analyzer still scrapes and still
+// renders its dashboard — only the written analysis drops out.
+//
+// Note the split: admit() gates counters synchronously, acquirePy() gates subprocess
+// concurrency asynchronously. They are separate because /chat needs the former and
+// not the latter, and because an SSE route must decide its status code before it can
+// afford to await anything.
+
+// ── Client identity ───────────────────────────────────────────────────────────
+function isPrivateAddr(ip) {
+  const a = String(ip).toLowerCase();
+  if (a.startsWith("::ffff:")) return isPrivateAddr(a.slice(7));
+  if (a === "::1" || a === "127.0.0.1" || a.startsWith("127.")) return true;
+  if (a.startsWith("10.") || a.startsWith("192.168.") || a.startsWith("169.254.")) return true;
+  const m = a.match(/^172\.(\d+)\./);
+  if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(a)) return true;   // fc00::/7 unique-local
+  if (/^fe[89ab][0-9a-f]:/.test(a)) return true;   // fe80::/10 link-local
+  return false;
+}
+
+/**
+ * Behind Railway's edge the only trustworthy entry in x-forwarded-for is the one the
+ * edge itself appended from the TCP peer — the RIGHTMOST. The leftmost is whatever the
+ * client typed (`curl -H "x-forwarded-for: 1.2.3.4"` sets it), so trusting it would let
+ * anyone mint unlimited fresh buckets. We skip private hops on the way left so an extra
+ * internal proxy can't collapse every visitor into one shared bucket and lock out the
+ * whole internet on the first burst.
+ */
+function clientIp(req) {
+  const chain = String(req.headers["x-forwarded-for"] || "").split(",").map(s => s.trim()).filter(Boolean);
+  const start = chain.length - 1 - Math.max(0, LIM.TRUST_PROXY - 1);
+  for (let i = Math.min(start, chain.length - 1); i >= 0; i--) {
+    if (!isPrivateAddr(chain[i])) return chain[i];
+  }
+  return String(req.socket?.remoteAddress || "unknown");
+}
+
+/** Expand "2001:db8::1" to eight zero-padded hextets so a prefix compare is exact. */
+function expandV6(ip) {
+  const [head, tail] = ip.split("::");
+  const l = head ? head.split(":") : [];
+  const r = tail !== undefined && tail ? tail.split(":") : [];
+  const fill = tail !== undefined ? Array(Math.max(0, 8 - l.length - r.length)).fill("0") : [];
+  return [...l, ...fill, ...r].slice(0, 8).map(h => (h || "0").padStart(4, "0")).join(":");
+}
+
+/**
+ * IPv4 keys exactly; IPv6 keys by /64 prefix. The /64 matters: every residential v6
+ * subscriber is handed a /64 minimum (many get a /56 or /48), so counting per-address
+ * would hand one attacker 2^64 free buckets. A /64 is the smallest unit an ISP assigns
+ * to a single subscriber, which makes it the right equivalence class — the same
+ * tradeoff as an IPv4 NAT, and no worse.
+ */
+function clientKey(req) {
+  let ip = clientIp(req).toLowerCase();
+  if (ip.startsWith("[")) ip = ip.slice(1, ip.indexOf("]") === -1 ? undefined : ip.indexOf("]"));
+  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  if (!ip.includes(":")) return "4:" + ip;
+  return "6:" + expandV6(ip).split(":").slice(0, 4).join(":");
+}
+
+// ── Counters ──────────────────────────────────────────────────────────────────
+// A token bucket for the burst tier (fixed 60s windows would double at the edge and
+// would reject an honest second click at second 59), and fixed UTC calendar windows
+// for everything else — so "resets at 00:00 UTC" is literally true, so a stale mirror
+// file is self-invalidating by its day id, and so /stats reads cleanly.
+const STATE_VERSION = 1;
+const buckets = new Map();   // key → { tokens, ts, hourId, hourN, dayId, dayN, analyzeN, last }
+const globals = { dayId: "", ai: 0, scrape: 0, screen: 0, ceilingLogged: {} };
+let stateDirty = false;
+
+const utcDayId  = () => new Date().toISOString().slice(0, 10);
+const utcHourId = () => Math.floor(Date.now() / 3600000);
+function nextUtcMidnight() { const d = new Date(); d.setUTCHours(24, 0, 0, 0); return d; }
+const secsToUtcMidnight = () => Math.max(1, Math.ceil((nextUtcMidnight() - Date.now()) / 1000));
+const secsToNextHour    = () => Math.max(1, 3600 - Math.floor((Date.now() % 3600000) / 1000));
+
+function touchGlobals() {
+  const day = utcDayId();
+  if (globals.dayId !== day) {
+    globals.dayId = day; globals.ai = 0; globals.scrape = 0; globals.screen = 0;
+    globals.ceilingLogged = {};
+    stateDirty = true;
+  }
+  return globals;
+}
+
+/** Lazy window rollover + token refill — no timers needed for correctness. */
+function touchEntry(key, now) {
+  let e = buckets.get(key);
+  if (!e) {
+    e = { tokens: LIM.BURST_CAP, ts: now, hourId: utcHourId(), hourN: 0, dayId: utcDayId(), dayN: 0, analyzeN: 0, last: now };
+    buckets.set(key, e);
+    return e;
+  }
+  const refill = ((now - e.ts) / LIM.BURST_REFILL_MS) * LIM.BURST_CAP;
+  if (refill > 0) { e.tokens = Math.min(LIM.BURST_CAP, e.tokens + refill); e.ts = now; }
+  const h = utcHourId(); if (e.hourId !== h) { e.hourId = h; e.hourN = 0; }
+  const d = utcDayId();  if (e.dayId  !== d) { e.dayId  = d; e.dayN  = 0; e.analyzeN = 0; }
+  e.last = now;
+  return e;
+}
+
+function shortKey(key) {
+  return crypto.createHash("sha256").update(key + (process.env.SQUALL_STATS_SALT || "squall")).digest("hex").slice(0, 8);
+}
+
+function deny(kind, key, rule, retryAfter, message, resetsAt) {
+  console.warn(`LIMIT deny rule=${rule} kind=${kind} key=${shortKey(key)} retry=${retryAfter}s`);
+  return { ok: false, rule, retryAfter, message, resetsAt: resetsAt || null };
+}
+
+/**
+ * The admission gate. Checks every rule BEFORE committing any of them, so a denial by a
+ * late rule doesn't silently burn an earlier counter.
+ *
+ * Charged on admission, not completion: a client that opens /analyze-stream and
+ * immediately aborts still costs a full Python run and a full OpenRouter stream, so
+ * completion-based accounting would be free to abuse.
+ */
+function admit(req, kind) {
+  const cost = COST[kind] || COST.chat;
+  const key = clientKey(req);
+  const now = Date.now();
+  const e = touchEntry(key, now);
+  const g = touchGlobals();
+
+  if (e.tokens < 1) {
+    const wait = Math.max(1, Math.ceil(((1 - e.tokens) * LIM.BURST_REFILL_MS / LIM.BURST_CAP) / 1000));
+    return deny(kind, key, "burst", wait, `That's a lot of requests at once — give it about ${wait}s and try again.`);
+  }
+  if (e.hourN >= LIM.IP_HOURLY) {
+    const wait = secsToNextHour();
+    return deny(kind, key, "ip_hourly", wait, `You've hit this hour's request limit. It resets in about ${Math.ceil(wait / 60)} min.`);
+  }
+  if (e.dayN >= LIM.IP_DAILY) {
+    return deny(kind, key, "ip_daily", secsToUtcMidnight(), "You've hit today's request limit for this connection. It resets at 00:00 UTC.", nextUtcMidnight().toISOString());
+  }
+  if (cost.scrape && e.analyzeN + cost.scrape > LIM.IP_ANALYZE_DAILY) {
+    return deny(kind, key, "ip_analyze_daily", secsToUtcMidnight(), "You've run today's maximum number of analyses for this connection. Saved tabs still open instantly; new analyses reset at 00:00 UTC.", nextUtcMidnight().toISOString());
+  }
+  if (cost.scrape && g.scrape + cost.scrape > LIM.GLOBAL_SCRAPE_DAILY) {
+    logCeiling("scrape");
+    return deny(kind, key, "global_scrape", secsToUtcMidnight(), "Squall has reached its data-provider limit for today. Saved tabs still work; new analyses resume at 00:00 UTC.", nextUtcMidnight().toISOString());
+  }
+  if (cost.screen && g.screen + cost.screen > LIM.GLOBAL_SCREEN_DAILY) {
+    logCeiling("screen");
+    return deny(kind, key, "global_screen", secsToUtcMidnight(), "Squall has reached its screening limit for today. Saved screens still open; new screens resume at 00:00 UTC.", nextUtcMidnight().toISOString());
+  }
+
+  e.tokens -= 1; e.hourN += 1; e.dayN += 1;
+  if (cost.scrape) { e.analyzeN += cost.scrape; g.scrape += cost.scrape; }
+  if (cost.screen) g.screen += cost.screen;
+  stateDirty = true;
+  return { ok: true, key, remaining: Math.max(0, LIM.IP_DAILY - e.dayN) };
+}
+
+function logCeiling(which) {
+  const g = touchGlobals();
+  if (g.ceilingLogged[which]) return;
+  g.ceilingLogged[which] = true;
+  console.warn(`LIMIT ceiling reached: ${which} budget exhausted for ${g.dayId}`);
+}
+
+/**
+ * The AI budget, spent immediately before the first OpenRouter call and deliberately
+ * NOT at admission — for /analyze-stream that means it runs after the dashboard has
+ * already been sent, which is what makes the data-only degradation possible.
+ *
+ * Charge once per logical request, never per attempt: the analyzer's retry loop can
+ * fire three HTTP calls for one analysis, and charging per attempt would let a flaky
+ * provider drain the day's budget 3x.
+ *
+ * There is deliberately no refund path. Because this sits after the point of no return,
+ * every failure mode either hasn't spent AI credit yet or has genuinely consumed the
+ * scrape it was charged for. Adding refunds would only add double-counting bugs.
+ */
+function spendAi(units) {
+  const g = touchGlobals();
+  if (g.ai + units > LIM.GLOBAL_AI_DAILY) {
+    logCeiling("ai");
+    return { ok: false, retryAfter: secsToUtcMidnight(), resetsAt: nextUtcMidnight().toISOString() };
+  }
+  g.ai += units;
+  stateDirty = true;
+  return { ok: true };
+}
+
+/**
+ * Owner-facing snapshot. Client keys are hashed, never raw: you can still see *that*
+ * one client dominates and correlate it across reloads, but the endpoint never hands
+ * out an IP address.
+ */
+function limitStats() {
+  const g = touchGlobals();
+  const top = [...buckets.entries()]
+    .sort((a, b) => b[1].dayN - a[1].dayN)
+    .slice(0, 10)
+    .map(([k, e]) => ({ k: shortKey(k), day: e.dayN, analyze: e.analyzeN }));
+  let mtime = null;
+  try { mtime = fs.statSync(LIM.STATE_PATH).mtime.toISOString(); } catch (_) {}
+  return {
+    day: g.dayId || utcDayId(),
+    resets_at: nextUtcMidnight().toISOString(),
+    ai:     { used: g.ai,     limit: LIM.GLOBAL_AI_DAILY },
+    scrape: { used: g.scrape, limit: LIM.GLOBAL_SCRAPE_DAILY },
+    screen: { used: g.screen, limit: LIM.GLOBAL_SCREEN_DAILY },
+    py:     { running: pyRunning, queued: pyQueue.length, max: LIM.MAX_PY },
+    keys: buckets.size,
+    top,
+    state_file: { path: LIM.STATE_PATH, mtime },
+    uptime_s: Math.round(process.uptime())
+  };
+}
+
+// ── Housekeeping ──────────────────────────────────────────────────────────────
+function sweepBuckets() {
+  const cut = Date.now() - LIM.IDLE_EVICT_MS;
+  for (const [k, e] of buckets) if (e.last < cut) buckets.delete(k);
+  // Hard backstop: an IPv6 spray across many /64s must not grow the Map until the
+  // container OOMs (a restart would clear the counters anyway — the real defense there
+  // is the global ceiling, which is key-independent). Evicting is safe: an idle key has
+  // a full burst bucket and a rolled-over hour, so only its daily count is lost, and
+  // re-earning that requires sustained traffic the global ceilings already cap.
+  if (buckets.size > LIM.MAX_KEYS) {
+    const excess = [...buckets.entries()].sort((a, b) => a[1].last - b[1].last).slice(0, buckets.size - LIM.MAX_KEYS);
+    for (const [k] of excess) buckets.delete(k);
+  }
+}
+
+/**
+ * Mirror the day's counters to the temp dir so a crash-restart inside a deploy doesn't
+ * hand everyone a fresh budget. Survival across a redeploy is explicitly not a goal.
+ */
+function loadLimitState() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LIM.STATE_PATH, "utf8"));
+    if (raw.v !== STATE_VERSION || raw.day !== utcDayId()) return;
+    globals.dayId = raw.day;
+    globals.ai = Number(raw.ai) || 0;
+    globals.scrape = Number(raw.scrape) || 0;
+    globals.screen = Number(raw.screen) || 0;
+    const now = Date.now();
+    for (const [k, v] of Object.entries(raw.keys || {})) {
+      // Restore only the daily counts. Burst tokens and hourly counts are meaningless
+      // across a restart gap, and restoring them would punish users for our crash.
+      buckets.set(k, { tokens: LIM.BURST_CAP, ts: now, hourId: utcHourId(), hourN: 0,
+                       dayId: raw.day, dayN: Number(v.d) || 0, analyzeN: Number(v.a) || 0, last: now });
+    }
+    console.log(`   Limits   : restored ${buckets.size} keys for ${raw.day} from ${LIM.STATE_PATH}`);
+  } catch (_) { /* absent or unreadable — start clean */ }
+}
+
+function flushLimitState(force) {
+  if (!stateDirty && !force) return;
+  stateDirty = false;
+  try {
+    // Only the busiest keys are worth persisting; everything below is a request or two.
+    const keys = {};
+    for (const [k, e] of [...buckets.entries()].sort((a, b) => b[1].dayN - a[1].dayN).slice(0, 2000)) {
+      if (e.dayN > 0) keys[k] = { d: e.dayN, a: e.analyzeN };
+    }
+    const json = JSON.stringify({ v: STATE_VERSION, day: globals.dayId || utcDayId(),
+                                  ai: globals.ai, scrape: globals.scrape, screen: globals.screen, keys });
+    // temp+rename so a kill mid-write can never leave truncated JSON behind.
+    fs.writeFileSync(LIM.STATE_PATH + ".tmp", json);
+    fs.renameSync(LIM.STATE_PATH + ".tmp", LIM.STATE_PATH);
+  } catch (_) { /* the mirror is best-effort; never let it break a request */ }
+}
+
+// ── Subprocess concurrency ────────────────────────────────────────────────────
+// Pure rejection makes a two-user site feel broken; an unbounded queue makes it feel
+// hung. A bounded queue with a timeout is the middle.
+let pyRunning = 0;
+const pyQueue = [];
+
+/**
+ * The `done` guard is not optional. /analyze-stream has three exit paths that can all
+ * fire for one request — py 'close', py 'error', and req 'close' (which kills the
+ * process) — and a double decrement would drive pyRunning negative, silently uncapping
+ * concurrency for the life of the process.
+ */
+function mkPyRelease() {
+  let done = false;
+  return () => { if (done) return; done = true; pyRunning = Math.max(0, pyRunning - 1); pumpPyQueue(); };
+}
+
+function pumpPyQueue() {
+  while (pyRunning < LIM.MAX_PY && pyQueue.length) {
+    const w = pyQueue.shift();
+    if (w.settled) continue;
+    pyRunning += 1;
+    w.settle(mkPyRelease());
+  }
+}
+
+/**
+ * Resolves to a release function, or the string "full" / "timeout" / "aborted".
+ * `onWait(position)` is called immediately on queueing and every 5s after, so an SSE
+ * client sees movement — without it a queued wait is indistinguishable from a hang,
+ * because app.js disables the analyze button until a terminal event arrives.
+ */
+function acquirePy(req, onWait) {
+  if (pyRunning < LIM.MAX_PY) { pyRunning += 1; return Promise.resolve(mkPyRelease()); }
+  if (pyQueue.length >= LIM.MAX_QUEUE) return Promise.resolve("full");
+  return new Promise(resolve => {
+    const w = { settled: false, timer: null, ticker: null, settle: null };
+    w.settle = value => {
+      if (w.settled) return;
+      w.settled = true;
+      clearTimeout(w.timer); clearInterval(w.ticker);
+      req.removeListener("close", onClose);
+      // Drop out of the queue on every exit path. A timed-out or aborted waiter left
+      // in place would occupy a queue slot forever and turn MAX_QUEUE into a leak.
+      const i = pyQueue.indexOf(w);
+      if (i >= 0) pyQueue.splice(i, 1);
+      resolve(value);
+    };
+    function onClose() { w.settle("aborted"); }         // free the slot the moment they navigate away
+    w.timer = setTimeout(() => w.settle("timeout"), LIM.QUEUE_TIMEOUT_MS);
+    req.once("close", onClose);
+    pyQueue.push(w);
+    if (onWait) {
+      const pos = () => pyQueue.indexOf(w) + 1;
+      onWait(pos());
+      w.ticker = setInterval(() => { if (!w.settled) onWait(pos()); }, 5000);
+    }
+  });
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+/**
+ * Byte-capped body reader. Resolves to the body string, or null when the request was
+ * refused/aborted (in which case the response has already been written).
+ *
+ * Two fixes over the `body += chunk` this replaces: setEncoding is never called, so
+ * chunks are Buffers and `.length` is a true byte count (string concatenation counted
+ * characters, not bytes), and Buffer.concat before toString means a multi-byte UTF-8
+ * sequence split across a chunk boundary can't be corrupted.
+ */
+function readBody(req, res, maxBytes) {
+  return new Promise(resolve => {
+    let size = 0, over = false;
+    const chunks = [];
+    req.on("data", c => {
+      if (over) return;
+      size += c.length;
+      if (size > maxBytes) {
+        over = true;
+        // Headers go out before the destroy, so most clients read this; one still
+        // uploading may see ECONNRESET instead. Acceptable on an abuse path.
+        res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" });
+        res.end(JSON.stringify({ error: "Request body too large.", max_bytes: maxBytes }));
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("aborted", () => { if (!over) { over = true; resolve(null); } });
+    req.on("error",   () => { if (!over) { over = true; resolve(null); } });
+    req.on("end",     () => { if (!over) resolve(Buffer.concat(chunks).toString("utf8")); });
+  });
+}
+
+/**
+ * Bound and clean a /chat payload. Truncates rather than rejecting — a long-running
+ * session legitimately accumulates turns today, and 400-ing it would break real chats.
+ *
+ * The role whitelist is the load-bearing part: these messages are spliced in directly
+ * after the real system message, so without it a client can inject its own system turn.
+ */
+function validateChatPayload(parsed) {
+  // Control characters are stripped from client text, but newlines are kept —
+  // prose and the ai_prompt block both depend on them.
+  const clean = s => String(s == null ? "" : s).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, " ");
+  let messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  messages = messages
+    .filter(m => m && (m.role === "user" || m.role === "assistant"))
+    .slice(-LIM.MAX_CHAT_MESSAGES)
+    .map(m => ({ role: m.role, content: clean(m.content).slice(0, LIM.MAX_MESSAGE_CHARS) }));
+  // Drop from the oldest until the whole history fits.
+  let total = messages.reduce((n, m) => n + m.content.length, 0);
+  while (messages.length > 1 && total > LIM.MAX_HISTORY_CHARS) {
+    total -= messages[0].content.length;
+    messages.shift();
+  }
+  return {
+    messages,
+    context:  clean(parsed.context).slice(0, LIM.MAX_CONTEXT_CHARS),
+    analysis: clean(parsed.analysis).slice(0, LIM.MAX_ANALYSIS_CHARS),
+    think:    Boolean(parsed.think),
+    profile:  parsed.profile
+  };
+}
+
 // ─── HTTP SERVER ──────────────────────────────────────────────────────────────
 const appServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1065,16 +1517,31 @@ const appServer = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+  loadLimitState();
+  // .unref() on both so neither timer keeps the process alive on its own.
+  setInterval(sweepBuckets, 300000).unref();
+  setInterval(() => flushLimitState(false), LIM.STATE_FLUSH_MS).unref();
+  // Railway sends SIGTERM on redeploy/restart; flush so the day's spend isn't refunded.
+  process.on("SIGTERM", () => { flushLimitState(true); process.exit(0); });
+  process.on("SIGINT",  () => { flushLimitState(true); process.exit(0); });
+  process.on("beforeExit", () => flushLimitState(false));
+
   appServer.listen(PORT, "0.0.0.0", () => {
     console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
     console.log(`   Model    : ${AI_MODEL}`);
     console.log(`   Scraper  : ${path.resolve(SCRAPER_PATH)}`);
     console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
-    console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}\n`);
+    console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}`);
+    console.log(`   Limits   : ${LIM.IP_DAILY}/day per client · ${LIM.GLOBAL_AI_DAILY} AI credits/day · ${LIM.GLOBAL_SCRAPE_DAILY} scrapes/day · ${LIM.MAX_PY} concurrent`);
+    console.log(`   Stats    : ${process.env.SQUALL_STATS_KEY ? "/stats?key=… enabled" : "disabled (set SQUALL_STATS_KEY)"}\n`);
   });
 }
 
 module.exports = {
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
-  fallbackRefineScreener, readMarketUniverse
+  fallbackRefineScreener, readMarketUniverse,
+  // Abuse limits — exported so they can be exercised without starting the server.
+  LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
+  admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
+  acquirePy, readBody, validateChatPayload, limitStats
 };
