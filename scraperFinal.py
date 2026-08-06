@@ -185,7 +185,10 @@ class YQData:
 
     def __init__(self, symbol: str):
         self.sym    = symbol
-        self._yq    = YQTicker(symbol)
+        # An explicit timeout matters here: without one a stalled Yahoo response hangs
+        # the whole run, and the server caps concurrent engines — so one wedged scrape
+        # holds a slot that other users are queued behind. screener.py already does this.
+        self._yq    = YQTicker(symbol, timeout=25)
         self._cache: dict = {}
 
     # ── module helpers ────────────────────────────────────────────────────────

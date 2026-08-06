@@ -39,6 +39,11 @@ const LIM = {
   MAX_PY:              envInt("SQUALL_MAX_PY", 2),               // concurrent Python subprocesses
   MAX_QUEUE:           envInt("SQUALL_MAX_QUEUE", 4),            // waiters beyond that before 503
   QUEUE_TIMEOUT_MS:    envInt("SQUALL_QUEUE_TIMEOUT_MS", 45000),
+  // Wall-clock caps on the engines. Without these a wedged subprocess holds one of only
+  // MAX_PY slots forever, so two hangs take the whole site down until the container
+  // restarts. A cold screen pulls ~600 tickers, so it gets more room than one analysis.
+  SCRAPER_TIMEOUT_MS:  envInt("SQUALL_SCRAPER_TIMEOUT_MS", 180000),
+  SCREENER_TIMEOUT_MS: envInt("SQUALL_SCREENER_TIMEOUT_MS", 240000),
   IDLE_EVICT_MS:       envInt("SQUALL_IDLE_EVICT_MS", 7200000),  // drop keys idle > 2h
   MAX_KEYS:            envInt("SQUALL_MAX_KEYS", 20000),         // hard backstop vs. an IPv6 spray
   STATE_FLUSH_MS:      envInt("SQUALL_STATE_FLUSH_MS", 15000),
@@ -1279,6 +1284,12 @@ const appServer = http.createServer(async (req, res) => {
     // This route previously had no client-abort handling at all, so an abandoned screen
     // ran to completion. Kill it and free the slot the moment they disconnect.
     req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
+    // Hard wall-clock cap: a wedged engine would otherwise hold a slot indefinitely.
+    let timedOut = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { py.kill("SIGKILL"); } catch (_) {}
+    }, LIM.SCREENER_TIMEOUT_MS);
     let stdout = "", stderr = "", buf = "";
     py.stdout.on("data", chunk => { stdout += chunk.toString(); });
     py.stderr.on("data", chunk => {
@@ -1292,9 +1303,15 @@ const appServer = http.createServer(async (req, res) => {
         else if (legacy) send("screen_progress", { stage:Math.min(6, Number(legacy[1]) + 1), total:6, label:legacy[3] });
       }
     });
-    py.on("error", e => { slot(); send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
+    py.on("error", e => { clearTimeout(killTimer); slot(); send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
     py.on("close", code => {
+      clearTimeout(killTimer);
       slot();   // idempotent — req 'close' may already have released it
+      if (timedOut) {
+        send("screen_error", { error:`The screening engine took longer than ${Math.round(LIM.SCREENER_TIMEOUT_MS / 1000)}s and was stopped. Try a single index rather than the combined universe.`,
+                               limited:true, rule:"engine_timeout", retry_after_s:30 });
+        return res.end();
+      }
       let result;
       try { result = JSON.parse(stdout); }
       catch { send("screen_error", { error:"The screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
@@ -1348,6 +1365,13 @@ const appServer = http.createServer(async (req, res) => {
 
     // spawn() with an args array runs without a shell, so a multi-word name is one safe argv.
     const py = spawn(PYTHON, [SCRAPER_PATH, query], { env: process.env });
+    // Hard wall-clock cap. yahooquery has no per-call timeout on this path, so a stalled
+    // upstream would otherwise pin one of only MAX_PY slots for the life of the process.
+    let timedOut = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { py.kill("SIGKILL"); } catch (_) {}
+    }, LIM.SCRAPER_TIMEOUT_MS);
     let stdout = "", stderrTail = "", buf = "";
 
     py.stderr.on("data", chunk => {
@@ -1372,7 +1396,15 @@ const appServer = http.createServer(async (req, res) => {
       // needs no subprocess, so holding it through the whole LLM call would halve
       // throughput for no reason. Release is idempotent, so the req 'close' path above
       // overlapping with this one cannot drive the counter negative.
+      clearTimeout(killTimer);
       slot();
+      if (timedOut) {
+        // Checked before the empty-stdout branch: a killed process leaves stdout empty,
+        // and "Script produced no output" would misdescribe a timeout as a crash.
+        send("error", { error: `The data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. A data provider is probably slow right now — try again shortly.`,
+                        limited: true, rule: "engine_timeout", retry_after_s: 30 });
+        return res.end();
+      }
       if (!stdout.trim()) {
         send("error", { error: "Script produced no output.", detail: stderrTail });
         return res.end();
@@ -1484,6 +1516,7 @@ const appServer = http.createServer(async (req, res) => {
     });
 
     py.on("error", err => {
+      clearTimeout(killTimer);
       slot();
       send("error", { error: "Could not launch Python: " + err.message });
       res.end();
