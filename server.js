@@ -7,8 +7,10 @@ const crypto = require("crypto");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
-const SCRAPER_PATH = "./scraperFinal.py";
-const SCREENER_PATH = "./screener.py";
+// Overridable only so the engines can be stubbed when verifying server behavior on a
+// box without Python. Production leaves both unset.
+const SCRAPER_PATH = process.env.SQUALL_SCRAPER_PATH || "./scraperFinal.py";
+const SCREENER_PATH = process.env.SQUALL_SCREENER_PATH || "./screener.py";
 const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = "deepseek/deepseek-v4-flash";         // interprets the structured payload; it never searches for market/news data
 const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines screener language only; no web plugin
@@ -1226,14 +1228,25 @@ const appServer = http.createServer(async (req, res) => {
     }
     if (query.length < 3) { send("screen_error", { error:"Describe the companies you want to find in a little more detail." }); return res.end(); }
 
-    send("screen_progress", { percent:4, label:existing ? "Revising the measurable criteria" : "Translating the request into measurable criteria" });
+    // Out of AI budget is NOT fatal here: both interpreters already have deterministic
+    // rule-based fallbacks, so the screen still runs and still returns real scored
+    // results — it just builds the recipe without the model.
+    const aiBudget = spendAi(COST.screen.ai);
+    send("screen_progress", { percent:4, label: !aiBudget.ok
+      ? "AI interpretation unavailable today — using the deterministic recipe builder"
+      : (existing ? "Revising the measurable criteria" : "Translating the request into measurable criteria") });
     let spec;
     if (existing) {
       let refined;
-      try { refined = await refineScreenerSpec(query, existing, profile, priorCount); }
-      catch { refined = fallbackRefineScreener(query, existing, profile, priorCount); }
+      if (!aiBudget.ok) refined = fallbackRefineScreener(query, existing, profile, priorCount);
+      else {
+        try { refined = await refineScreenerSpec(query, existing, profile, priorCount); }
+        catch { refined = fallbackRefineScreener(query, existing, profile, priorCount); }
+      }
       spec = refined.spec;
       send("screen_reply", { reply:refined.reply });
+    } else if (!aiBudget.ok) {
+      spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile));
     } else {
       try { spec = await interpretScreenerQuery(query, profile); }
       catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
@@ -1371,6 +1384,20 @@ const appServer = http.createServer(async (req, res) => {
 
       // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
       send("result", { ...payload, model: AI_MODEL });
+
+      // The AI budget is spent HERE, deliberately after the dashboard has already gone
+      // out. When the day's budget is gone the analysis degrades to data-only rather
+      // than failing: every number above is live, only the written write-up drops.
+      // Charged once for the whole request, never per attempt — the retry loop below can
+      // fire three HTTP calls, and charging each would let a flaky provider drain the day.
+      const aiBudget = spendAi(COST.analyze.ai);
+      if (!aiBudget.ok) {
+        send("ai_error", {
+          error: "AI capacity reached for today — the dashboard above is fully live. Written analysis resets at 00:00 UTC.",
+          limited: true, resets_at: aiBudget.resetsAt
+        });
+        return res.end();
+      }
 
       send("ai_start", { model: AI_MODEL });
 
@@ -1517,6 +1544,16 @@ const appServer = http.createServer(async (req, res) => {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: payload.error })); return;
             }
+            // Same data-only degradation as the streaming route: return the full payload
+            // with the write-up missing rather than failing the whole request.
+            const aiBudget = spendAi(COST.analyze_post.ai);
+            if (!aiBudget.ok) {
+              res.writeHead(200, {"Content-Type":"application/json"});
+              res.end(JSON.stringify({ ...payload, aiSummary: "", aiReasoning: "", model: AI_MODEL,
+                aiError: "AI capacity reached for today — the data below is fully live. Written analysis resets at 00:00 UTC.",
+                aiLimited: true, aiResetsAt: aiBudget.resetsAt }));
+              return;
+            }
             try {
               const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                 method: "POST",
@@ -1563,6 +1600,14 @@ const appServer = http.createServer(async (req, res) => {
     // with a real status code — unlike the SSE GETs, whose client can't read one.
     const gate = admit(req, "chat");
     if (!gate.ok) { sendDenial(res, gate); return; }
+    // Chat has no data-only equivalent — there is nothing to show without the model — so
+    // an exhausted budget is an honest refusal rather than a degraded answer.
+    const chatBudget = spendAi(COST.chat.ai);
+    if (!chatBudget.ok) {
+      sendDenial(res, { rule: "global_ai", retryAfter: chatBudget.retryAfter, resetsAt: chatBudget.resetsAt,
+                        message: "Squall has reached its AI capacity for today. Chat resumes at 00:00 UTC — the dashboard and your saved tabs still work." }, 503);
+      return;
+    }
     const rawBody = await readBody(req, res, LIM.MAX_CHAT_BODY);
     if (rawBody === null) return;   // 413 already written, or the client vanished
     {
