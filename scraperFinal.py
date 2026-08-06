@@ -6,7 +6,7 @@ Sources: Finnhub (quote/profile/news) · yahooquery (history/options/fundamental
 """
 
 from yahooquery import Ticker as YQTicker
-import requests, json, re, sys, os, math, time
+import requests, json, re, sys, os, math, time, traceback
 from html import unescape
 from html.parser import HTMLParser
 import pandas as pd
@@ -553,7 +553,14 @@ def extract_mda_text(cik, accession_number, primary_document=None):
             try:
                 parser.feed(raw)
                 text = " ".join(unescape("".join(parser.parts)).split())
-            except (ValueError, TypeError) as exc:
+            except Exception as exc:
+                # Deliberately broad. html.parser reaches into _markupbase, which raises
+                # bare AssertionError -- not ValueError/TypeError -- e.g. "expected name
+                # token at '<![...'" when it meets a malformed marked section. The
+                # submission-text fallback URL below embeds uuencoded binary attachments,
+                # so that is reachable on ordinary filings. An MD&A excerpt is one
+                # optional field; letting its parser kill the whole payload turned a
+                # cosmetic miss into a total analysis failure with an unreadable message.
                 _sec_diag("mda_html_parse", url, False, error=exc)
                 text = " ".join(unescape(re.sub(r"<[^>]+>", " ", raw)).split())
         else:
@@ -1680,4 +1687,12 @@ if __name__ == "__main__":
     try:
         print(json.dumps(generate_analysis_payload(q), indent=2))
     except Exception as e:
-        print(json.dumps({"error": str(e), "ticker": q}))
+        # This string is rendered verbatim in the dashboard, so a bare library message
+        # ("expected name token at '<![...'") reads as gibberish with no stated cause.
+        # Keep the detail, but name what failed. The traceback goes to stderr, which the
+        # server already tails into its error `detail` — stdout stays JSON-only.
+        traceback.print_exc(file=sys.stderr)
+        print(json.dumps({
+            "error": f"The data pipeline failed while analyzing {q} ({type(e).__name__}: {e}).",
+            "ticker": q
+        }))
