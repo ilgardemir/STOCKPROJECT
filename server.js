@@ -1024,8 +1024,13 @@ function pumpPyQueue() {
  * `onWait(position)` is called immediately on queueing and every 5s after, so an SSE
  * client sees movement — without it a queued wait is indistinguishable from a hang,
  * because app.js disables the analyze button until a terminal event arrives.
+ *
+ * `abortSrc` must be whichever stream emits 'close' on a REAL client disconnect: `req`
+ * for the SSE GETs, but `res` for POST routes — in Node 16+ a POST's request stream
+ * auto-destroys and emits 'close' the instant its body is consumed, so waiting on `req`
+ * there would abandon the queue slot immediately. (Same trap the /chat handler documents.)
  */
-function acquirePy(req, onWait) {
+function acquirePy(abortSrc, onWait) {
   if (pyRunning < LIM.MAX_PY) { pyRunning += 1; return Promise.resolve(mkPyRelease()); }
   if (pyQueue.length >= LIM.MAX_QUEUE) return Promise.resolve("full");
   return new Promise(resolve => {
@@ -1034,7 +1039,7 @@ function acquirePy(req, onWait) {
       if (w.settled) return;
       w.settled = true;
       clearTimeout(w.timer); clearInterval(w.ticker);
-      req.removeListener("close", onClose);
+      abortSrc.removeListener("close", onClose);
       // Drop out of the queue on every exit path. A timed-out or aborted waiter left
       // in place would occupy a queue slot forever and turn MAX_QUEUE into a leak.
       const i = pyQueue.indexOf(w);
@@ -1043,7 +1048,7 @@ function acquirePy(req, onWait) {
     };
     function onClose() { w.settle("aborted"); }         // free the slot the moment they navigate away
     w.timer = setTimeout(() => w.settle("timeout"), LIM.QUEUE_TIMEOUT_MS);
-    req.once("close", onClose);
+    abortSrc.once("close", onClose);
     pyQueue.push(w);
     if (onWait) {
       const pos = () => pyQueue.indexOf(w) + 1;
@@ -1180,7 +1185,27 @@ const appServer = http.createServer(async (req, res) => {
     spec.universe_label = universe.label;
     send("screen_progress", { percent:8, label:`Preparing ${universe.label}` });
     send("screen_interpretation", spec);
+
+    // A cold screen is a ~600-ticker yahooquery pull; two of those plus Node is all a
+    // small container has room for. Queue rather than reject so a second user waits
+    // instead of seeing a failure.
+    const slot = await acquirePy(req, pos =>
+      send("screen_progress", { percent:9, label:`Queued for a free data slot (position ${pos})` }));
+    if (typeof slot !== "function") {
+      if (slot === "aborted") return res.end();   // they navigated away while queued
+      send("screen_error", {
+        error: slot === "full"
+          ? "Squall is running at capacity right now — try again in a minute."
+          : "Timed out waiting for a free data slot — try again in a minute.",
+        limited: true, rule: "capacity", retry_after_s: 30
+      });
+      return res.end();
+    }
+
     const py = spawn(PYTHON, [SCREENER_PATH], { env:process.env });
+    // This route previously had no client-abort handling at all, so an abandoned screen
+    // ran to completion. Kill it and free the slot the moment they disconnect.
+    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
     let stdout = "", stderr = "", buf = "";
     py.stdout.on("data", chunk => { stdout += chunk.toString(); });
     py.stderr.on("data", chunk => {
@@ -1194,8 +1219,9 @@ const appServer = http.createServer(async (req, res) => {
         else if (legacy) send("screen_progress", { stage:Math.min(6, Number(legacy[1]) + 1), total:6, label:legacy[3] });
       }
     });
-    py.on("error", e => { send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
+    py.on("error", e => { slot(); send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
     py.on("close", code => {
+      slot();   // idempotent — req 'close' may already have released it
       let result;
       try { result = JSON.parse(stdout); }
       catch { send("screen_error", { error:"The screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
@@ -1231,6 +1257,22 @@ const appServer = http.createServer(async (req, res) => {
 
     send("progress", { stage: 0, total: STAGE_TOTAL, label: "Starting data pipeline" });
 
+    // Queue behind the subprocess cap. The 5s position ticks are not cosmetic: app.js
+    // disables the analyze button until a terminal event arrives, so a silent wait is
+    // indistinguishable from a hang.
+    const slot = await acquirePy(req, pos =>
+      send("progress", { stage: 0, total: STAGE_TOTAL, label: `Waiting for a free data slot (position ${pos})` }));
+    if (typeof slot !== "function") {
+      if (slot === "aborted") return res.end();
+      send("error", {
+        error: slot === "full"
+          ? "Squall is running at capacity right now — try again in a minute."
+          : "Timed out waiting for a free data slot — try again in a minute.",
+        limited: true, rule: "capacity", retry_after_s: 30
+      });
+      return res.end();
+    }
+
     // spawn() with an args array runs without a shell, so a multi-word name is one safe argv.
     const py = spawn(PYTHON, [SCRAPER_PATH, query], { env: process.env });
     let stdout = "", stderrTail = "", buf = "";
@@ -1250,9 +1292,14 @@ const appServer = http.createServer(async (req, res) => {
       }
     });
     py.stdout.on("data", chunk => (stdout += chunk));
-    req.on("close", () => { try { py.kill(); } catch (_) {} });
+    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
 
     py.on("close", async () => {
+      // Free the subprocess slot the moment Python exits — the AI stream that follows
+      // needs no subprocess, so holding it through the whole LLM call would halve
+      // throughput for no reason. Release is idempotent, so the req 'close' path above
+      // overlapping with this one cannot drive the counter negative.
+      slot();
       if (!stdout.trim()) {
         send("error", { error: "Script produced no output.", detail: stderrTail });
         return res.end();
@@ -1350,6 +1397,7 @@ const appServer = http.createServer(async (req, res) => {
     });
 
     py.on("error", err => {
+      slot();
       send("error", { error: "Could not launch Python: " + err.message });
       res.end();
     });
@@ -1370,12 +1418,24 @@ const appServer = http.createServer(async (req, res) => {
           res.writeHead(400, {"Content-Type":"application/json"});
           res.end(JSON.stringify({ error: s.reason, invalid_ticker: s.invalid_ticker })); return;
         }
+        // Same subprocess cap as the streaming route. Abort source is `res`, not `req`:
+        // a POST's request stream emits 'close' as soon as its body is read.
+        const slot = await acquirePy(res);
+        if (typeof slot !== "function") {
+          if (slot === "aborted") return;
+          res.writeHead(503, {"Content-Type":"application/json", "Retry-After":"30"});
+          res.end(JSON.stringify({ error: "Squall is running at capacity right now — try again in a minute.",
+                                   limited: true, rule: "capacity", retry_after_s: 30 }));
+          return;
+        }
+
         // Quoted so a multi-word name stays one argument; sanitizeQuery already stripped
         // shell-unsafe characters (no quotes/backticks/$), so this cannot break out.
-        exec(
+        const child = exec(
           `${PYTHON} "${SCRAPER_PATH}" "${s.query}"`,
           { timeout: 150000, maxBuffer: 1024 * 1024 * 10 },
           async (err, stdout, stderr) => {
+            slot();
             if (!stdout || !stdout.trim()) {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: "Script produced no output.",
@@ -1423,6 +1483,8 @@ const appServer = http.createServer(async (req, res) => {
             }
           }
         );
+        // A disconnected client previously kept burning a 150s process to completion.
+        res.on("close", () => { if (!res.writableEnded) { try { child.kill(); } catch (_) {} slot(); } });
       } catch (e) {
         res.writeHead(400, {"Content-Type":"application/json"});
         res.end(JSON.stringify({ error: e.message }));
