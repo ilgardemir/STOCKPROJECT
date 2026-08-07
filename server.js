@@ -28,17 +28,28 @@ const ANALYSIS_MAX  = 6000;     // total output cap
 // deploy. See the "Abuse limits" section in CLAUDE.md for the reasoning.
 const envInt = (name, dflt) => { const v = parseInt(process.env[name], 10); return Number.isFinite(v) ? v : dflt; };
 const LIM = {
-  BURST_CAP:           envInt("SQUALL_BURST_CAP", 4),            // tokens per key
+  BURST_CAP:           envInt("SQUALL_BURST_CAP", 6),            // tokens per key
   BURST_REFILL_MS:     envInt("SQUALL_BURST_REFILL_MS", 60000),  // time to refill from empty to full
   IP_HOURLY:           envInt("SQUALL_IP_HOURLY", 20),           // cost-requests / key / hour
   IP_DAILY:            envInt("SQUALL_IP_DAILY", 60),            // cost-requests / key / UTC day
   IP_ANALYZE_DAILY:    envInt("SQUALL_IP_ANALYZE_DAILY", 25),    // scrapes / key / UTC day
   GLOBAL_AI_DAILY:     envInt("SQUALL_GLOBAL_AI_DAILY", 1500),   // weighted AI credits / UTC day
-  GLOBAL_SCRAPE_DAILY: envInt("SQUALL_GLOBAL_SCRAPE_DAILY", 300),// scraperFinal.py runs / UTC day
-  GLOBAL_SCREEN_DAILY: envInt("SQUALL_GLOBAL_SCREEN_DAILY", 120),// screener.py runs / UTC day
-  MAX_PY:              envInt("SQUALL_MAX_PY", 2),               // concurrent Python subprocesses
-  MAX_QUEUE:           envInt("SQUALL_MAX_QUEUE", 4),            // waiters beyond that before 503
-  QUEUE_TIMEOUT_MS:    envInt("SQUALL_QUEUE_TIMEOUT_MS", 45000),
+  // The two daily engine ceilings are self-imposed, not provider-imposed: SEC (10 req/s),
+  // Finnhub (~60 req/min) and Yahoo all limit by RATE, and nothing limits us by the day.
+  // MAX_PY is what actually bounds our request rate, so these are set for cost comfort
+  // rather than for provider standing, and can be raised without upstream consequence.
+  GLOBAL_SCRAPE_DAILY: envInt("SQUALL_GLOBAL_SCRAPE_DAILY", 600),// scraperFinal.py runs / UTC day
+  GLOBAL_SCREEN_DAILY: envInt("SQUALL_GLOBAL_SCREEN_DAILY", 200),// screener.py runs / UTC day
+  MAX_PY:              envInt("SQUALL_MAX_PY", 3),               // concurrent Python subprocesses
+  MAX_QUEUE:           envInt("SQUALL_MAX_QUEUE", 10),           // waiters beyond that before 503
+  // Must exceed the time a slot holder can legitimately occupy a slot, or a waiter is
+  // structurally guaranteed to fail behind one slow run: at 45s against a 180s scraper
+  // cap, queueing behind a cold analysis timed out every time, no matter how much room
+  // the queue had. Set above SCRAPER_TIMEOUT_MS so a waiter behind an analysis — the
+  // main path — only gives up once that engine has already been killed. Deliberately
+  // left BELOW SCREENER_TIMEOUT_MS (240s): covering the worst-case cold screen too would
+  // mean holding someone silent for four minutes, which is worse than an honest retry.
+  QUEUE_TIMEOUT_MS:    envInt("SQUALL_QUEUE_TIMEOUT_MS", 200000),
   // Wall-clock caps on the engines. Without these a wedged subprocess holds one of only
   // MAX_PY slots forever, so two hangs take the whole site down until the container
   // restarts. A cold screen pulls ~600 tickers, so it gets more room than one analysis.
