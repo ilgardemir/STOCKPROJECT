@@ -21,7 +21,47 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 5  # multi-index rows and deterministic chart-pattern measurements
+CACHE_VERSION = 6  # per-entry timestamps + `covered` set so partial runs accumulate
+
+# ── Upstream backpressure ─────────────────────────────────────────────────────
+# A cold run pulls ~600 symbols twice (history + modules), which is by far the
+# densest burst this app makes. The retry tiers below exist because Yahoo sometimes
+# drops a whole batch — but the most common REASON it drops a batch is that it is
+# already rate limiting us. Fanning a failed batch of 50 out into 50 single requests
+# therefore answers throttling by roughly doubling the request count, which deepens
+# the throttling: a feedback loop straight into an IP block.
+#
+# So fan-out is gated three ways: it never runs on a throttle signature, it stops
+# entirely for the rest of the run once any throttle signal is seen, and it draws
+# from a fixed per-run budget so even a run of ordinary failures cannot multiply its
+# own footprint without bound.
+THROTTLE_RE = re.compile(r"429|too\s*many\s*requests|rate.?limit|throttl|forbidden|unauthorized", re.I)
+RETRY_BUDGET = int(os.getenv("SCREENER_RETRY_BUDGET", "60"))
+THROTTLE_BACKOFF = float(os.getenv("SCREENER_THROTTLE_BACKOFF", "5.0"))
+
+_throttled = False        # sticky for the run once Yahoo signals backpressure
+_retry_budget_left = RETRY_BUDGET
+
+
+def looks_throttled(exc):
+    """Yahoo surfaces rate limiting as assorted exception types; match on the text."""
+    return bool(THROTTLE_RE.search(f"{type(exc).__name__} {exc}"))
+
+
+def note_failure(exc):
+    """Record a batch failure and report whether fan-out is still permitted."""
+    global _throttled
+    if looks_throttled(exc):
+        _throttled = True
+    return _throttled
+
+
+def take_retry_budget():
+    global _retry_budget_left
+    if _retry_budget_left <= 0:
+        return False
+    _retry_budget_left -= 1
+    return True
 
 
 def stage(n, label):
@@ -164,6 +204,11 @@ def get_symbol_modules(tickers):
     starts = list(range(0, len(tickers), 75))
     for completed, start in enumerate(starts, 1):
         batch = tickers[start:start + 75]
+        # History runs first, so a throttle signal from that phase is already known
+        # here. Spacing the remaining batches is the cheapest way to stop the second
+        # half of a run from finishing the job the first half started.
+        if _throttled:
+            time.sleep(THROTTLE_BACKOFF)
         try:
             tq = Ticker(batch, asynchronous=True, max_workers=10, timeout=20)
             modules = {
@@ -180,7 +225,9 @@ def get_symbol_modules(tickers):
                     if symbol in out and isinstance(values, dict):
                         out[symbol][kind] = values
         except Exception as exc:
-            print(f"WARN|modules|{start}|{type(exc).__name__}", file=sys.stderr, flush=True)
+            throttled = note_failure(exc)
+            print(f"WARN|modules|{start}|{type(exc).__name__}|{'429' if throttled else 'error'}",
+                  file=sys.stderr, flush=True)
         progress(58 + 26 * completed / max(1, len(starts)), f"Loading company data · batch {completed} of {len(starts)}")
     return out
 
@@ -203,14 +250,27 @@ def get_history(tickers):
             elif len(batch) == 1 and len(hist) >= 65:
                 frames[batch[0]] = hist.copy()
         except Exception as exc:
-            print(f"WARN|history|{label}|{type(exc).__name__}", file=sys.stderr, flush=True)
-            # Yahoo occasionally drops an entire large batch. Smaller retries recover
-            # most symbols without making the normal path hundreds of requests.
+            throttled = note_failure(exc)
+            # The |429 marker is what makes this line machine-readable upstream: the
+            # server counts throttle signals separately from ordinary failures.
+            print(f"WARN|history|{label}|{type(exc).__name__}|{'429' if throttled else 'error'}",
+                  file=sys.stderr, flush=True)
+            if throttled:
+                # Back off and take the loss for these symbols. Retrying here is what
+                # turns a throttle into a block; the partial result still gets cached
+                # and merged, so coverage recovers on a later run instead.
+                time.sleep(THROTTLE_BACKOFF)
+                return
+            # Genuine transient failure — recover in tiers, but only on borrowed budget.
             if retry and len(batch) > 10:
                 for offset in range(0, len(batch), 10):
+                    if not take_retry_budget():
+                        break
                     load_batch(batch[offset:offset + 10], f"{label}+{offset}", retry=False)
             elif len(batch) > 1:
                 for offset, symbol in enumerate(batch):
+                    if not take_retry_budget():
+                        break
                     load_batch([symbol], f"{label}.{offset}", retry=False)
     starts = list(range(0, len(tickers), 50))
     for completed, start in enumerate(starts, 1):
@@ -366,20 +426,43 @@ def history_features(df):
     }
 
 
+def read_cache():
+    """
+    Load the cache as (rows_by_ticker, covered) keeping only entries still inside the
+    TTL. Freshness is judged per entry rather than by the file's mtime because the
+    write path merges: a file rewritten a moment ago can carry rows fetched much
+    earlier, and an mtime check would keep renewing them forever.
+
+    `covered` is every ticker a previous run ATTEMPTED, which is deliberately a
+    superset of the tickers that produced rows. Judging coverage by rows alone meant
+    a single symbol with under 65 days of history — a new listing, a recent spin-off —
+    never appeared in the cache, failed the issubset check on every subsequent run,
+    and forced a full cold pull of the entire universe every time.
+    """
+    try:
+        if not CACHE_PATH.exists():
+            return {}, {}
+        cached = json.loads(CACHE_PATH.read_text())
+        if cached.get("version") != CACHE_VERSION:
+            return {}, {}
+        now = time.time()
+        covered = {t: ts for t, ts in (cached.get("covered") or {}).items()
+                   if now - finite(ts, 0) < CACHE_TTL}
+        rows = {r["ticker"]: r for r in cached.get("rows") or []
+                if isinstance(r, dict) and r.get("ticker") in covered}
+        return rows, covered
+    except Exception:
+        return {}, {}
+
+
 def build_universe(tickers, names):
     if TEST_LIMIT:
         tickers = tickers[:TEST_LIMIT]
-    cached = None
-    try:
-        if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < CACHE_TTL:
-            cached = json.loads(CACHE_PATH.read_text())
-            cached_symbols = {r.get("ticker") for r in cached.get("rows", [])}
-            if cached.get("version") == CACHE_VERSION and set(tickers).issubset(cached_symbols):
-                stage(2, "Using fresh market-data cache")
-                progress(84, "Using current cached market data")
-                return [r for r in cached["rows"] if r.get("ticker") in set(tickers)], True
-    except Exception:
-        pass
+    cached_rows, cached_covered = read_cache()
+    if set(tickers).issubset(set(cached_covered)):
+        stage(2, "Using fresh market-data cache")
+        progress(84, "Using current cached market data")
+        return [cached_rows[t] for t in tickers if t in cached_rows], True
 
     stage(1, f"Loading one year of prices for {len(tickers)} companies")
     progress(12, f"Loading one year of prices for {len(tickers)} companies")
@@ -480,16 +563,35 @@ def build_universe(tickers, names):
                 row["scores"]["uptrend"], row["scores"]["momentum_medium"],
                 row["scores"]["relative_strength"], row["scores"]["accumulation"]
             ]), 1)
+    # Merge rather than replace. A throttled run now returns fewer symbols by design,
+    # and overwriting would drop coverage a previous run already paid Yahoo for — which
+    # would fail the issubset check next time and trigger exactly the full cold pull this
+    # is all meant to avoid. Merging lets coverage accumulate across runs, with per-entry
+    # timestamps so nothing outlives the TTL.
+    now = time.time()
+    merged_rows = dict(cached_rows)
+    merged_rows.update({r["ticker"]: r for r in rows if r.get("ticker")})
+    merged_covered = dict(cached_covered)
+    merged_covered.update({t: now for t in tickers})
     try:
         # allow_nan=False so a NaN can never reach the cache. The default would write a
         # bare NaN, json.loads would happily read it back, and the poisoned rows would
-        # then fail the stdout encode on every screen for the full 30-minute TTL. Failing
-        # the write is caught below and simply means no cache this round.
-        CACHE_PATH.write_text(json.dumps({"version":CACHE_VERSION, "created_at": time.time(), "rows": rows},
-                                         separators=(",", ":"), allow_nan=False))
+        # then fail the stdout encode on every screen for the full TTL. Failing the write
+        # is caught below and simply means no cache this round.
+        payload = json.dumps({"version": CACHE_VERSION, "created_at": now,
+                              "rows": list(merged_rows.values()), "covered": merged_covered},
+                             separators=(",", ":"), allow_nan=False)
+        # temp+rename: a screen killed by SQUALL_SCREENER_TIMEOUT_MS mid-write would
+        # otherwise leave truncated JSON that every later run has to fail to parse.
+        tmp = Path(str(CACHE_PATH) + ".tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, CACHE_PATH)
     except Exception:
         pass
-    return rows, False
+    # Serve from the merged view, not just this run's rows: a symbol a previous run
+    # already fetched is still valid data we have paid for, and on a throttled run it
+    # is the difference between a usable screen and a thin one.
+    return [merged_rows[t] for t in tickers if t in merged_rows], False
 
 
 CONCEPT_LABELS = {
@@ -766,6 +868,9 @@ def main():
         "universe": universe_label, "universe_id": universe_id,
         "universe_requested": len(tickers), "universe_scored": len(rows),
         "cache_hit": cached, "spec": spec, "results": results,
+        # Honest when coverage is thin: universe_scored below universe_requested with
+        # throttled set means Yahoo pushed back and we deliberately did not retry.
+        "throttled": _throttled,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "definitions_version": 4
     }
