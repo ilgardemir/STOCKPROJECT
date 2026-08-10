@@ -6,7 +6,7 @@ Sources: Finnhub (quote/profile/news) · yahooquery (history/options/fundamental
 """
 
 from yahooquery import Ticker as YQTicker
-import requests, json, re, sys, os, math, time, traceback
+import requests, json, re, sys, os, math, time, tempfile, traceback
 from html import unescape
 from html.parser import HTMLParser
 import pandas as pd
@@ -27,6 +27,34 @@ SEC_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")   # optional; set to enable FMP cross-checks
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")  # quote, company profile, metrics, and sourced company news
 FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+# ── SEC request budget ─────────────────────────────────────────────────────────
+# EDGAR limits by RATE (10 req/s per IP+UA) and blocks the IP when exceeded, so the
+# deployment's standing with SEC — not the daily cost ceiling — is what these bound.
+# The scraper runs as one subprocess per analysis, so there is no shared state to
+# coordinate with: instead each process self-limits to a fraction of the real budget
+# that stays under the limit even when MAX_PY of them run at once. Conservative by
+# construction and needs no lock file, which a shared token bucket would.
+# At the default 3/s with MAX_PY=3 the worst case is 9 req/s aggregate.
+SEC_RATE_PER_PROC = float(os.getenv("SQUALL_SEC_RATE_PER_PROC", "3.0"))
+SEC_MIN_INTERVAL  = 1.0 / SEC_RATE_PER_PROC if SEC_RATE_PER_PROC > 0 else 0.0
+
+# The 90-day filing scan fetches the full document for every 8-K and Form 4 it finds,
+# one request each. A heavy-insider issuer files 50+ Form 4s between annual reports
+# (see the limit=200 comment below), so an uncapped scan is the single largest source
+# of SEC requests in a run. The cap is set high enough that a typical issuer is
+# unaffected and only pathological ones are trimmed; when it binds it is recorded in
+# SEC_DIAGNOSTICS rather than silently changing the insider counts.
+SEC_MAX_FILING_FETCHES = int(os.getenv("SQUALL_SEC_MAX_FILING_FETCHES", "40"))
+
+# SEC's ticker↔CIK directory is ~1 MB and changes on the order of weeks, but the
+# in-process cache below cannot survive a subprocess that exits after one analysis.
+# A temp-dir copy makes it one fetch per TTL for the whole container instead of one
+# per analysis. tempfile.gettempdir() rather than a hardcoded "/tmp" so local
+# verification on Windows still works (same reasoning as SQUALL_STATE_PATH).
+SEC_TICKERS_CACHE_PATH = os.getenv("SQUALL_SEC_TICKERS_CACHE",
+                                   os.path.join(tempfile.gettempdir(), "squall-sec-tickers.json"))
+SEC_TICKERS_CACHE_TTL  = int(os.getenv("SQUALL_SEC_TICKERS_TTL", str(7 * 24 * 3600)))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. UTILITIES
@@ -338,10 +366,33 @@ def _sec_diag(step, url, ok, status=None, error=None):
         print(f"SEC_ERROR|{step}|{status or 'request'}|{item.get('error', '')}",
               file=sys.stderr, flush=True)
 
+_sec_last_request = 0.0
+_sec_request_count = 0
+
+def _sec_throttle():
+    """
+    Space out sec.gov requests so this process stays well under EDGAR's per-IP rate
+    limit even when MAX_PY copies run concurrently. Every sec.gov call must route
+    through here — including the raw requests.get calls in the filing parsers, which
+    historically bypassed _sec_get and were the densest part of a run.
+
+    Safe without a lock: all SEC access in this script is sequential on the main
+    thread (the only ThreadPoolExecutor is Finnhub's).
+    """
+    global _sec_last_request, _sec_request_count
+    _sec_request_count += 1
+    if SEC_MIN_INTERVAL <= 0:
+        return
+    wait = _sec_last_request + SEC_MIN_INTERVAL - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _sec_last_request = time.monotonic()
+
 def _sec_get(url, step, timeout=15, as_json=False):
     """GET an SEC resource with bounded retries for transient failures only."""
     for attempt in range(3):
         try:
+            _sec_throttle()
             r = requests.get(url, headers=SEC_HEADERS, timeout=timeout)
             if r.status_code == 429 or 500 <= r.status_code < 600:
                 if attempt < 2:
@@ -364,14 +415,55 @@ def _sec_get(url, step, timeout=15, as_json=False):
     return None
 
 _SEC_TICKERS_CACHE = None
+
+def _read_sec_tickers_cache():
+    """Return the cached directory, or None when absent/stale/unreadable."""
+    try:
+        age = time.time() - os.path.getmtime(SEC_TICKERS_CACHE_PATH)
+        if age >= SEC_TICKERS_CACHE_TTL:
+            return None
+        with open(SEC_TICKERS_CACHE_PATH, "r", encoding="utf-8") as fh:
+            rows = json.load(fh)
+        return rows if isinstance(rows, list) and rows else None
+    except Exception:
+        return None   # a cache miss must never be fatal
+
+def _write_sec_tickers_cache(rows):
+    """temp+rename so a kill mid-write can't leave truncated JSON for the next run."""
+    tmp = SEC_TICKERS_CACHE_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, separators=(",", ":"), allow_nan=False)
+        os.replace(tmp, SEC_TICKERS_CACHE_PATH)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+
 def _load_sec_tickers():
-    """SEC's ticker↔name↔CIK directory (all ~10k SEC-registered filers), fetched once."""
+    """
+    SEC's ticker↔name↔CIK directory (all ~10k SEC-registered filers).
+
+    Cached in-process AND on disk. The disk tier is the load-bearing one: the scraper
+    is a fresh subprocess per analysis, so the module global alone meant re-downloading
+    ~1 MB from a rate-limited, IP-blocking endpoint on every single request.
+    """
     global _SEC_TICKERS_CACHE
     if _SEC_TICKERS_CACHE is not None:
         return _SEC_TICKERS_CACHE
+
+    cached = _read_sec_tickers_cache()
+    if cached is not None:
+        _SEC_TICKERS_CACHE = cached
+        _sec_diag("ticker_directory", SEC_TICKERS_CACHE_PATH, True, status="cache")
+        return _SEC_TICKERS_CACHE
+
     url = "https://www.sec.gov/files/company_tickers.json"
     payload = _sec_get(url, "ticker_directory", timeout=10, as_json=True)
     _SEC_TICKERS_CACHE = list(payload.values()) if isinstance(payload, dict) else []
+    # Only cache a real directory — caching [] would suppress retries for the full TTL
+    # and silently break CIK lookup for everyone until it expired.
+    if _SEC_TICKERS_CACHE:
+        _write_sec_tickers_cache(_SEC_TICKERS_CACHE)
     return _SEC_TICKERS_CACHE
 
 def get_cik_from_ticker(ticker):
@@ -607,6 +699,7 @@ def parse_8k_items(cik, accession_number):
         clean_acc = accession_number.replace("-", "")
         url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
                f"{clean_acc}/{accession_number}.txt")
+        _sec_throttle()
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
         items = re.findall(r"ITEM\s+(\d+\.\d+|\d+)\.", r.text, re.IGNORECASE)
         meanings = {
@@ -623,6 +716,7 @@ def analyze_form4(cik, accession_number):
         clean_acc = accession_number.replace("-", "")
         url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
                f"{clean_acc}/{accession_number}.txt")
+        _sec_throttle()
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
         codes = re.findall(r"<transactionCode>\s*([PS])\s*</transactionCode>", r.text)
         return {"buys": codes.count("P"), "sells": codes.count("S")}
@@ -680,6 +774,7 @@ def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs
         acc_nodash = target["accession_number"].replace("-", "")
         url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
                f"{acc_nodash}/{target['primary_document']}")
+        _sec_throttle()
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
         r.raise_for_status()
         ext = target["primary_document"].split(".")[-1] if "." in target["primary_document"] else "htm"
@@ -1149,20 +1244,42 @@ def generate_analysis_payload(query: str) -> dict:
         # successful "Latest 10-K" read.
         sec_available = bool(facts) and latest_10k is not None
 
+        # Each 8-K and Form 4 in the window costs one SEC document fetch, so an issuer
+        # with heavy insider activity can make this loop alone the bulk of the run's
+        # SEC traffic. `filings` is newest-first, so the cap keeps the most recent
+        # activity — the part that carries signal — and drops the long tail.
         cutoff = TODAY - timedelta(days=90)
+        detail_fetches = 0
+        truncated = False
         for f in filings:
             try:
-                if datetime.strptime(f["filing_date"], "%Y-%m-%d") >= cutoff:
-                    if f["form"] == "8-K":
-                        filing_signals["8k_events"].extend(parse_8k_items(cik, f["accession_number"]))
-                    elif f["form"] == "4":
-                        tx = analyze_form4(cik, f["accession_number"])
-                        filing_signals["insider_buys"]  += tx["buys"]
-                        filing_signals["insider_sells"] += tx["sells"]
-                    elif f["form"] in ["SC 13D", "SC 13D/A"]:
-                        filing_signals["activist_13d"] = True
+                if datetime.strptime(f["filing_date"], "%Y-%m-%d") < cutoff:
+                    continue
+                # 13D needs no fetch — the form's presence in the list IS the signal.
+                if f["form"] in ["SC 13D", "SC 13D/A"]:
+                    filing_signals["activist_13d"] = True
+                    continue
+                if f["form"] not in ("8-K", "4"):
+                    continue
+                if detail_fetches >= SEC_MAX_FILING_FETCHES:
+                    truncated = True
+                    continue   # keep scanning: a later 13D still costs nothing
+                detail_fetches += 1
+                if f["form"] == "8-K":
+                    filing_signals["8k_events"].extend(parse_8k_items(cik, f["accession_number"]))
+                else:
+                    tx = analyze_form4(cik, f["accession_number"])
+                    filing_signals["insider_buys"]  += tx["buys"]
+                    filing_signals["insider_sells"] += tx["sells"]
             except: continue
         filing_signals["8k_events"] = list(set(filing_signals["8k_events"]))
+        # Surfaced rather than silent: the insider counts below are a floor, not a total,
+        # whenever this binds.
+        filing_signals["detail_fetches"] = detail_fetches
+        filing_signals["truncated"] = truncated
+        if truncated:
+            _sec_diag("filing_scan", f"CIK{cik}", True, status="truncated",
+                      error=f"stopped after {SEC_MAX_FILING_FETCHES} document fetches")
 
     # ── STAGE 2: Download latest filing ──────────────────────────────────────
     sec_filing_attachment = None
