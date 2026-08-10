@@ -58,6 +58,12 @@ const LIM = {
   IDLE_EVICT_MS:       envInt("SQUALL_IDLE_EVICT_MS", 7200000),  // drop keys idle > 2h
   MAX_KEYS:            envInt("SQUALL_MAX_KEYS", 20000),         // hard backstop vs. an IPv6 spray
   STATE_FLUSH_MS:      envInt("SQUALL_STATE_FLUSH_MS", 15000),
+  // How long a scraped payload may be reused. Bounds how stale a "live" quote can be,
+  // so it is a freshness decision before it is a cost one: short enough that the
+  // dashboard stays honest during market hours, long enough to collapse the burst of
+  // people analyzing the same ticker after the same piece of news.
+  ANALYSIS_CACHE_TTL_MS: envInt("SQUALL_ANALYSIS_CACHE_TTL_MS", 300000),  // 5 min
+  ANALYSIS_CACHE_MAX:    envInt("SQUALL_ANALYSIS_CACHE_MAX", 60),         // entries
   MAX_CHAT_BODY:       envInt("SQUALL_MAX_CHAT_BODY", 262144),   // 256 KiB
   MAX_ANALYZE_BODY:    envInt("SQUALL_MAX_ANALYZE_BODY", 4096),
   MAX_CHAT_MESSAGES:   envInt("SQUALL_MAX_CHAT_MESSAGES", 24),
@@ -84,7 +90,12 @@ const COST = {
   analyze:       { ai: 10, scrape: 1, screen: 0 },
   analyze_post:  { ai: 10, scrape: 1, screen: 0 },
   chat:          { ai: 3,  scrape: 0, screen: 0 },
-  screen:        { ai: 2,  scrape: 0, screen: 1 }
+  screen:        { ai: 2,  scrape: 0, screen: 1 },
+  // A cache hit still writes an analysis, so it still costs AI — but it spawns nothing
+  // and touches no provider, so it must not draw on the scrape ceiling. Charging then
+  // refunding is not an option (there is no refund path, on purpose), so the cache is
+  // checked BEFORE admission and the cheaper kind is charged from the start.
+  analyze_cached: { ai: 10, scrape: 0, screen: 0 }
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -922,6 +933,48 @@ function logCeiling(which) {
   console.warn(`LIMIT ceiling reached: ${which} budget exhausted for ${g.dayId}`);
 }
 
+// ── Provider health ───────────────────────────────────────────────────────────
+// Both engines already emit the one signal that predicts an upstream block — SEC_ERROR
+// with a 429, FINNHUB_WARN, WARN|history from the screener. Until now the server read
+// those lines into a rolling tail buffer that is only surfaced when the run FAILS, so a
+// throttled-but-recovering run (exactly the case worth knowing about) logged nothing at
+// all and the rate was invisible.
+//
+// A rising rate_limited count is the earliest warning available that the deployment IP
+// is heading for a block, which matters more than the cost counters: budget is a number
+// you choose, provider standing is not something you can buy back.
+const ENGINE_WARN_RE = /^(SEC_ERROR|FINNHUB_WARN|WARN)\|(.*)$/;
+const WARN_SOURCE = { SEC_ERROR: "sec", FINNHUB_WARN: "finnhub", WARN: "yahoo" };
+const providerHealth = { dayId: "", sources: {} };
+
+function touchProviderHealth() {
+  const day = utcDayId();
+  if (providerHealth.dayId !== day) { providerHealth.dayId = day; providerHealth.sources = {}; }
+  return providerHealth;
+}
+
+/**
+ * Parse one engine stderr line. Returns true when it was a provider warning (and thus
+ * already logged), so the caller can still keep unrecognized lines for the error tail.
+ */
+function recordEngineWarning(engine, line) {
+  const m = ENGINE_WARN_RE.exec(line);
+  if (!m) return false;
+  const source = WARN_SOURCE[m[1]];
+  const h = touchProviderHealth();
+  const s = h.sources[source] || (h.sources[source] = { warn: 0, rate_limited: 0, last: null, last_at: null });
+  s.warn += 1;
+  // Both engines mark throttle signals explicitly; the loose alternatives catch a raw
+  // provider message that reached us without passing through that marking.
+  if (/\b429\b|too\s*many\s*requests|rate.?limit|throttl/i.test(line)) s.rate_limited += 1;
+  s.last = line.slice(0, 200);
+  s.last_at = new Date().toISOString();
+  // Deliberately not throttled: these are rare in normal operation, and suppressing them
+  // during an incident would hide the only signal that an incident is happening.
+  console.warn(`ENGINE ${engine} ${line.slice(0, 300)}`);
+  return true;
+}
+
 /**
  * The AI budget, spent immediately before the first OpenRouter call and deliberately
  * NOT at admission — for /analyze-stream that means it runs after the dashboard has
@@ -966,6 +1019,11 @@ function limitStats() {
     scrape: { used: g.scrape, limit: LIM.GLOBAL_SCRAPE_DAILY },
     screen: { used: g.screen, limit: LIM.GLOBAL_SCREEN_DAILY },
     py:     { running: pyRunning, queued: pyQueue.length, max: LIM.MAX_PY },
+    // Warnings per provider for the day, against the run counts above. rate_limited is
+    // the number to watch: it is the earliest available warning that the deployment IP
+    // is heading for a block, which is the one failure here that cannot be undone.
+    providers: touchProviderHealth().sources,
+    analysis_cache: analysisCacheStats(),
     keys: buckets.size,
     top,
     state_file: { path: LIM.STATE_PATH, mtime },
@@ -1026,6 +1084,63 @@ function flushLimitState(force) {
     fs.writeFileSync(LIM.STATE_PATH + ".tmp", json);
     fs.renameSync(LIM.STATE_PATH + ".tmp", LIM.STATE_PATH);
   } catch (_) { /* the mirror is best-effort; never let it break a request */ }
+}
+
+// ── Analysis cache ────────────────────────────────────────────────────────────
+// Two people analyzing AAPL the same morning used to mean two full scrapes: two SEC
+// filing scans, two yahooquery pulls, two Finnhub bundles, and two of only MAX_PY
+// subprocess slots. Caching the scraper payload is the only change that reduces
+// upstream load, cost, latency and queue pressure at the same time.
+//
+// The AI write-up is deliberately NOT cached. It is personalized by MySquall profile,
+// so sharing it between users would be wrong; and the AI budget is a number that can be
+// raised, whereas provider standing is not. Caching the data is what protects the thing
+// that matters.
+//
+// In-memory rather than a temp-dir mirror like the limiter: payloads are large, the
+// win is entirely within one container's lifetime, and a JSON round-trip would risk the
+// NaN/Infinity encode traps the engines already guard against.
+const analysisCache = new Map();   // key → { payload, at }
+let analysisCacheHits = 0, analysisCacheMisses = 0;
+
+function analysisCacheKey(q) { return String(q).trim().toUpperCase(); }
+
+/** Fresh entry for this query, or null. Also drops it if it has aged out. */
+function getCachedAnalysis(q) {
+  const key = analysisCacheKey(q);
+  const hit = analysisCache.get(key);
+  if (!hit) return null;
+  const age = Date.now() - hit.at;
+  if (age > LIM.ANALYSIS_CACHE_TTL_MS) { analysisCache.delete(key); return null; }
+  return { payload: hit.payload, ageMs: age };
+}
+
+/**
+ * Store under the requested query AND under the ticker the scraper resolved, so
+ * "apple" and "AAPL" converge on one entry after the first run. Insertion order is
+ * eviction order, which is FIFO rather than LRU — for a cache whose entries expire on
+ * a short clock anyway, recency of *use* matters far less than age.
+ */
+function putCachedAnalysis(q, payload) {
+  const at = Date.now();
+  const entry = { payload, at };
+  const keys = new Set([analysisCacheKey(q)]);
+  if (payload && payload.ticker) keys.add(analysisCacheKey(payload.ticker));
+  for (const k of keys) { analysisCache.delete(k); analysisCache.set(k, entry); }
+  while (analysisCache.size > LIM.ANALYSIS_CACHE_MAX) {
+    analysisCache.delete(analysisCache.keys().next().value);
+  }
+}
+
+function analysisCacheStats() {
+  const total = analysisCacheHits + analysisCacheMisses;
+  return {
+    entries: analysisCache.size,
+    hits: analysisCacheHits,
+    misses: analysisCacheMisses,
+    hit_rate: total ? Number((analysisCacheHits / total).toFixed(3)) : null,
+    ttl_s: Math.round(LIM.ANALYSIS_CACHE_TTL_MS / 1000)
+  };
 }
 
 // ── Subprocess concurrency ────────────────────────────────────────────────────
@@ -1312,6 +1427,7 @@ const appServer = http.createServer(async (req, res) => {
         const legacy = line.match(/^STAGE\|(\d+)\|(\d+)\|(.*)$/);
         if (progress) send("screen_progress", { percent:Number(progress[1]), label:progress[2] });
         else if (legacy) send("screen_progress", { stage:Math.min(6, Number(legacy[1]) + 1), total:6, label:legacy[3] });
+        else if (line) recordEngineWarning("screener", line);
       }
     });
     py.on("error", e => { clearTimeout(killTimer); slot(); send("screen_error", { error:"Could not start the screening engine: " + e.message }); res.end(); });
@@ -1343,7 +1459,15 @@ const appServer = http.createServer(async (req, res) => {
     const raw = url.searchParams.get("ticker") || "";
     const profile = sanitizeProfile(url.searchParams.get("profile"));
 
-    const gate = admit(req, "analyze");
+    // Sanitizing and the cache lookup both happen BEFORE admit(): they are pure and free,
+    // and knowing whether this run needs a subprocess is what lets it be charged the
+    // right cost. Charging the scrape ceiling and refunding it on a hit is not available
+    // — there is deliberately no refund path — so the cheaper kind has to be chosen up
+    // front. A denial still reports in-band at 200; only the cost weight differs.
+    const s = sanitizeQuery(raw);
+    const cached = s.ok ? getCachedAnalysis(s.query) : null;
+
+    const gate = admit(req, cached ? "analyze_cached" : "analyze");
     res.writeHead(200, sseHeaders(gate));
     const send = (event, data) =>
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -1351,83 +1475,16 @@ const appServer = http.createServer(async (req, res) => {
       send("error", { error: gate.message, limited: true, rule: gate.rule, retry_after_s: gate.retryAfter, resets_at: gate.resetsAt });
       return res.end();
     }
-
-    const s = sanitizeQuery(raw);
     if (!s.ok) { send("error", { error: s.reason, invalid_ticker: s.invalid_ticker }); res.end(); return; }
     const query = s.query;
 
-    send("progress", { stage: 0, total: STAGE_TOTAL, label: "Starting data pipeline" });
-
-    // Queue behind the subprocess cap. The 5s position ticks are not cosmetic: app.js
-    // disables the analyze button until a terminal event arrives, so a silent wait is
-    // indistinguishable from a hang.
-    const slot = await acquirePy(req, pos =>
-      send("progress", { stage: 0, total: STAGE_TOTAL, label: `Waiting for a free data slot (position ${pos})` }));
-    if (typeof slot !== "function") {
-      if (slot === "aborted") return res.end();
-      send("error", {
-        error: slot === "full"
-          ? "Squall is running at capacity right now — try again in a minute."
-          : "Timed out waiting for a free data slot — try again in a minute.",
-        limited: true, rule: "capacity", retry_after_s: 30
-      });
-      return res.end();
-    }
-
-    // spawn() with an args array runs without a shell, so a multi-word name is one safe argv.
-    const py = spawn(PYTHON, [SCRAPER_PATH, query], { env: process.env });
-    // Hard wall-clock cap. yahooquery has no per-call timeout on this path, so a stalled
-    // upstream would otherwise pin one of only MAX_PY slots for the life of the process.
-    let timedOut = false;
-    const killTimer = setTimeout(() => {
-      timedOut = true;
-      try { py.kill("SIGKILL"); } catch (_) {}
-    }, LIM.SCRAPER_TIMEOUT_MS);
-    let stdout = "", stderrTail = "", buf = "";
-
-    py.stderr.on("data", chunk => {
-      buf += chunk.toString();
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line.startsWith("STAGE|")) {
-          const [, k, n, label] = line.split("|");
-          send("progress", { stage: Number(k), total: Number(n), label });
-        } else if (line) {
-          stderrTail = (stderrTail + "\n" + line).slice(-2000);
-        }
-      }
-    });
-    py.stdout.on("data", chunk => (stdout += chunk));
-    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
-
-    py.on("close", async () => {
-      // Free the subprocess slot the moment Python exits — the AI stream that follows
-      // needs no subprocess, so holding it through the whole LLM call would halve
-      // throughput for no reason. Release is idempotent, so the req 'close' path above
-      // overlapping with this one cannot drive the counter negative.
-      clearTimeout(killTimer);
-      slot();
-      if (timedOut) {
-        // Checked before the empty-stdout branch: a killed process leaves stdout empty,
-        // and "Script produced no output" would misdescribe a timeout as a crash.
-        send("error", { error: `The data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. A data provider is probably slow right now — try again shortly.`,
-                        limited: true, rule: "engine_timeout", retry_after_s: 30 });
-        return res.end();
-      }
-      if (!stdout.trim()) {
-        send("error", { error: "Script produced no output.", detail: stderrTail });
-        return res.end();
-      }
-      let payload;
-      try { payload = JSON.parse(stdout.trim()); }
-      catch { send("error", { error: "Failed to parse Python output.", detail: stdout.slice(0,500) }); return res.end(); }
-      if (payload.error) { send("error", { error: payload.error }); return res.end(); }
-
-      // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
-      send("result", { ...payload, model: AI_MODEL });
-
+    /**
+     * Everything after the dashboard has been sent. Shared by the scraped and the cached
+     * path so the two cannot drift: the write-up is always generated fresh for this
+     * visitor's MySquall profile, which is exactly why the cache stores the scraped data
+     * and never the analysis.
+     */
+    const streamAiAnalysis = async (payload) => {
       // The AI budget is spent HERE, deliberately after the dashboard has already gone
       // out. When the day's budget is gone the analysis degrades to data-only rather
       // than failing: every number above is live, only the written write-up drops.
@@ -1524,6 +1581,103 @@ const appServer = http.createServer(async (req, res) => {
         send("ai_error", { error: msg });
       }
       res.end();
+    };
+
+    // Cache hit: no subprocess, no provider request, no queue. The dashboard goes out
+    // immediately and only the write-up is generated, which is why a hit is charged AI
+    // but not scrape. `cached`/`cached_age_s` ride along on the existing result event so
+    // the freshness is stated rather than implied — the SSE event contract is unchanged
+    // and a client that ignores the fields behaves exactly as before.
+    if (cached) {
+      analysisCacheHits += 1;
+      send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Using recent data for this ticker" });
+      send("result", { ...cached.payload, model: AI_MODEL,
+                       cached: true, cached_age_s: Math.round(cached.ageMs / 1000) });
+      await streamAiAnalysis(cached.payload);
+      return;
+    }
+    analysisCacheMisses += 1;
+
+    send("progress", { stage: 0, total: STAGE_TOTAL, label: "Starting data pipeline" });
+
+    // Queue behind the subprocess cap. The 5s position ticks are not cosmetic: app.js
+    // disables the analyze button until a terminal event arrives, so a silent wait is
+    // indistinguishable from a hang.
+    const slot = await acquirePy(req, pos =>
+      send("progress", { stage: 0, total: STAGE_TOTAL, label: `Waiting for a free data slot (position ${pos})` }));
+    if (typeof slot !== "function") {
+      if (slot === "aborted") return res.end();
+      send("error", {
+        error: slot === "full"
+          ? "Squall is running at capacity right now — try again in a minute."
+          : "Timed out waiting for a free data slot — try again in a minute.",
+        limited: true, rule: "capacity", retry_after_s: 30
+      });
+      return res.end();
+    }
+
+    // spawn() with an args array runs without a shell, so a multi-word name is one safe argv.
+    const py = spawn(PYTHON, [SCRAPER_PATH, query], { env: process.env });
+    // Hard wall-clock cap. yahooquery has no per-call timeout on this path, so a stalled
+    // upstream would otherwise pin one of only MAX_PY slots for the life of the process.
+    let timedOut = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { py.kill("SIGKILL"); } catch (_) {}
+    }, LIM.SCRAPER_TIMEOUT_MS);
+    let stdout = "", stderrTail = "", buf = "";
+
+    py.stderr.on("data", chunk => {
+      buf += chunk.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line.startsWith("STAGE|")) {
+          const [, k, n, label] = line.split("|");
+          send("progress", { stage: Number(k), total: Number(n), label });
+        } else if (line) {
+          // Counted and logged even when the run goes on to succeed — a throttled run
+          // that recovers is precisely the case the old tail-buffer-on-failure path
+          // threw away.
+          recordEngineWarning("scraper", line);
+          stderrTail = (stderrTail + "\n" + line).slice(-2000);
+        }
+      }
+    });
+    py.stdout.on("data", chunk => (stdout += chunk));
+    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
+
+    py.on("close", async () => {
+      // Free the subprocess slot the moment Python exits — the AI stream that follows
+      // needs no subprocess, so holding it through the whole LLM call would halve
+      // throughput for no reason. Release is idempotent, so the req 'close' path above
+      // overlapping with this one cannot drive the counter negative.
+      clearTimeout(killTimer);
+      slot();
+      if (timedOut) {
+        // Checked before the empty-stdout branch: a killed process leaves stdout empty,
+        // and "Script produced no output" would misdescribe a timeout as a crash.
+        send("error", { error: `The data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. A data provider is probably slow right now — try again shortly.`,
+                        limited: true, rule: "engine_timeout", retry_after_s: 30 });
+        return res.end();
+      }
+      if (!stdout.trim()) {
+        send("error", { error: "Script produced no output.", detail: stderrTail });
+        return res.end();
+      }
+      let payload;
+      try { payload = JSON.parse(stdout.trim()); }
+      catch { send("error", { error: "Failed to parse Python output.", detail: stdout.slice(0,500) }); return res.end(); }
+      if (payload.error) { send("error", { error: payload.error }); return res.end(); }
+
+      // Cached only after every failure branch above has been cleared, so an error
+      // payload or a truncated run can never be served to the next visitor.
+      putCachedAnalysis(query, payload);
+
+      // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
+      send("result", { ...payload, model: AI_MODEL });
+      await streamAiAnalysis(payload);
     });
 
     py.on("error", err => {

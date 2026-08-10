@@ -1399,6 +1399,13 @@ function renderAll(d) {
       ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
     body += `<div class="lvl-label">8-K events (last 90 days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
+    // The scraper caps how many filing documents it will fetch per run. When that binds,
+    // the counts above are a floor rather than a total, and saying so is cheaper than
+    // having someone reconcile them against EDGAR and conclude the numbers are wrong.
+    if (fa.truncated) {
+      body += `<div style="font-size:var(--t-micro);color:var(--ink-dim);margin-top:8px">` +
+              `Counts are a floor — this issuer files more frequently than one analysis reads.</div>`;
+    }
     html += card("filings", "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
   }
 
