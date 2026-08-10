@@ -1393,11 +1393,13 @@ function renderAll(d) {
   const fa = d.filing_activity;
   if (fa && d.sec_available !== false) {
     const ev = fa["8k_events"] || [];
+    // The window comes from the scraper so the labels can't drift from what it scanned.
+    const win = Number(fa.window_days) > 0 ? Number(fa.window_days) : 90;
     let body = `<div class="mgrid">
-      ${metric("Insider Buys <small>(90D)</small>", String(fa.insider_buys ?? 0), fa.insider_buys > 0 ? "green" : "")}
-      ${metric("Insider Sells <small>(90D)</small>", String(fa.insider_sells ?? 0), fa.insider_sells >= 5 ? "red" : "")}
+      ${metric(`Insider Buys <small>(${win}D)</small>`, String(fa.insider_buys ?? 0), fa.insider_buys > 0 ? "green" : "")}
+      ${metric(`Insider Sells <small>(${win}D)</small>`, String(fa.insider_sells ?? 0), fa.insider_sells >= 5 ? "red" : "")}
       ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
-    body += `<div class="lvl-label">8-K events (last 90 days)</div><div class="levels">` +
+    body += `<div class="lvl-label">8-K events (last ${win} days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
     // The scraper caps how many filing documents it will fetch per run. When that binds,
     // the counts above are a floor rather than a total, and saying so is cheaper than
@@ -1406,7 +1408,7 @@ function renderAll(d) {
       body += `<div style="font-size:var(--t-micro);color:var(--ink-dim);margin-top:8px">` +
               `Counts are a floor — this issuer files more frequently than one analysis reads.</div>`;
     }
-    html += card("filings", "SEC Filing Activity (90 Days)", body, { source: secSrc(d) });
+    html += card("filings", `SEC Filing Activity (${win} Days)`, body, { source: secSrc(d) });
   }
 
   /* Options */

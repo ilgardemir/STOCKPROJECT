@@ -47,6 +47,19 @@ SEC_MIN_INTERVAL  = 1.0 / SEC_RATE_PER_PROC if SEC_RATE_PER_PROC > 0 else 0.0
 # SEC_DIAGNOSTICS rather than silently changing the insider counts.
 SEC_MAX_FILING_FETCHES = int(os.getenv("SQUALL_SEC_MAX_FILING_FETCHES", "40"))
 
+# The 8-K / Form 4 / 13D lookback. Used both to select filings and to filter them,
+# and surfaced in the UI as "SEC Filing Activity (90 Days)" — so it lives in one
+# place rather than being repeated at each site.
+SIGNAL_WINDOW_DAYS = int(os.getenv("SQUALL_SEC_SIGNAL_DAYS", "90"))
+
+# The only forms anything downstream reads: 8-K and Form 4 drive the event/insider
+# signals, 13D flags an activist, and the 10-K feeds MD&A plus the filing attachment.
+# Selecting on this set is what keeps the window list small for filers that submit
+# thousands of unrelated documents (JPMorgan files ~25k structured-note prospectuses
+# a year) without needing an arbitrary positional cap that silently cuts the window.
+SIGNAL_FORMS = ("8-K", "4", "SC 13D", "SC 13D/A")
+ANNUAL_FORMS = ("10-K", "10-K/A")
+
 # SEC's ticker↔CIK directory is ~1 MB and changes on the order of weeks, but the
 # in-process cache below cannot survive a subprocess that exits after one analysis.
 # A temp-dir copy makes it one fetch per TTL for the whole container instead of one
@@ -587,28 +600,57 @@ def get_company_facts(cik):
     payload = _sec_get(url, "companyfacts", timeout=15, as_json=True)
     return payload if isinstance(payload, dict) else None
 
-def get_recent_filings(cik, limit=50):
+def get_recent_filings(cik, signal_days=SIGNAL_WINDOW_DAYS):
+    """
+    Signal-bearing filings inside the window, plus the latest annual report.
+
+    Selection is by DATE AND FORM, never by position. It used to be the newest N
+    entries, which silently became a much shorter window for anyone who files
+    heavily: JPMorgan's newest 200 filings span five days, so a 90-day insider/8-K
+    scan over that slice saw none of its 28 relevant filings and the dashboard
+    reported a bank that had filed nothing at all.
+
+    A positional cap cannot fix that — JPMorgan has thousands of filings inside 90
+    days, so any cap large enough to be safe is a cap that does nothing. Filtering
+    on the handful of forms anything actually reads bounds the list by relevance
+    instead, which is both smaller and correct.
+
+    Costs no extra SEC requests: the whole `recent` block already arrives in the
+    single submissions call below (25,687 entries for JPM, reaching back a year),
+    and the slice was always local. The extra document fetches this exposes are
+    what SEC_MAX_FILING_FETCHES bounds.
+    """
     try:
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         payload = _sec_get(url, "submissions", timeout=10, as_json=True)
         recent = (payload or {}).get("filings", {}).get("recent", {})
         pdocs  = recent.get("primaryDocument", [])
         forms = recent.get("form", [])
-        total = len(recent.get("accessionNumber", []))
+        dates = recent.get("filingDate", [])
+        # SEC returns these as parallel arrays. Bounding by the shortest means a
+        # truncated response degrades to fewer filings instead of an IndexError that
+        # would discard the SEC half of the analysis entirely.
+        total = min(len(recent.get("accessionNumber", [])), len(forms), len(dates))
 
         def filing_at(i):
-            return {"form": forms[i], "filing_date": recent["filingDate"][i],
+            return {"form": forms[i], "filing_date": dates[i],
                     "accession_number": recent["accessionNumber"][i],
                     "primary_document": pdocs[i] if i < len(pdocs) else None}
 
-        # Keep the newest filings for 90-day event/insider signals, but scan the
-        # full in-memory form list for the annual report. Financial institutions
-        # can have 10,000+ securities filings between 10-Ks (JPM's latest 10-K is
-        # currently at index 11,245), so applying `limit` before this search loses it.
-        selected = [filing_at(i) for i in range(min(limit, total))]
-        annual_i = next((i for i, form in enumerate(forms)
-                         if form in ("10-K", "10-K/A")), None)
-        if annual_i is not None and annual_i >= len(selected):
+        # ISO dates compare correctly as strings, so no date parsing per row. Scanning
+        # the whole block rather than stopping at the first out-of-window entry avoids
+        # depending on SEC's newest-first ordering; even 25k in-memory comparisons are
+        # free next to the single HTTP request that delivered them.
+        cutoff = (TODAY - timedelta(days=signal_days)).strftime("%Y-%m-%d")
+        selected = [filing_at(i) for i in range(total)
+                    if dates[i] >= cutoff and forms[i] in SIGNAL_FORMS]
+
+        # The annual report is found by scanning the full form list, not the window.
+        # Financial institutions can have 10,000+ securities filings between 10-Ks
+        # (JPM's latest 10-K is currently at index 11,245), so it is almost never
+        # inside the signal window and has to be appended separately.
+        annual_i = next((i for i, form in enumerate(forms) if form in ANNUAL_FORMS), None)
+        if annual_i is not None:
             selected.append(filing_at(annual_i))
         return selected
     except (KeyError, TypeError, IndexError, ValueError) as exc:
@@ -1212,7 +1254,7 @@ def generate_analysis_payload(query: str) -> dict:
         # High-insider-activity issuers can file 50+ Form 4s between annual
         # reports (AAPL's latest 10-K is currently row 51). Keep enough of the
         # SEC's in-memory recent history to reliably reach the annual report.
-        filings = get_recent_filings(cik, limit=200)
+        filings = get_recent_filings(cik)
         company_name = (facts or {}).get("entityName", ticker)
 
         def sec_val(ns, concept):
@@ -1248,7 +1290,7 @@ def generate_analysis_payload(query: str) -> dict:
         # with heavy insider activity can make this loop alone the bulk of the run's
         # SEC traffic. `filings` is newest-first, so the cap keeps the most recent
         # activity — the part that carries signal — and drops the long tail.
-        cutoff = TODAY - timedelta(days=90)
+        cutoff = TODAY - timedelta(days=SIGNAL_WINDOW_DAYS)
         detail_fetches = 0
         truncated = False
         for f in filings:
@@ -1277,6 +1319,9 @@ def generate_analysis_payload(query: str) -> dict:
         # whenever this binds.
         filing_signals["detail_fetches"] = detail_fetches
         filing_signals["truncated"] = truncated
+        # So the card's heading states the window it actually used rather than a
+        # hardcoded 90 that a changed SIGNAL_WINDOW_DAYS would quietly falsify.
+        filing_signals["window_days"] = SIGNAL_WINDOW_DAYS
         if truncated:
             _sec_diag("filing_scan", f"CIK{cik}", True, status="truncated",
                       error=f"stopped after {SEC_MAX_FILING_FETCHES} document fetches")
