@@ -1236,27 +1236,6 @@ function renderAll(d) {
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
   html += card("snapshot", "Live Snapshot", snap);
 
-  /* Sourced company news — the model explains these records but does not search for them. */
-  const news = Array.isArray(d.company_news) ? d.company_news : [];
-  if (news.length) {
-    const newsBody = `<div class="news-list">${news.slice(0, 10).map(item => {
-      const href = safeHttpUrl(item.url);
-      let date = "Date unavailable";
-      if (item.published_at) {
-        const parsed = new Date(item.published_at);
-        if (!Number.isNaN(parsed.getTime())) date = parsed.toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
-      }
-      const headline = esc(item.headline || "Untitled story");
-      const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
-      return `<article class="news-item">
-        <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
-        <h4>${title}</h4>
-        ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
-      </article>`;
-    }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
-    html += card("news", "Recent Company News", newsBody, { count: news.length });
-  }
-
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
     html += card("chart", "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) });
@@ -1437,6 +1416,28 @@ function renderAll(d) {
       `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
        <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
        <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
+
+  /* Sourced company news — last card, below the measurements. The model explains
+     these records but does not search for them. */
+  const news = Array.isArray(d.company_news) ? d.company_news : [];
+  if (news.length) {
+    const newsBody = `<div class="news-list">${news.slice(0, 10).map(item => {
+      const href = safeHttpUrl(item.url);
+      let date = "Date unavailable";
+      if (item.published_at) {
+        const parsed = new Date(item.published_at);
+        if (!Number.isNaN(parsed.getTime())) date = parsed.toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+      }
+      const headline = esc(item.headline || "Untitled story");
+      const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
+      return `<article class="news-item">
+        <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
+        <h4>${title}</h4>
+        ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
+      </article>`;
+    }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
+    html += card("news", "Recent Company News", newsBody, { count: news.length });
+  }
 
   document.getElementById("dataBody").innerHTML = html;
   document.getElementById("dataBody").scrollTop = 0;
