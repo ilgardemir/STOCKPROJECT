@@ -120,13 +120,33 @@ function themeDef(id) { return THEMES.find(t => t.id === id) || THEMES[0]; }
 
 /* One-shot uniform color crossfade. Only a few elements transition color by default, so
    without this most of the UI snaps while those few fade — it reads as choppy. Skipped on
-   first paint (nothing to fade from) and under reduced-motion. */
+   first paint (nothing to fade from) and under reduced-motion.
+
+   The crossfade is deliberately ONE-SHOT and must not be re-armed. `.theme-anim` puts a
+   transition on `*` plus both pseudo-elements — ~3.5k animating boxes on a rendered
+   analysis, measured at ~4-5x the cost of switching with no transition at all. That price
+   is fine once, for a fade you actually watch. It is not fine repeatedly: a switch landing
+   while the previous fade is still running interrupts every one of those transitions and
+   re-targets it from its current interpolated value, and the old code's clearTimeout +
+   re-arm meant a burst of switches never let the class come off, so each switch in the
+   burst paid more than the last (measured: 135ms avg over the first ten switches, 204ms
+   by the twenty-first). Nobody sees a 350ms fade they are already clicking past, so a
+   switch that arrives mid-fade drops the fade and applies instantly instead — which is
+   also the cheap path. Once things settle, the next switch fades normally again. */
 function flashThemeTransition() {
   if (REDUCED) return;
   const root = document.documentElement;
+  if (root._themeAnimT) {                       // still fading from the previous switch
+    clearTimeout(root._themeAnimT);
+    root._themeAnimT = null;
+    root.classList.remove("theme-anim");        // cancel once, then snap — never re-target
+    return;
+  }
   root.classList.add("theme-anim");
-  clearTimeout(root._themeAnimT);
-  root._themeAnimT = setTimeout(() => root.classList.remove("theme-anim"), 420);
+  root._themeAnimT = setTimeout(() => {
+    root.classList.remove("theme-anim");
+    root._themeAnimT = null;                    // clearing the handle is what re-arms the fade
+  }, 420);
 }
 
 function applyTheme(id, animate) {
