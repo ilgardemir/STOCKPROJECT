@@ -17,11 +17,38 @@ const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines s
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
-// Reasoning config (OpenRouter → DeepSeek reasoning).
-// `effort` accepts "low" | "medium" | "high" | "xhigh" — higher = deeper thinking but much slower to first token.
-// ANALYSIS_MAX caps total output (thinking + answer share it).
-const REASON_EFFORT = "medium"; // was "high" — dropped to cut how long the model spends before writing
-const ANALYSIS_MAX  = 6000;     // total output cap
+// ─── Reasoning + routing config (OpenRouter → DeepSeek) ──────────────────────
+// Measured on a live JPM analysis: 16s scrape, then 209s of AI — ~114s of it spent
+// on reasoning before the first answer token, ~86s streaming the answer. That works
+// out to ~16 tok/s, which is a SLOW PROVIDER problem more than a thinking-depth one,
+// so both knobs below exist and the routing one is doing most of the work.
+//
+// `effort` is a PERCENTAGE OF max_tokens, not an absolute budget:
+//   max/xhigh ~95% · high ~80% · medium ~50% · low ~20% · minimal ~10% · none = off.
+// That coupling is the trap here — raising ANALYSIS_MAX silently raises the thinking
+// budget by the same ratio. At medium × 6000 the cap was 3000 reasoning tokens and the
+// model only used ~1800, so medium was never actually binding: lowering it to "low"
+// (~1200) is the first setting that truly trims thinking rather than just permitting less.
+// "none" would disable reasoning outright — don't, the UI's "Show thinking" panel needs it.
+//
+// Both are env-tunable so this can be retuned from the Railway dashboard without a
+// deploy, the same way the LIM block works. Speed vs. depth is a judgement call worth
+// being able to make in ten seconds.
+const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const REASON_EFFORT = EFFORTS.includes(process.env.SQUALL_REASON_EFFORT)
+  ? process.env.SQUALL_REASON_EFFORT
+  : "low";                      // was "medium", and "high" before that
+const ANALYSIS_MAX  = Number.isFinite(parseInt(process.env.SQUALL_ANALYSIS_MAX, 10))
+  ? parseInt(process.env.SQUALL_ANALYSIS_MAX, 10)
+  : 6000;                       // total output cap — thinking and answer SHARE this
+// Default OpenRouter routing load-balances on price, which is why we land on slow hosts.
+// "throughput" ranks by generation speed instead and costs nothing in output quality —
+// it is the same model either way. Set to "price" or "latency" to change the trade.
+const AI_PROVIDER_SORT = ["throughput", "latency", "price"].includes(process.env.SQUALL_AI_PROVIDER_SORT)
+  ? process.env.SQUALL_AI_PROVIDER_SORT
+  : "throughput";
+// `allow_fallbacks` keeps rerouting on a dropped provider; `sort` only sets the order tried.
+const AI_PROVIDER = { allow_fallbacks: true, sort: AI_PROVIDER_SORT };
 
 // ─── ABUSE LIMIT CONFIG ───────────────────────────────────────────────────────
 // Every knob is env-tunable so Railway variables retune the site without a code
@@ -1509,7 +1536,7 @@ const appServer = http.createServer(async (req, res) => {
         max_tokens:  ANALYSIS_MAX,
         reasoning:   { effort: REASON_EFFORT },
         stream:      true,
-        provider:    { allow_fallbacks: true },
+        provider:    AI_PROVIDER,
         messages:    buildAiMessages(payload.ai_prompt, profile)
       });
 
@@ -1766,6 +1793,7 @@ const appServer = http.createServer(async (req, res) => {
                   temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
                   reasoning:   { effort: REASON_EFFORT },
+                  provider:    AI_PROVIDER,
                   messages:    buildAiMessages(payload.ai_prompt, profile)
                 })
               });
@@ -1838,7 +1866,7 @@ const appServer = http.createServer(async (req, res) => {
         temperature: 0.3,
         max_tokens:  think ? 4000 : 2048,   // reasoning shares the output budget → give it more room
         stream:      true,
-        provider:    { allow_fallbacks: true },   // reroute instead of hard-failing when a provider drops
+        provider:    AI_PROVIDER,   // reroute instead of hard-failing when a provider drops
         messages: [
           {
             role: "system",
