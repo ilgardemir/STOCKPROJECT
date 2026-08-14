@@ -393,15 +393,48 @@ function hideProgress(delay = 600) { setTimeout(() => {
 /* ════════════════ ANALYSIS (SSE streaming — scraper stages, then live AI tokens) ════════════════ */
 function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); }
 
-/* On phones the search field is too small for the full placeholder — and the font steps
+// The hero field is a second mouth for the same pipeline: mirror it into #ticker, which
+// stays the single source of truth for runAnalysis and everything downstream of it.
+function runHeroAnalysis() {
+  const hero = document.getElementById("heroTicker");
+  if (hero) document.getElementById("ticker").value = hero.value.trim();
+  runAnalysis();
+}
+// Both Analyze buttons show one run state — the hero's is on screen for the first click,
+// the header's for every one after it.
+function setAnalyzeBusy(busy) {
+  document.querySelectorAll("#analyzeBtn, #heroAnalyzeBtn").forEach(b => { b.disabled = busy; });
+}
+/* Focus the hero field at boot and on the way home, but not on touch or narrow screens:
+   there, focusing raises the keyboard over the page before the visitor asked for it. */
+function focusHeroSearch() {
+  const el = document.getElementById("heroTicker");
+  if (!el || matchMedia("(hover: none), (max-width: 720px)").matches) return;
+  el.focus();
+}
+/* The header's field hides while the hero is up. #hero's visibility is flipped by inline
+   display from five call sites, so watch the attribute once instead of remembering to
+   toggle a class at each of them (the wind field below watches it the same way). */
+(function () {
+  const hero = document.getElementById("hero");
+  if (!hero) return;
+  const sync = () => document.body.classList.toggle("hero-up", hero.style.display !== "none");
+  new MutationObserver(sync).observe(hero, { attributes: true, attributeFilter: ["style"] });
+  sync();
+})();
+
+/* On phones the header field is too small for the full placeholder — and the font steps
    up to 16px there to stop iOS zooming on focus, which makes the text wider still. A
    truncated placeholder ("Ticker or compan…") reads as a bug, so shorten it instead.
-   The full intent stays in the field's aria-label, and the typeahead matches names too. */
+   The hero field is full width, so it can hold a longer prompt at every size but the
+   narrowest. The full intent stays in each field's aria-label, and both match names too. */
 (function () {
-  const input = document.getElementById("ticker");
-  if (!input) return;
   const narrow = matchMedia("(max-width: 520px)");
-  const sync = () => { input.placeholder = narrow.matches ? "Ticker" : "Ticker or company"; };
+  const fields = [
+    { el: document.getElementById("ticker"), wide: "Ticker or company", tight: "Ticker" },
+    { el: document.getElementById("heroTicker"), wide: "Search a ticker or company name", tight: "Ticker or company" }
+  ].filter(f => f.el);
+  const sync = () => fields.forEach(f => { f.el.placeholder = narrow.matches ? f.tight : f.wide; });
   narrow.addEventListener("change", sync);
   sync();
 })();
@@ -430,15 +463,23 @@ fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() =>
 /* ── Search typeahead — custom in-site dropdown over supported index constituents ──
    Records are lowercased once at boot; each keystroke is a single linear scan over
    503 entries with ranked buckets (ticker prefix → name prefix → substring), capped
-   at 8 rows and painted with one innerHTML write — no per-item DOM churn. */
-(function () {
-  const input = document.getElementById("ticker"), box = document.getElementById("tickerSuggest");
+   at 8 rows and painted with one innerHTML write — no per-item DOM churn.
+   Attached to both search fields (header and hero) off one record set — the two are the
+   same instrument, so they must rank, highlight and key-navigate identically. */
+const TICKER_RECORDS = (() => {
   const names = { ...(window.MARKET_UNIVERSES?.names || {}), ...(window.SP500_NAMES || {}) };
-  if (!input || !box || !names) return;
-
-  const REC = Object.keys(names).map(sym =>
+  return Object.keys(names).map(sym =>
     ({ sym, name: names[sym], s: sym.toLowerCase(), n: names[sym].toLowerCase() }));
+})();
+
+function attachTypeahead(input, box, submit) {
+  if (!input || !box || !TICKER_RECORDS.length) return;
+
+  const REC = TICKER_RECORDS;
   const MAX = 8;
+  // Row ids are namespaced per field: both dropdowns live in the DOM at once, and a
+  // duplicate id would point aria-activedescendant at the wrong field's row.
+  const rowId = i => box.id + "-opt-" + i;
   let items = [], activeI = -1;
 
   function search(q) {
@@ -469,7 +510,7 @@ fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() =>
     items = search(q); activeI = -1;
     if (!items.length) { close(); return; }
     box.innerHTML = items.map((r, i) =>
-      `<div class="sug" id="sug-${i}" role="option" data-i="${i}">
+      `<div class="sug" id="${rowId(i)}" role="option" data-i="${i}">
         <span class="sym">${hi(r.sym, r.s, q)}</span><span class="nm">${hi(r.name, r.n, q)}</span>
       </div>`).join("");
     box.classList.add("open");
@@ -480,7 +521,7 @@ fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() =>
     activeI = i;
     box.querySelectorAll(".sug").forEach((el, j) => el.classList.toggle("active", j === i));
     if (i >= 0) {
-      input.setAttribute("aria-activedescendant", "sug-" + i);
+      input.setAttribute("aria-activedescendant", rowId(i));
       box.children[i].scrollIntoView({ block: "nearest" });
     } else input.removeAttribute("aria-activedescendant");
   }
@@ -489,7 +530,7 @@ fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() =>
     if (i < 0 || i >= items.length) return;
     input.value = items[i].sym;
     close();
-    runAnalysis();
+    submit();
   }
 
   input.addEventListener("input", () => {
@@ -520,7 +561,9 @@ fetch("/health").then(r => r.json()).then(j => setModelTag(j.model)).catch(() =>
     if (el) pick(+el.dataset.i);
   });
   input.addEventListener("blur", close);
-})();
+}
+attachTypeahead(document.getElementById("ticker"), document.getElementById("tickerSuggest"), runAnalysis);
+attachTypeahead(document.getElementById("heroTicker"), document.getElementById("heroSuggest"), runHeroAnalysis);
 
 function finalizePartialStream() {
   // A new run (or navigation) interrupts an in-flight stream — keep what arrived.
@@ -566,7 +609,6 @@ function runAnalysis() {
   // The input now accepts a ticker OR a company name; the server resolves it and the
   // real symbol comes back on the `result` event, at which point we re-key the session.
   const query = document.getElementById("ticker").value.trim();
-  const btn = document.getElementById("analyzeBtn");
   const profileSnapshot = getMySquallProfile();
   const profileKey = mySquallKey(profileSnapshot);
   activeScreen = null;
@@ -590,7 +632,7 @@ function runAnalysis() {
   }
 
   let key = direct;   // session key; updated to the resolved ticker on `result`
-  btn.disabled = true;
+  setAnalyzeBusy(true);
   showWorkspace();
   showProgress(0, 7, "Starting analysis for " + query);
 
@@ -613,7 +655,7 @@ function runAnalysis() {
         showProgressPercent(100, "Dashboard ready");
         hideProgress(900);
       }
-      es.close(); if (_es === es) _es = null; btn.disabled = false; return;
+      es.close(); if (_es === es) _es = null; setAnalyzeBusy(false); return;
     }
     let d = {};
     try { if (e.data) d = JSON.parse(e.data); } catch (x) {}
@@ -626,7 +668,7 @@ function runAnalysis() {
       // to 3.7:1 on Daylight's surface. --ink holds >=5.18:1 in all six themes.
       document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--ink);font-family:var(--mono);font-size:12px">${esc(d.error)}</span></div>`;
       ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Written analysis paused — saved tabs still open instantly.</span></div>`;
-      btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(6000);
+      setAnalyzeBusy(false); es.close(); if (_es === es) _es = null; hideProgress(6000);
       return;
     }
 
@@ -635,7 +677,7 @@ function runAnalysis() {
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--down);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
       <button class="retry-btn" onclick="retryAnalysis('${jsAttr(query)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
     ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
-    btn.disabled = false; es.close(); if (_es === es) _es = null; hideProgress(3000);
+    setAnalyzeBusy(false); es.close(); if (_es === es) _es = null; hideProgress(3000);
   });
 
   // Scraper finished — dashboard renders now; AI streams on top of it.
@@ -652,7 +694,7 @@ function runAnalysis() {
     renderTickerPills();
     renderAll(data);
     if (active === data.ticker) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
-    btn.disabled = false;
+    setAnalyzeBusy(false);
     showProgressPercent(72, "Dashboard ready · preparing the written analysis");
   });
 
@@ -821,7 +863,7 @@ function goHome() {
     hero.style.display = "";
     hero.style.animation = "none"; void hero.offsetWidth; hero.style.animation = "";   // replay entrance
     document.getElementById("resumeChip").classList.toggle("show", Object.keys(sessions).length + Object.keys(screeners).length > 0);
-    document.getElementById("ticker").focus();
+    focusHeroSearch();
   }, 290);
 }
 function showWorkspace(skipAnim) {
@@ -2030,6 +2072,7 @@ document.getElementById("chatInput").addEventListener("keydown", e => { if (e.ke
 syncChatThinkBtn();
 document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
 renderTickerPills();
+focusHeroSearch();   // the landing page's one job — start with the caret already in it
 
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
 // Rows need a shared axis; below ~380px of pane there isn't room for one.
