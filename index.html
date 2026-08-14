@@ -169,6 +169,12 @@ header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding:
 /* Only one search field is live at a time: the hero's while the landing page is up, the
    header's everywhere else. Both on screen at once is what made the header one easy to miss. */
 body.hero-up #searchForm { display: none; }
+/* With the header search hidden, nothing is left to absorb the free width, so the rail
+   collapsed back against the wordmark and read as part of it. The auto margin is on this
+   rule rather than on .util-rail itself: everywhere else #searchForm already carries the
+   auto margin, and a second one would split the leftover space and drag the search field
+   in off the right edge. */
+body.hero-up .util-rail { margin-left: auto; }
 .ticker-wrap, .hero-search { position: relative; display: flex; align-items: center; width: 100%; height: var(--ctl-h); min-width: 0;
   background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-md);
   transition: border-color .22s var(--ease), background .22s var(--ease), box-shadow .22s var(--ease); }
