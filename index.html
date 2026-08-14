@@ -43,8 +43,6 @@
   --chrome-0: #0a0e14; --chrome-1: #101723; --chrome-2: #18212f;
   --rule: #1a2535;
   --ink: #8c9db1; --ink-dim: #7a8ca1; --ink-bright: #eaf0f7;
-  --up: #46c95d; --down: #f0716b; --warn: #e9b44c;
-  --up-soft: rgba(70,201,93,.10); --down-soft: rgba(240,113,107,.10); --warn-soft: rgba(233,180,76,.10);
 }
 :root[data-theme="light"] {
   --accent:#0a8372; --accent-ink:#ffffff; --accent-soft:rgba(10,131,114,.09);
@@ -55,14 +53,13 @@
   --chrome-0: #eef2f5; --chrome-1: #ffffff; --chrome-2: #f2f5f8;
   --rule: #e0e7ed;
   --ink: #54677b; --ink-dim: #5c6e80; --ink-bright: #13202e;
-  --up: #1a7f37; --down: #cf3f38; --warn: #a2740e;
-  --up-soft: rgba(26,127,55,.09); --down-soft: rgba(207,63,56,.08); --warn-soft: rgba(162,116,14,.10);
 }
-/* The four palettes below are chrome-level restyles: every theme must define the same
-   variable set, since the whole stylesheet reads only these names. The monochrome pairs
-   keep a hued (if desaturated) --green/--red — up and down have to stay distinguishable
-   at a glance in a stock app, so those two are never collapsed into grey. THEMES in
-   app.js mirrors each id plus its bg/accent swatch, and must stay in sync with this list. */
+/* A theme owns exactly two things: the neutral ramp (surfaces + rule + ink) and the single
+   accent. Nothing else. --up/--down/--warn are NOT theme-owned — they live in the
+   [data-mode] blocks below, so green means the same green in all six palettes. Themes used
+   to restate them, which is why Noir read as "greyscaling the whole app": picking it
+   repainted the semantic colors too, not just the chrome. Adding a palette means editing
+   this list and THEMES in app.js (which mirrors each id plus its bg/accent swatch). */
 :root[data-theme="noir"] {            /* black + white */
   --accent:#ffffff; --accent-ink:#000000; --accent-soft:rgba(255,255,255,.12);
   --chart-fill-top:rgba(255,255,255,.16); --chart-fill-bot:rgba(255,255,255,0);
@@ -72,8 +69,6 @@
   --chrome-0: #000000; --chrome-1: #0c0c0c; --chrome-2: #161616;
   --rule: #1c1c1c;
   --ink: #a8a8a8; --ink-dim: #8a8a8a; --ink-bright: #ffffff;
-  --up: #7fd39a; --down: #e08d88; --warn: #d9bd84;
-  --up-soft: rgba(127,211,154,.10); --down-soft: rgba(224,141,136,.10); --warn-soft: rgba(217,189,132,.10);
 }
 :root[data-theme="paper"] {           /* white + black */
   --accent:#000000; --accent-ink:#ffffff; --accent-soft:rgba(0,0,0,.08);
@@ -84,8 +79,6 @@
   --chrome-0: #ffffff; --chrome-1: #ffffff; --chrome-2: #f4f4f4;
   --rule: #e4e4e4;
   --ink: #4a4a4a; --ink-dim: #5c5c5c; --ink-bright: #000000;
-  --up: #1d6b33; --down: #a83a33; --warn: #7f6210;
-  --up-soft: rgba(29,107,51,.09); --down-soft: rgba(168,58,51,.08); --warn-soft: rgba(127,98,16,.10);
 }
 :root[data-theme="lagoon"] {          /* turquoise + pink */
   --accent:#ff4fa3; --accent-ink:#2c0418; --accent-soft:rgba(255,79,163,.14);
@@ -96,8 +89,6 @@
   --chrome-0: #0b1a1a; --chrome-1: #122525; --chrome-2: #1a3130;
   --rule: #1f3b3a;
   --ink: #a8c4c1; --ink-dim: #8fadaa; --ink-bright: #f0fffb;
-  --up: #4fe8b0; --down: #ff7a59; --warn: #ffd166;
-  --up-soft: rgba(79,232,176,.12); --down-soft: rgba(255,122,89,.12); --warn-soft: rgba(255,209,102,.12);
 }
 :root[data-theme="matrix"] {          /* black + lime */
   --accent:#8dff3a; --accent-ink:#061a00; --accent-soft:rgba(141,255,58,.12);
@@ -108,8 +99,22 @@
   --chrome-0: #000000; --chrome-1: #080c08; --chrome-2: #0e150e;
   --rule: #162b19;
   --ink: #83c98b; --ink-dim: #6dab74; --ink-bright: #d8ffd8;
-  --up: #5cff7a; --down: #ff5f4a; --warn: #e8d44d;
-  --up-soft: rgba(92,255,122,.10); --down-soft: rgba(255,95,74,.12); --warn-soft: rgba(232,212,77,.10);
+}
+/* Fixed instrument colors — direction and warning, keyed to the light/dark family only.
+   Switching palette must never restate what green and red mean, and these are the values
+   every theme is contrast-checked against (worst cases: #000 in Noir/Terminal, #fff in
+   Paper). Same specificity as the [data-theme] blocks, declared after them, so a theme
+   that tries to override one loses on purpose. */
+:root[data-mode="dark"] {
+  --up: #46c95d; --down: #f0716b; --warn: #e9b44c;
+  --up-soft: rgba(70,201,93,.10); --down-soft: rgba(240,113,107,.10); --warn-soft: rgba(233,180,76,.10);
+}
+/* Darker than the values the two light palettes used to carry separately: one shared set
+   has to clear AA against the *worst* light surface, which is Daylight's #eef2f5 page and
+   not Paper's white. The old #cf3f38 / #a2740e measured 4.22 and 3.70 there. */
+:root[data-mode="light"] {
+  --up: #14702e; --down: #bd332b; --warn: #8a5f0a;
+  --up-soft: rgba(20,112,46,.09); --down-soft: rgba(189,51,43,.08); --warn-soft: rgba(138,95,10,.10);
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -125,14 +130,20 @@ button { font-family: inherit; }
 /* Keyboard focus — one consistent ring everywhere (mouse clicks don't trigger :focus-visible) */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
-/* Theme crossfade: only a few elements transition color by default, so a raw toggle
-   makes most of the UI snap while those few fade — reads as choppy. During a switch we
-   add .theme-anim to <html> for one transition, so every element changes color together,
-   then JS removes it so hovers/interactions aren't affected the rest of the time. */
-:root.theme-anim *, :root.theme-anim *::before, :root.theme-anim *::after {
-  transition: background-color .35s var(--ease), border-color .35s var(--ease),
-              color .35s var(--ease), fill .35s var(--ease), stroke .35s var(--ease),
-              box-shadow .35s var(--ease) !important;
+/* Theme crossfade — done by the compositor, not by the style engine.
+   The old approach put a color transition on `*` + both pseudo-elements for the duration
+   of a switch: ~3.5k elements each running six interpolated properties, re-laying out and
+   repainting every frame, which is what made switching lag on a rendered analysis. A view
+   transition instead snapshots the page as two textures and cross-fades them on the GPU —
+   one animating layer regardless of how much is on screen — while the real DOM switches
+   instantly underneath. `.theme-swap` suppresses per-element transitions for the duration
+   so nothing double-animates beneath the crossfade (and so browsers without view
+   transitions get a clean instant switch rather than a few stragglers fading alone). */
+:root.theme-swap *, :root.theme-swap *::before, :root.theme-swap *::after {
+  transition: none !important;
+}
+::view-transition-old(root), ::view-transition-new(root) {
+  animation-duration: .34s; animation-timing-function: var(--ease);
 }
 
 /* HEADER */
@@ -224,9 +235,15 @@ body.hero-up #searchForm { display: none; }
 /* Theme menu — one popover of full-palette choices, replacing the old binary toggle */
 #themeMenu { position: absolute; top: calc(100% + 8px); right: 0; width: 244px; max-width: calc(100vw - 20px);
   padding: 6px; background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-md);
-  box-shadow: var(--shadow); z-index: 70; display: none; }
-#themeMenu.open { display: block; animation: themeMenuIn .16s var(--ease-out); transform-origin: top right; }
-@keyframes themeMenuIn { from { opacity: 0; transform: translateY(-7px) scale(.96); } }
+  box-shadow: var(--shadow); z-index: 70; transform-origin: top right;
+  /* Opacity + transform rather than display:none/block + a keyframe: the display swap gave
+     the menu no exit at all (it vanished mid-fade on close) and re-ran a keyframe on a
+     freshly laid-out box each open. These two properties animate on the compositor, and
+     visibility flips at the end of the close so the menu stays untabbable while hidden. */
+  opacity: 0; visibility: hidden; transform: translateY(-6px) scale(.97);
+  transition: opacity .13s var(--ease-out), transform .16s var(--ease-out), visibility 0s .16s; }
+#themeMenu.open { opacity: 1; visibility: visible; transform: none;
+  transition: opacity .12s var(--ease-out), transform .17s var(--ease-out), visibility 0s; }
 .theme-menu-head { padding: 5px 8px 7px; font-family: var(--mono); font-size: 10px; font-weight: 600;
   letter-spacing: .13em; text-transform: uppercase; color: var(--ink-dim); }
 .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; text-align: left;

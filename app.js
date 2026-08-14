@@ -118,41 +118,13 @@ const themeMenu = document.getElementById("themeMenu");
 
 function themeDef(id) { return THEMES.find(t => t.id === id) || THEMES[0]; }
 
-/* One-shot uniform color crossfade. Only a few elements transition color by default, so
-   without this most of the UI snaps while those few fade — it reads as choppy. Skipped on
-   first paint (nothing to fade from) and under reduced-motion.
-
-   The crossfade is deliberately ONE-SHOT and must not be re-armed. `.theme-anim` puts a
-   transition on `*` plus both pseudo-elements — ~3.5k animating boxes on a rendered
-   analysis, measured at ~4-5x the cost of switching with no transition at all. That price
-   is fine once, for a fade you actually watch. It is not fine repeatedly: a switch landing
-   while the previous fade is still running interrupts every one of those transitions and
-   re-targets it from its current interpolated value, and the old code's clearTimeout +
-   re-arm meant a burst of switches never let the class come off, so each switch in the
-   burst paid more than the last (measured: 135ms avg over the first ten switches, 204ms
-   by the twenty-first). Nobody sees a 350ms fade they are already clicking past, so a
-   switch that arrives mid-fade drops the fade and applies instantly instead — which is
-   also the cheap path. Once things settle, the next switch fades normally again. */
-function flashThemeTransition() {
-  if (REDUCED) return;
+/* The switch itself: flip the tokens, tell anything that samples resolved colors, repaint
+   the canvas. Deliberately synchronous and cheap — it is the callback a view transition
+   runs between its two snapshots, so anything deferred out of it (a rAF, a timeout) lands
+   *after* the "new" snapshot is taken and pops into view mid-fade instead of crossfading.
+   drawChart() is the reason that matters: canvases don't inherit CSS colors. */
+function commitTheme(def) {
   const root = document.documentElement;
-  if (root._themeAnimT) {                       // still fading from the previous switch
-    clearTimeout(root._themeAnimT);
-    root._themeAnimT = null;
-    root.classList.remove("theme-anim");        // cancel once, then snap — never re-target
-    return;
-  }
-  root.classList.add("theme-anim");
-  root._themeAnimT = setTimeout(() => {
-    root.classList.remove("theme-anim");
-    root._themeAnimT = null;                    // clearing the handle is what re-arms the fade
-  }, 420);
-}
-
-function applyTheme(id, animate) {
-  const def = themeDef(id);
-  const root = document.documentElement;
-  if (animate && root.dataset.theme !== def.id) flashThemeTransition();
   root.dataset.theme = def.id;
   root.dataset.mode = def.mode;
   themeBtn.setAttribute("aria-label", `Appearance — ${def.label} theme`);
@@ -160,12 +132,42 @@ function applyTheme(id, animate) {
   themeMenu.querySelectorAll(".theme-opt").forEach(b =>
     b.setAttribute("aria-checked", String(b.dataset.theme === def.id)));
   try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
-  // Anything that samples resolved colors (hero wind field, future canvases) listens here
-  // rather than on the button — the button click now only opens the menu.
+  // Anything that samples resolved colors (hero wind field, the cssVar cache, future
+  // canvases) listens here rather than on the button — the button click only opens the menu.
   document.dispatchEvent(new CustomEvent("squall:theme", { detail: def }));
-  // Defer the canvas repaint to the next frame so the CSS color transition starts
-  // immediately — redrawing synchronously here blocks paint and makes the switch stutter.
-  if (active && sessions[active]) requestAnimationFrame(() => { if (active && sessions[active]) drawChart(); });
+  if (active && sessions[active]) drawChart();
+}
+
+/* Crossfade between palettes on the compositor. The page is snapshotted before and after
+   the swap and the two textures are cross-faded — one animating layer whatever is on
+   screen — instead of the old `.theme-anim` rule, which put a six-property color
+   transition on every element and both pseudo-elements (~3.5k animating boxes on a
+   rendered analysis, and worse in a burst because each new switch re-targeted transitions
+   still running from the last one).
+
+   `.theme-swap` holds per-element transitions off for the duration: underneath a snapshot
+   they are invisible work, and on browsers with no view transitions they are exactly the
+   "some things fade, most snap" effect that read as broken. Overlapping switches need no
+   handling here — startViewTransition skips an in-flight transition for us, and the DOM is
+   already in its final state by then either way. */
+function applyTheme(id, animate) {
+  const def = themeDef(id);
+  const root = document.documentElement;
+  if (root.dataset.theme === def.id && root.dataset.mode) { commitTheme(def); return; }
+  if (!animate || REDUCED || !document.startViewTransition) { commitTheme(def); return; }
+
+  root.classList.add("theme-swap");
+  const done = () => root.classList.remove("theme-swap");
+  try {
+    const vt = document.startViewTransition(() => commitTheme(def));
+    // Every one of these promises rejects on a skipped transition — a hidden tab, or a
+    // second switch arriving mid-fade — and an unhandled rejection is a console error the
+    // user sees. Skipping is a normal outcome here, not a failure: the DOM is already in
+    // its final state, so the only thing left to do is take the class back off.
+    vt.ready.catch(() => {});
+    vt.updateCallbackDone.catch(() => {});
+    vt.finished.then(done, done);
+  } catch (e) { commitTheme(def); done(); }
 }
 
 themeMenu.innerHTML =
@@ -366,7 +368,18 @@ function safeHttpUrl(value) {
 // (e.g. onclick="retryAnalysis('…')") — company names may contain ' or &.
 const jsAttr = s => String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+/* Resolved token lookup, memoized. Every call is a getComputedStyle on <html>, and the
+   chart calls it *per candle* (--up/--down inside the draw loop) — several hundred style
+   resolutions per repaint, each one able to force a recalc if styles are dirty, which is
+   exactly the state right after a theme switch. Tokens only change when the theme does, so
+   the cache is cleared on squall:theme and nowhere else. */
+let cssVarCache = new Map();
+const cssVar = n => {
+  let v = cssVarCache.get(n);
+  if (v === undefined) { v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); cssVarCache.set(n, v); }
+  return v;
+};
+document.addEventListener("squall:theme", () => { cssVarCache = new Map(); });
 
 /* ════════════════ PROGRESS ════════════════ */
 function showProgressPercent(percent, label, isErr = false) {
