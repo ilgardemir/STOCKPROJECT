@@ -42,18 +42,101 @@ function hydrateSavedSessions() {
   });
   active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
 }
-function persistSessions() {
-  const saved = {};
-  Object.entries(sessions).forEach(([ticker, s]) => {
-    saved[ticker] = {
-      data: s.data, context: s.context, history: cleanHistory(s.history), range: s.range,
-      profile: s.profile || null, profileKey: s.profileKey || "none",
-      createdAt: s.createdAt || Date.now(), updatedAt: s.updatedAt || Date.now(),
-      fibAnchors: s.fibAnchors || null
-    };
+/* A saved session is dominated by data.price_history — 1260 daily OHLCV bars — and it used
+   to carry two free copies alongside it. safe_float in the scraper does no rounding, so a
+   close arrives as 234.55999755859375: 18 bytes where 6 will do, four times per bar.
+   price_history_1y is a pure alias that both chart readers already fall back to, and
+   `context` is assigned data.ai_prompt at creation and never reassigned, so storing it
+   duplicates the largest text field in the payload. Trimming all three roughly halves a
+   session against a ~5MB origin budget. This shapes the persisted projection only — the
+   in-memory session keeps exactly what the scraper sent. */
+function trimBars(bars) {
+  if (!Array.isArray(bars)) return bars;
+  return bars.map(bar => {
+    if (!bar || typeof bar !== "object") return bar;
+    const out = {};
+    for (const k in bar) {
+      const v = bar[k];
+      // 6dp is far finer than any quote ever quoted; volume is a count and must not move.
+      out[k] = (typeof v === "number" && k !== "volume") ? Math.round(v * 1e6) / 1e6 : v;
+    }
+    return out;
   });
-  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved)); return true; }
+}
+function persistableSession(s) {
+  const data = { ...s.data };
+  if (Array.isArray(data.price_history) && data.price_history.length) {
+    data.price_history = trimBars(data.price_history);
+    delete data.price_history_1y;   // only ever dropped when the series it aliases survived
+  }
+  const out = {
+    data, history: cleanHistory(s.history), range: s.range,
+    profile: s.profile || null, profileKey: s.profileKey || "none",
+    createdAt: s.createdAt || Date.now(), updatedAt: s.updatedAt || Date.now(),
+    fibAnchors: s.fibAnchors || null
+  };
+  // hydrateSavedSessions recovers context from data.ai_prompt, so it only needs storing in
+  // the case that can't be recovered: one that has somehow diverged from its prompt.
+  if (s.context && s.context !== (s.data?.ai_prompt || "")) out.context = s.context;
+  return out;
+}
+function writeSessionMap(map) {
+  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(map)); return true; }
   catch (_) { return false; }
+}
+let _saveTimer = null;   // declared above persistSessions, which clears it on an immediate write
+/* Quota is a real ceiling here, and it used to be reached in silence: this returned false
+   and not one of its eleven callers looked at the result. The tab appeared, the write
+   failed, and the analysis was gone on the next visit with nothing shown either way. A full
+   store now evicts the least-recently-updated saved analyses — never the active one — until
+   the write fits, and says which ones went. Announced loss beats silent loss; refusing the
+   write instead would still lose the session at reload, just later and even more quietly. */
+function persistSessions() {
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }   // an immediate write satisfies any pending one
+  const map = {};
+  Object.keys(sessions).forEach(t => { map[t] = persistableSession(sessions[t]); });
+  if (writeSessionMap(map)) return true;
+
+  const evictable = Object.keys(sessions)
+    .filter(t => t !== active)
+    .sort((a, b) => (sessions[a].updatedAt || 0) - (sessions[b].updatedAt || 0));
+  const evicted = [];
+  for (const victim of evictable) {
+    delete map[victim];
+    evicted.push(victim);
+    if (writeSessionMap(map)) {
+      evicted.forEach(t => { delete sessions[t]; });
+      const n = evicted.length;
+      showStorageNotice(`Browser storage is full — removed ${n} older saved ${n === 1 ? "analysis" : "analyses"} (${evicted.join(", ")}) to make room for this one.`);
+      renderTickerPills();
+      return true;
+    }
+  }
+  showStorageNotice("Browser storage is full and this analysis could not be saved. Close a saved tab, then run it again.");
+  return false;
+}
+/* Range clicks and fib handles wrote the whole blob synchronously per interaction. Coalesce
+   that churn; the state transitions that must survive a crash still write straight through.
+   A debounced write that never lands is worse than no debounce, so both ways a page can go
+   away flush first — pagehide covers tab close and bfcache, visibilitychange covers the
+   mobile app-switch that never fires pagehide at all. */
+function scheduleSessionSave(delay = 400) {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => { _saveTimer = null; persistSessions(); }, delay);
+}
+function flushSessionSave() { if (_saveTimer) persistSessions(); }
+addEventListener("pagehide", flushSessionSave);
+addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSessionSave(); });
+/* The saved-tab features can fail for a reason the user can actually act on, so they need a
+   visible channel. Deliberately not auto-dismissed: the message says data was dropped. */
+function showStorageNotice(msg) {
+  const el = document.getElementById("storageNotice");
+  const txt = document.getElementById("storageNoticeText");
+  if (!el || !txt) return;
+  txt.textContent = msg;
+  el.hidden = false;
+  const close = el.querySelector("button");
+  if (close) close.onclick = () => { el.hidden = true; };
 }
 function hydrateSavedScreeners() {
   let saved;
@@ -69,7 +152,15 @@ function hydrateSavedScreeners() {
 function persistScreeners() {
   const saved = {};
   Object.entries(screeners).forEach(([id, s]) => { saved[id] = { ...s, loading: false }; });
-  try { localStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(saved)); return true; } catch (_) { return false; }
+  try { localStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(saved)); return true; }
+  catch (_) {
+    // Screens are small, but they share the origin budget with the analyses that aren't, so
+    // this fails for the same reason and used to fail just as invisibly. No eviction here:
+    // a screen is cheap to re-run, and silently deleting one to save another isn't a trade
+    // worth making on the user's behalf.
+    showStorageNotice("Browser storage is full — this screen could not be saved. Close a saved tab, then try again.");
+    return false;
+  }
 }
 function touchSession(sess) { if (sess) sess.updatedAt = Date.now(); }
 function recentAnalysisRuns(ticker) {
@@ -1621,7 +1712,7 @@ function toggleFibDraw() {
 function clearManualFib() {
   const sess = sessions[active]; if (!sess) return;
   sess.fibAnchors = null; fibInteraction.mode = false; fibInteraction.pending = null; fibInteraction.dragging = null;
-  touchSession(sess); persistSessions(); syncFibControls(); drawChart();
+  touchSession(sess); scheduleSessionSave(); syncFibControls(); drawChart();
 }
 document.addEventListener("click", e => {
   const btn = e.target.closest("[data-chart-action]"); if (!btn) return;
@@ -1637,7 +1728,7 @@ function buildRangeSel(container) {
   container.querySelectorAll("button").forEach(b => {
     b.onclick = () => {
       const n = Number(b.dataset.range);
-      if (sessions[active]) { sessions[active].range = n; touchSession(sessions[active]); persistSessions(); }
+      if (sessions[active]) { sessions[active].range = n; touchSession(sessions[active]); scheduleSessionSave(); }
       // keep both selectors in sync
       ["#rangeSel", "#chartModalRangeSel"].forEach(sel =>
         document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", Number(x.dataset.range) === n)));
@@ -1843,7 +1934,7 @@ function drawChart() {
       if (!fibInteraction.pending) fibInteraction.pending = { date: hit.date, price: hit.price };
       else {
         sess.fibAnchors = { start: fibInteraction.pending, end: { date: hit.date, price: hit.price } };
-        fibInteraction.pending = null; fibInteraction.mode = false; touchSession(sess); persistSessions();
+        fibInteraction.pending = null; fibInteraction.mode = false; touchSession(sess); scheduleSessionSave();
       }
       syncFibControls(); drawChart(); return;
     }
@@ -1861,7 +1952,7 @@ function drawChart() {
   };
   canvas.onpointerup = () => {
     if (!fibInteraction.dragging) return;
-    fibInteraction.dragging = null; touchSession(sess); persistSessions(); syncFibControls(); drawChart();
+    fibInteraction.dragging = null; touchSession(sess); scheduleSessionSave(); syncFibControls(); drawChart();
   };
   canvas.onpointercancel = canvas.onpointerup;
   canvas.onmouseleave = () => { if (fibInteraction.dragging) return; tipEl.style.display = "none"; drawChart._hover = null; drawChart(); };
