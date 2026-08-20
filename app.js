@@ -1,5 +1,20 @@
 "use strict";
 
+/* ════════════════ PAGE ════════════════
+   The analyzer (/) and the screener (/screener) are separate pages that load this one
+   script. Everything shared — theme, MySquall, saved tabs, storage — runs on both; the rest
+   addresses elements that exist on only one. PAGE is the switch for behavior, `on` is the
+   guard for wiring. Top-level `document.getElementById(x).addEventListener(...)` is what
+   breaks the other page: one null and the whole script dies at that line, taking every
+   listener below it with it. Use `on` instead — it no-ops when the element isn't there. */
+const PAGE = document.body.dataset.page || "analyzer";
+const IS_SCREENER_PAGE = PAGE === "screener";
+function on(id, ev, fn, opts) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener(ev, fn, opts);
+  return el;
+}
+
 /* ════════════════ STATE: per-ticker sessions (declared first — theme init reads `active`) ════════════════ */
 const sessions = {};   // { TICKER: { data, context, history, range } }
 let active = null;     // active ticker for the chat/AI/data panes
@@ -713,6 +728,10 @@ function runAnalysis() {
   // The input now accepts a ticker OR a company name; the server resolves it and the
   // real symbol comes back on the `result` event, at which point we re-key the session.
   const query = document.getElementById("ticker").value.trim();
+  // The header search exists on both pages; running an analysis is the analyzer's job, so
+  // from the screener this hands the query over rather than half-rendering a dashboard
+  // into a page that has no dashboard to render into.
+  if (IS_SCREENER_PAGE) { if (query) gotoAnalyzer(query); return; }
   const profileSnapshot = getMySquallProfile();
   const profileKey = mySquallKey(profileSnapshot);
   activeScreen = null;
@@ -941,7 +960,7 @@ function flushStream(force) {
   if (_stream.sticky && scroll) scroll.scrollTop = scroll.scrollHeight;
 }
 // If the reader scrolls up mid-stream, stop yanking them to the bottom; resume when they return.
-document.getElementById("aiScroll").addEventListener("scroll", function () {
+on("aiScroll", "scroll", function () {
   if (!_stream || _stream.done) return;
   _stream.sticky = (this.scrollHeight - this.scrollTop - this.clientHeight) < 60;
 });
@@ -955,7 +974,17 @@ function finalizeAiRender(d) {
 }
 
 /* ════════════════ HOME / WORKSPACE NAVIGATION ════════════════ */
+/* ── Cross-page navigation ────────────────────────────────────────────────────
+   The analyzer and the screener are two URLs now, so "switch view" is sometimes a real
+   navigation. Each entry point below asks which page it is on: on the right one it does the
+   in-page work it always did, on the wrong one it hands off through the URL and the
+   deep-link handler at the bottom of this file picks the state back up on arrival. Saved
+   tabs and MySquall survive the trip because they were always localStorage, not memory. */
+function gotoScreener(id) { location.href = id ? `/screener?id=${encodeURIComponent(id)}` : "/screener"; }
+function gotoAnalyzer(ticker) { location.href = ticker ? `/?t=${encodeURIComponent(ticker)}` : "/"; }
+
 function goHome() {
+  if (IS_SCREENER_PAGE) return gotoAnalyzer();   // the wordmark is a link home from here
   const ws = document.getElementById("workspace"), hero = document.getElementById("hero"), strip = document.getElementById("summaryStrip");
   const screen = document.getElementById("screenerView");
   if (!ws.classList.contains("show") && !screen?.classList.contains("show")) return;
@@ -1011,14 +1040,14 @@ const SCREEN_CONCEPT_LABELS = {
   short_squeeze_setup:"Short-squeeze setup"
 };
 function openScreener() {
-  document.getElementById("hero").style.display = "none";
-  document.getElementById("workspace").classList.remove("show", "leaving");
-  document.getElementById("summaryStrip").classList.remove("show");
-  document.getElementById("screenerView").classList.add("show");
+  // From the analyzer this is a link, not a view swap — there is nothing here to reveal.
+  if (!IS_SCREENER_PAGE) return gotoScreener();
+  document.getElementById("screenerView")?.classList.add("show");
   renderTickerPills();
   setTimeout(() => document.getElementById("screenQuery")?.focus(), 0);
 }
 function openSavedScreener(id) {
+  if (!IS_SCREENER_PAGE) return gotoScreener(id);
   const s = screeners[id]; if (!s) return;
   activeScreen = id; active = null; openScreener();
   document.getElementById("screenQuery").value = s.query;
@@ -1320,6 +1349,7 @@ function renderTickerPills() {
 }
 function switchTicker(t) {
   if (!sessions[t]) return;
+  if (IS_SCREENER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the other page
   active = t; activeScreen = null;
   showWorkspace(true);
   renderTickerPills();
@@ -2169,14 +2199,36 @@ async function streamChatReply(sess) {
   document.getElementById("chatInput").focus();
 }
 function scrollChat() { const m = document.getElementById("chatMessages"); m.scrollTop = m.scrollHeight; }
-document.getElementById("chatMessages").addEventListener("scroll", function () {
+on("chatMessages", "scroll", function () {
   chatSticky = (this.scrollHeight - this.scrollTop - this.clientHeight) < 60;
 });
-document.getElementById("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+on("chatInput", "keydown", e => { if (e.key === "Enter") sendChat(); });
 syncChatThinkBtn();
-document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
+on("ticker", "keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
 renderTickerPills();
-focusHeroSearch();   // the landing page's one job — start with the caret already in it
+if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria-current", "page");
+
+/* ════════════════ DEEP LINKS ════════════════
+   /?t=TICKER opens an analysis, /screener?id=<screen> opens a saved screen. This is the
+   point of having two URLs at all: until now there was one address and nothing in the app
+   was linkable, shareable or indexable. Runs last, after the initial render, so the saved
+   state these read has already been hydrated. Falls through to the hero's caret when there
+   is nothing to restore — the landing page's one job. */
+(function applyDeepLink() {
+  const params = new URLSearchParams(location.search);
+  if (IS_SCREENER_PAGE) {
+    const id = params.get("id");
+    if (id && screeners[id]) openSavedScreener(id);
+    else document.getElementById("screenQuery")?.focus();
+    return;
+  }
+  const t = (params.get("t") || "").trim().toUpperCase();
+  if (!t) { focusHeroSearch(); return; }
+  const field = document.getElementById("ticker");
+  if (field) field.value = t;
+  // Already analyzed and still held locally: reopen it rather than spending a run on it.
+  if (sessions[t]) switchTicker(t); else runAnalysis();
+})();
 
 /* ════════════════ RESIZERS (rAF-driven, snap points, touch-ready) ════════════════ */
 // Rows need a shared axis; below ~380px of pane there isn't room for one.
@@ -2196,6 +2248,7 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
 
 (function () {
   const rz = document.getElementById("resizer"), split = document.getElementById("split"), badge = document.getElementById("rzBadge");
+  if (!rz || !split) return;   // analyzer-only chrome; the screener page has no split pane
   try { const saved = localStorage.getItem("squall-split"); if (saved) split.style.setProperty("--left-w", saved); } catch (e) {}
   syncMetricDensity();
   let dragging = false, pendingX = null, raf = null;
@@ -2254,6 +2307,7 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
 
 (function () {
   const grip = document.getElementById("chatGrip"), dock = document.getElementById("chatDock");
+  if (!grip || !dock) return;   // analyzer-only chrome; the screener page has no chat dock
   try { const saved = localStorage.getItem("squall-chat-h"); if (saved) dock.style.setProperty("--chat-h", saved); } catch (e) {}
   let dragging = false, pendingY = null, raf = null;
 
@@ -2305,19 +2359,19 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
 document.querySelectorAll("#mobileTabs button").forEach(btn => {
   btn.onclick = () => { document.querySelectorAll("#mobileTabs button").forEach(b => b.classList.toggle("active", b === btn));
     if (matchMedia("(max-width: 960px)").matches) {
-      document.getElementById("dataPane").toggleAttribute("data-hidden", btn.dataset.pane !== "dataPane");
-      document.getElementById("aiPane").toggleAttribute("data-hidden", btn.dataset.pane !== "aiPane");
+      document.getElementById("dataPane")?.toggleAttribute("data-hidden", btn.dataset.pane !== "dataPane");
+      document.getElementById("aiPane")?.toggleAttribute("data-hidden", btn.dataset.pane !== "aiPane");
       if (btn.dataset.pane === "dataPane" && active) drawChart(); } };
 });
 matchMedia("(max-width: 960px)").addEventListener("change", ev => {
-  if (!ev.matches) { document.getElementById("dataPane").removeAttribute("data-hidden"); document.getElementById("aiPane").removeAttribute("data-hidden"); }
+  if (!ev.matches) { document.getElementById("dataPane")?.removeAttribute("data-hidden"); document.getElementById("aiPane")?.removeAttribute("data-hidden"); }
   else document.querySelector("#mobileTabs button.active")?.click();
   if (active) drawChart();
 });
-if (matchMedia("(max-width: 960px)").matches) document.getElementById("aiPane").setAttribute("data-hidden", "");
+if (matchMedia("(max-width: 960px)").matches) document.getElementById("aiPane")?.setAttribute("data-hidden", "");
 
 /* ════════════════ MODAL OVERLAY TOGGLES (delegation — fires on cloned checkboxes) ════════════════ */
-document.getElementById("chartModalControls").addEventListener("change", function (e) {
+on("chartModalControls", "change", function (e) {
   const opt = e.target.dataset.opt;
   if (!opt) return;
   chartOpts[opt] = e.target.checked;

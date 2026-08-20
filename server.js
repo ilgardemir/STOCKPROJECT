@@ -761,6 +761,33 @@ const MIME = {
   ".svg":"image/svg+xml",".ico":"image/x-icon"
 };
 
+/* The analyzer and the screener are separate pages that share a header, the MySquall modal
+   and the saved-tab strip. Stitching those in at serve time keeps one copy of that markup
+   without a build step, and unlike injecting it from app.js it costs no layout shift — the
+   chrome is in the HTML the browser first parses. Two partials rather than one because
+   <body> is a flex column, so DOM order is visual order: the header sits above each page's
+   own content and the tab strip sits below it. */
+const PARTIAL_DIR = path.join(__dirname, "partials");
+const INCLUDE_RE = /^[ \t]*<!--#include\s+([a-z0-9-]+)\s*-->[ \t]*$/gm;
+const partialCache = new Map();
+
+function readPartial(name) {
+  const file = path.join(PARTIAL_DIR, name + ".html");
+  let stamp = 0;
+  try { const st = fs.statSync(file); stamp = st.mtimeMs + st.size; } catch (_) { return ""; }
+  const hit = partialCache.get(name);
+  if (hit && hit.stamp === stamp) return hit.text;
+  let text = "";
+  try { text = fs.readFileSync(file, "utf8"); } catch (_) { return ""; }
+  partialCache.set(name, { stamp, text });
+  return text;
+}
+// An unknown include name collapses to nothing rather than shipping the raw comment to the
+// browser — a missing partial should look like missing chrome, not like broken markup.
+function expandIncludes(html) {
+  return html.replace(INCLUDE_RE, (_, name) => readPartial(name));
+}
+
 /* Assets are versioned by deploy, not by filename, so a long max-age would keep serving
    last deploy's CSS. Revalidation is the right trade instead: one conditional request per
    asset, answered with a bodiless 304. That is the entire point of pulling the stylesheet
@@ -778,26 +805,41 @@ const CACHE = {
 };
 
 function serveStatic(req, res) {
-  let p = req.url === "/" ? "/index.html" : req.url;
-  p = p.split("?")[0].replace(/\.\./g, "");
+  // Strip the query FIRST. Testing req.url === "/" before doing so misses "/?t=AAPL", whose
+  // path is still the root — and the extensionless rewrite below then turns the empty
+  // remainder into ".html" and 404s the analyzer's own deep link.
+  let p = req.url.split("?")[0].replace(/\.\./g, "");
+  // Pages get clean extensionless URLs: /screener is the page, screener.html is the file.
+  // Only paths with no extension are rewritten, so /assets/x.png is untouched.
+  if (p === "/" || p === "") p = "/index.html";
+  else if (!path.extname(p)) p = p.replace(/\/+$/, "") + ".html";
   const filePath = path.join(PUBLIC_DIR, p);
   const notFound = () => { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); };
   fs.stat(filePath, (statErr, st) => {
     if (statErr || !st.isFile()) return notFound();
     const ext = path.extname(filePath).toLowerCase();
-    // size+mtime changes on every deploy and costs nothing to compute, unlike hashing
-    // the body on each request. Weak, because that is exactly the guarantee it makes.
-    const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    const isPage = ext === ".html";
     const headers = {
       "Content-Type": MIME[ext] || "application/octet-stream",
-      "Cache-Control": CACHE[ext] || "public, max-age=0, must-revalidate",
-      "ETag": etag
+      "Cache-Control": CACHE[ext] || "public, max-age=0, must-revalidate"
     };
-    if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); res.end(); return; }
-    fs.readFile(filePath, (err, data) => {
+    // Pages are assembled from a file plus its partials, so their identity is the assembled
+    // body — a size+mtime tag on the page file alone would go stale the moment the shared
+    // header changed. Everything else is served verbatim and can use the cheap stamp.
+    if (!isPage) {
+      const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+      headers.ETag = etag;
+      if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); res.end(); return; }
+    }
+    fs.readFile(filePath, isPage ? "utf8" : null, (err, data) => {
       if (err) return notFound();
+      if (!isPage) { res.writeHead(200, headers); res.end(data); return; }
+      const body = expandIncludes(data);
+      const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex").slice(0, 16)}"`;
+      headers.ETag = etag;
+      if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); res.end(); return; }
       res.writeHead(200, headers);
-      res.end(data);
+      res.end(body);
     });
   });
 }

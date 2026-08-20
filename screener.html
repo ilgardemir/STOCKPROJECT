@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-mode="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Stock Screener — Describe What You Want in Plain English | Squall</title>
+<meta name="description" content="Describe the kind of company or chart setup you want in plain English. Squall turns it into measurable rules and scores the S&amp;P 500, Nasdaq-100 and Dow 30 deterministically — every criterion shown and defined." />
+<link rel="canonical" href="https://squall.up.railway.app/screener" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://squall.up.railway.app/screener" />
+<meta property="og:site_name" content="Squall" />
+<meta property="og:title" content="Stock Screener — Describe What You Want in Plain English" />
+<meta property="og:description" content="Plain-English screening across the S&amp;P 500, Nasdaq-100 and Dow 30, with every rule measured and explained." />
+<meta name="twitter:card" content="summary" />
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="screener">
+
+<!--#include chrome-top-->
+
+<!--#include chrome-tabs-->
+
+<section id="screenerView" aria-label="Natural-language stock screener">
+  <div class="screen-shell">
+    <div class="screen-head"><div><div class="screen-kicker">Explainable stock screening</div><h1>Describe the companies you want to find.</h1><p>Squall converts plain-language criteria into measurable rules, shows how each term is defined, and ranks companies using market and fundamental data.</p></div></div>
+    <div class="screen-controls">
+      <label for="screenUniverse">Market universe</label>
+      <select id="screenUniverse">
+        <option value="combined">S&amp;P 500 + Nasdaq-100 + Dow 30</option>
+        <option value="sp500">S&amp;P 500</option>
+        <option value="nasdaq100">Nasdaq-100</option>
+        <option value="dow30">Dow 30</option>
+      </select>
+    </div>
+    <form id="screenForm" onsubmit="event.preventDefault(); runScreener();">
+      <textarea id="screenQuery" maxlength="500" aria-label="Describe stocks to screen for" placeholder="For example: Profitable technology companies forming a VCP near their 52-week highs"></textarea>
+      <button id="screenRun" type="submit">Run screen</button>
+    </form>
+    <div class="screen-examples">
+      <button class="screen-example" type="button" data-screen-example="AI companies with profitable growth and strong balance sheets">Profitable AI exposure</button>
+      <button class="screen-example" type="button" data-screen-example="Stocks forming a volatility contraction pattern near a breakout pivot">VCP candidates</button>
+      <button class="screen-example" type="button" data-screen-example="Companies forming a cup with handle after a strong prior uptrend">Cup-with-handle candidates</button>
+      <button class="screen-example" type="button" data-screen-example="Profitable value stocks with lower volatility and a P/E below 20">Lower-volatility value</button>
+    </div>
+    <div id="screenProgress" role="status" aria-live="polite">
+      <div class="screen-progress-row">
+        <span id="screenProgressText">Preparing the screen…</span>
+        <span id="screenProgressPct">0%</span>
+      </div>
+      <div class="screen-progress-track" role="progressbar" aria-label="Stock screen progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="screenProgressFill"></div></div>
+    </div>
+    <div id="screenInterpretation"></div>
+    <div id="screenResults"></div>
+    <div id="screenRefine"></div>
+  </div>
+</section>
+
+<script src="sp500.js"></script>
+<script src="market-universes.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -4,6 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Squall — Quant + AI Equity Analysis</title>
+<meta name="description" content="Analyze any US-listed stock from SEC filings, live market data and price history, with an AI write-up layered on top of the numbers. Charts, filing activity, options positioning and regime detection in one dashboard." />
+<link rel="canonical" href="https://squall.up.railway.app/" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://squall.up.railway.app/" />
+<meta property="og:site_name" content="Squall" />
+<meta property="og:title" content="Squall — Quant + AI Equity Analysis" />
+<meta property="og:description" content="Analyze any US-listed stock from SEC filings, live market data and price history, with an AI write-up layered on top of the numbers." />
+<meta name="twitter:card" content="summary" />
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
@@ -13,122 +21,9 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-page="analyzer">
 
-<header>
-  <button class="wordmark" id="homeLink" title="Back to home" aria-label="Squall — back to home" onclick="goHome()">
-    <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
-    <span class="wm-title">Squall</span><small>Quant + AI equity analysis</small>
-  </button>
-  <form id="searchForm" onsubmit="event.preventDefault(); runAnalysis();">
-    <div class="ticker-wrap">
-      <svg class="search-ico" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-      <input id="ticker" type="text" placeholder="Ticker or company" maxlength="60" autocomplete="off" spellcheck="false"
-             role="combobox" aria-expanded="false" aria-controls="tickerSuggest" aria-autocomplete="list" aria-label="Ticker symbol or company name" />
-      <div id="tickerSuggest" role="listbox" aria-label="Ticker suggestions"></div>
-      <button id="analyzeBtn" type="submit">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-        <span class="btn-label">Analyze</span>
-      </button>
-    </div>
-  </form>
-  <div class="util-rail">
-    <button id="screenerNav" type="button" onclick="openScreener()" title="Screen supported market indexes in plain English">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4"/></svg><span>Screener</span>
-    </button>
-    <span class="rail-div" aria-hidden="true"></span>
-    <button id="profileBtn" type="button" title="Personalize analysis with MySquall" aria-haspopup="dialog" onclick="openMySquall()">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6c0 4-2 5-2 5h16s-2-1-2-5a6 6 0 0 0-6-6Z"/><path d="M9 19h6M12 3V1"/></svg>
-      <span>MySquall</span><i id="profileDot" aria-hidden="true"></i>
-    </button>
-    <span class="rail-div" aria-hidden="true"></span>
-    <button id="themeBtn" type="button" aria-label="Appearance" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 21a9 9 0 1 1 9-9c0 1.9-1.55 3-3.2 3H16.2a1.9 1.9 0 0 0-1.45 3.13A1.9 1.9 0 0 1 13.3 21Z"/>
-        <circle class="well" cx="15.4" cy="8.1" r="1.45"/>
-        <circle cx="10.6" cy="7.1" r="1.15" fill="currentColor" stroke="none"/>
-        <circle cx="7.2" cy="10.8" r="1.15" fill="currentColor" stroke="none"/>
-        <circle cx="7.9" cy="15.4" r="1.15" fill="currentColor" stroke="none"/>
-      </svg>
-    </button>
-    <!-- Populated by app.js from the THEMES table so the palette list has one source. -->
-    <div id="themeMenu" role="menu" aria-label="Color theme"></div>
-  </div>
-</header>
-
-<div id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileTitle" aria-hidden="true">
-  <section id="profilePanel">
-    <div class="profile-head">
-      <div class="profile-head-top">
-        <div><h2 id="profileTitle">MySquall</h2><p>Tell Squall how you invest. Your profile is saved in this browser and shapes the explanation—not the facts.</p></div>
-        <button class="profile-close" type="button" aria-label="Close MySquall" onclick="closeMySquall()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
-      </div>
-      <!-- Save lives in the sticky header, not below the fold: the panel scrolls and the
-           action row at the bottom read as absent until you knew to scroll for it.
-           form="profileForm" keeps these submitting the form they now sit outside of. -->
-      <div class="profile-actions">
-        <button id="profileReset" type="button" onclick="resetMySquall()">Reset</button>
-        <span id="profileSaveStatus" role="status" aria-live="polite"></span>
-        <button id="profileSave" type="submit" form="profileForm">Save profile</button>
-      </div>
-    </div>
-    <form id="profileForm" onsubmit="event.preventDefault(); saveMySquall();">
-      <div class="profile-grid">
-        <div class="profile-field">
-          <label for="profileRisk">Risk tolerance <span class="profile-value" id="profileRiskValue"></span></label>
-          <input id="profileRisk" type="range" min="1" max="5" step="1" value="3" data-labels="Very cautious|Cautious|Moderate|Aggressive|Very aggressive">
-          <div class="profile-scale"><span>Protect capital</span><span>Accept volatility</span></div>
-        </div>
-        <div class="profile-field">
-          <label for="profileHorizon">Typical holding period <span class="profile-value" id="profileHorizonValue"></span></label>
-          <input id="profileHorizon" type="range" min="1" max="5" step="1" value="4" data-labels="Intraday|Days–weeks|Months|1–3 years|3+ years">
-          <div class="profile-scale"><span>Short term</span><span>Long term</span></div>
-        </div>
-        <div class="profile-field">
-          <label for="profileExperience">Trading experience <span class="profile-value" id="profileExperienceValue"></span></label>
-          <input id="profileExperience" type="range" min="1" max="5" step="1" value="2" data-labels="New|Beginner|Intermediate|Experienced|Advanced">
-          <div class="profile-scale"><span>Explain basics</span><span>Use advanced terms</span></div>
-        </div>
-        <div class="profile-field">
-          <label for="profileDepth">Analysis depth <span class="profile-value" id="profileDepthValue"></span></label>
-          <input id="profileDepth" type="range" min="1" max="5" step="1" value="3" data-labels="Quick overview|Concise|Balanced|Detailed|Deep dive">
-          <div class="profile-scale"><span>Fast answer</span><span>Deep research</span></div>
-        </div>
-        <div class="profile-field">
-          <label for="profileStyle">Trader style</label>
-          <select id="profileStyle">
-            <option value="balanced">Balanced / still learning</option><option value="long-term">Long-term investor</option>
-            <option value="swing">Swing trader</option><option value="value">Value investor</option><option value="growth">Growth investor</option>
-            <option value="income">Income / dividend investor</option><option value="options">Options trader</option>
-          </select>
-        </div>
-        <fieldset class="profile-field">
-          <legend>Focus areas <span class="profile-value">Choose up to 4</span></legend>
-          <div class="profile-priorities" id="profilePriorities">
-            <label><input type="checkbox" value="downside"><span>Downside risk</span></label>
-            <label><input type="checkbox" value="growth"><span>Growth</span></label>
-            <label><input type="checkbox" value="valuation"><span>Valuation</span></label>
-            <label><input type="checkbox" value="income"><span>Income</span></label>
-            <label><input type="checkbox" value="momentum"><span>Momentum</span></label>
-            <label><input type="checkbox" value="options"><span>Options</span></label>
-          </div>
-        </fieldset>
-        <div class="profile-field profile-wide">
-          <label for="profileCustom">Your own analysis preference <span class="profile-value"><span id="profileCustomCount">0</span>/600</span></label>
-          <div class="prompt-suggestions" aria-label="Prompt suggestions">
-            <button class="prompt-chip" type="button" data-profile-prompt="Explain unfamiliar terms in plain English.">Explain jargon</button>
-            <button class="prompt-chip" type="button" data-profile-prompt="Lead with the strongest bear case before the bull case.">Bear case first</button>
-            <button class="prompt-chip" type="button" data-profile-prompt="Compare the company with its closest public competitors when the supplied data supports it.">Compare peers</button>
-          </div>
-          <textarea id="profileCustom" maxlength="600" placeholder="Example: I am building a five-year portfolio. Flag debt, dilution, and anything that could permanently damage the business."></textarea>
-          <p class="profile-note">Stored in this browser. When you analyze a stock, these preferences are sent to Squall's AI provider with the stock context. They are never permission to invent data or promise returns.</p>
-        </div>
-      </div>
-    </form>
-  </section>
-</div>
+<!--#include chrome-top-->
 
 <div id="progressWrap" role="status" aria-live="polite">
   <div id="progressInner">
@@ -170,46 +65,7 @@
 </div>
 
 <div id="summaryStrip"></div>
-<div id="analysisTabs" aria-label="Saved analyses"></div>
-<div id="storageNotice" role="status" aria-live="polite" hidden>
-  <span id="storageNoticeText"></span>
-  <button type="button" aria-label="Dismiss this message">×</button>
-</div>
-
-<section id="screenerView" aria-label="Natural-language stock screener">
-  <div class="screen-shell">
-    <div class="screen-head"><div><div class="screen-kicker">Explainable stock screening</div><h1>Describe the companies you want to find.</h1><p>Squall converts plain-language criteria into measurable rules, shows how each term is defined, and ranks companies using market and fundamental data.</p></div></div>
-    <div class="screen-controls">
-      <label for="screenUniverse">Market universe</label>
-      <select id="screenUniverse">
-        <option value="combined">S&amp;P 500 + Nasdaq-100 + Dow 30</option>
-        <option value="sp500">S&amp;P 500</option>
-        <option value="nasdaq100">Nasdaq-100</option>
-        <option value="dow30">Dow 30</option>
-      </select>
-    </div>
-    <form id="screenForm" onsubmit="event.preventDefault(); runScreener();">
-      <textarea id="screenQuery" maxlength="500" aria-label="Describe stocks to screen for" placeholder="For example: Profitable technology companies forming a VCP near their 52-week highs"></textarea>
-      <button id="screenRun" type="submit">Run screen</button>
-    </form>
-    <div class="screen-examples">
-      <button class="screen-example" type="button" data-screen-example="AI companies with profitable growth and strong balance sheets">Profitable AI exposure</button>
-      <button class="screen-example" type="button" data-screen-example="Stocks forming a volatility contraction pattern near a breakout pivot">VCP candidates</button>
-      <button class="screen-example" type="button" data-screen-example="Companies forming a cup with handle after a strong prior uptrend">Cup-with-handle candidates</button>
-      <button class="screen-example" type="button" data-screen-example="Profitable value stocks with lower volatility and a P/E below 20">Lower-volatility value</button>
-    </div>
-    <div id="screenProgress" role="status" aria-live="polite">
-      <div class="screen-progress-row">
-        <span id="screenProgressText">Preparing the screen…</span>
-        <span id="screenProgressPct">0%</span>
-      </div>
-      <div class="screen-progress-track" role="progressbar" aria-label="Stock screen progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="screenProgressFill"></div></div>
-    </div>
-    <div id="screenInterpretation"></div>
-    <div id="screenResults"></div>
-    <div id="screenRefine"></div>
-  </div>
-</section>
+<!--#include chrome-tabs-->
 
 <div id="workspace">
   <div id="mobileTabs">

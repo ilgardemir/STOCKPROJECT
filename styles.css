@@ -211,6 +211,10 @@ body.hero-up .util-rail { margin-left: auto; }
 .util-rail > button:first-of-type { border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); }
 .util-rail > button:last-of-type { border-radius: 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0; }
 .util-rail > button:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+/* Now that the rail links across pages, the current page needs to say so. Weight and ink,
+   not a second hue — and the accent hairline rather than a fill, so it stays legible against
+   the hover state sitting on the same --chrome-hi. */
+.util-rail > button[aria-current="page"] { color: var(--ink-bright); background: var(--chrome-hi); box-shadow: inset 0 -2px 0 var(--accent); }
 .util-rail > button svg { width: 15px; height: 15px; flex-shrink: 0; transition: transform .3s var(--ease-spring); }
 .util-rail > button:active svg { transform: scale(.85); }
 .rail-div { width: 1px; height: 17px; flex-shrink: 0; background: var(--rule); transition: background .22s var(--ease); }
@@ -402,6 +406,11 @@ body.hero-up .util-rail { margin-left: auto; }
 /* Natural-language multi-index screener */
 #screenerView { flex: 1; min-height: 0; display: none; overflow-y: auto; padding: 26px clamp(16px, 4vw, 54px) 70px; background: var(--chrome-0); }
 #screenerView.show { display: block; animation: wsIn .35s var(--ease-out); }
+/* On /screener the screener IS the page, not a view being revealed into an existing one.
+   Visible from first paint so it does not depend on JS, and no wsIn: that animation encoded
+   an in-app transition from another view, and replaying it on navigation would be exactly
+   the arrival-announcing motion the design direction removed everywhere else. */
+body[data-page="screener"] #screenerView { display: block; animation: none; }
 .screen-shell { width: min(1120px, 100%); margin: 0 auto; }
 .screen-kicker { color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .screen-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
