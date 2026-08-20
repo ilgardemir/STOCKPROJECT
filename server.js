@@ -761,15 +761,44 @@ const MIME = {
   ".svg":"image/svg+xml",".ico":"image/x-icon"
 };
 
+/* Assets are versioned by deploy, not by filename, so a long max-age would keep serving
+   last deploy's CSS. Revalidation is the right trade instead: one conditional request per
+   asset, answered with a bodiless 304. That is the entire point of pulling the stylesheet
+   out of index.html — 87 KB of CSS and 148 KB of app.js stop riding along on every page
+   load and become two cheap freshness checks. Favicons carry no such risk and are cached
+   outright. Serving no Cache-Control at all (the previous behavior) left it to browser
+   heuristics, which is why the split would otherwise have bought nothing. */
+const CACHE = {
+  ".html": "no-cache",
+  ".css":  "public, max-age=0, must-revalidate",
+  ".js":   "public, max-age=0, must-revalidate",
+  ".json": "public, max-age=0, must-revalidate",
+  ".png":  "public, max-age=604800", ".jpg": "public, max-age=604800",
+  ".svg":  "public, max-age=604800", ".ico": "public, max-age=604800"
+};
+
 function serveStatic(req, res) {
   let p = req.url === "/" ? "/index.html" : req.url;
   p = p.split("?")[0].replace(/\.\./g, "");
   const filePath = path.join(PUBLIC_DIR, p);
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); return; }
+  const notFound = () => { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); };
+  fs.stat(filePath, (statErr, st) => {
+    if (statErr || !st.isFile()) return notFound();
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {"Content-Type": MIME[ext] || "application/octet-stream"});
-    res.end(data);
+    // size+mtime changes on every deploy and costs nothing to compute, unlike hashing
+    // the body on each request. Weak, because that is exactly the guarantee it makes.
+    const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    const headers = {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+      "Cache-Control": CACHE[ext] || "public, max-age=0, must-revalidate",
+      "ETag": etag
+    };
+    if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); res.end(); return; }
+    fs.readFile(filePath, (err, data) => {
+      if (err) return notFound();
+      res.writeHead(200, headers);
+      res.end(data);
+    });
   });
 }
 
