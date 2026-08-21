@@ -53,7 +53,7 @@ echo '{"tickers":["AAPL","MSFT"],"names":{},"spec":{"concepts":[{"id":"momentum"
 pip3 install -r requirements.txt
 ```
 
-**There is no test suite, linter, or build step.** "Testing" a change means running an engine standalone, hitting the running server, and — for anything visual — measuring the live DOM rather than trusting the source.
+Run `npm test` for the zero-dependency Node tests, Python unit tests, vocabulary-drift check, and SEC pressure audit. Engine integration still means running an engine standalone, hitting the running server, and — for anything visual — measuring the live DOM rather than trusting the source.
 
 Two things that bite hardest:
 

@@ -1,0 +1,62 @@
+[
+  {
+    "ticker": "AAA",
+    "name": "Alpha Data Center Systems",
+    "sector": "Technology",
+    "industry": "AI Infrastructure",
+    "business_summary": "Builds artificial intelligence accelerators for data center operators.",
+    "indexes": ["S&P 500"],
+    "universe_label": "Fixture universe",
+    "price": 120.0,
+    "market_cap": 200000000000,
+    "pe": 24.0,
+    "return_20d": 0.08,
+    "return_60d": 0.18,
+    "distance_52w_high": -0.04,
+    "volume_ratio": 1.3,
+    "volatility": 0.22,
+    "avg_dollar_volume": 600000000,
+    "profit_margin": 0.24,
+    "operating_margin": 0.28,
+    "return_on_equity": 0.31,
+    "scores": {
+      "quality": 90,
+      "value": 20,
+      "consolidation_short": 82,
+      "consolidation_long": 61,
+      "momentum_short": 90,
+      "momentum_medium": 74,
+      "momentum_long": 45
+    }
+  },
+  {
+    "ticker": "BBB",
+    "name": "Beta Retail Holdings",
+    "sector": "Consumer Cyclical",
+    "industry": "Retail",
+    "business_summary": "Operates regional home and apparel stores.",
+    "indexes": ["Nasdaq-100"],
+    "universe_label": "Fixture universe",
+    "price": 15.0,
+    "market_cap": 12000000000,
+    "pe": 9.0,
+    "return_20d": -0.03,
+    "return_60d": 0.02,
+    "distance_52w_high": -0.25,
+    "volume_ratio": 0.8,
+    "volatility": 0.38,
+    "avg_dollar_volume": 35000000,
+    "profit_margin": 0.06,
+    "operating_margin": 0.08,
+    "return_on_equity": 0.12,
+    "scores": {
+      "quality": 60,
+      "value": 95,
+      "consolidation_short": 40,
+      "consolidation_long": 55,
+      "momentum_short": 30,
+      "momentum_medium": 42,
+      "momentum_long": 58
+    }
+  }
+]

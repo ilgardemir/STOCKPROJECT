@@ -25,9 +25,16 @@ pip3 install -r requirements.txt
 
 # Container build (matches Railway deploy)
 docker build -t squall .
+
+# Offline unit + contract checks (no API keys or network calls)
+npm test
+# Individual groups
+npm run test:js
+npm run test:py
+npm run test:contracts
 ```
 
-There is no test suite, linter, or build step. "Testing" a change means running the scraper on a ticker and/or hitting the running server.
+There is still no linter or build step. `npm test` runs the zero-dependency Node harness, Python `unittest` coverage, the three-way screener vocabulary drift check, and the SEC provider-pressure audit. Integration testing still means running the scraper on a ticker and/or hitting the running server.
 
 ## Environment variables
 
