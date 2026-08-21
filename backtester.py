@@ -151,6 +151,60 @@ def forward_outcomes(frame, as_of):
             "max_drawdown_6m": drawdown}
 
 
+def _column(frame, name):
+    for col in frame.columns:
+        if str(col).lower() == name:
+            return col
+    return None
+
+
+def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
+    """
+    The post-cutoff window the Node simulation replays the model's call over.
+
+    Kept in `outcomes` rather than `snapshot` so the server's existing seal covers it:
+    these bars are the future and must never reach either model call. SPY is aligned to
+    the stock's session dates and padded with None where it has no bar, so the two
+    series stay index-aligned for the front end without silently shortening either.
+    """
+    limit = max_sessions or HORIZONS["6m"]
+    _, after = split_at_date(stock_frame, as_of)
+    if after.empty:
+        return {"dates": [], "open": [], "close": [], "spyOpen": [], "spyClose": []}
+    after = after.iloc[:limit]
+
+    open_col, close_col = _column(after, "open"), _column(after, "close")
+    if close_col is None:
+        return {"dates": [], "open": [], "close": [], "spyOpen": [], "spyClose": []}
+
+    spy_after = pd.DataFrame()
+    if isinstance(spy_frame, pd.DataFrame) and not spy_frame.empty:
+        _, spy_after = split_at_date(spy_frame, as_of)
+    spy_open_col = _column(spy_after, "open") if not spy_after.empty else None
+    spy_close_col = _column(spy_after, "close") if not spy_after.empty else None
+
+    def rounded(value):
+        number = finite(value)
+        return None if number is None else round(number, 4)
+
+    dates, opens, closes, spy_opens, spy_closes = [], [], [], [], []
+    for stamp, row in after.iterrows():
+        dates.append(stamp.date().isoformat())
+        closes.append(rounded(row[close_col]))
+        opens.append(rounded(row[open_col]) if open_col is not None else rounded(row[close_col]))
+        if spy_close_col is not None and stamp in spy_after.index:
+            spy_row = spy_after.loc[stamp]
+            spy_closes.append(rounded(spy_row[spy_close_col]))
+            spy_opens.append(rounded(spy_row[spy_open_col]) if spy_open_col is not None
+                             else rounded(spy_row[spy_close_col]))
+        else:
+            spy_closes.append(None)
+            spy_opens.append(None)
+
+    return {"dates": dates, "open": opens, "close": closes,
+            "spyOpen": spy_opens, "spyClose": spy_closes}
+
+
 def fact_series(companyfacts, concepts, unit, as_of, limit=5):
     cutoff = as_of.isoformat()
     for concept in concepts:
@@ -304,6 +358,9 @@ def main():
                     if stock_returns.get(label) is not None and benchmark_returns.get(label) is not None else None)
             for label in HORIZONS
         },
+        # The window the Node simulation replays the model's call over. Sealed by the
+        # server until AI generation ends, exactly like every other key in this object.
+        "bars": sealed_bars(frames[ticker], frames.get("SPY", pd.DataFrame()), as_of),
     }
     progress(88, "Sealing the future outcomes away from the AI prompt")
     output = {

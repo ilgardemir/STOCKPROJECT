@@ -44,6 +44,39 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertNotIn("excess_returns", prompt)
         json.dumps(snapshot, allow_nan=False)
 
+    def test_sealed_bars_contain_only_post_cutoff_sessions(self):
+        index = pd.date_range("2024-01-01", periods=40, freq="B")
+        close = np.arange(100.0, 140.0)
+        stock = pd.DataFrame({"open": close - 0.5, "high": close + 1, "low": close - 1,
+                              "close": close, "volume": 1_000_000}, index=index)
+        spy = pd.DataFrame({"open": close * 2, "high": close * 2, "low": close * 2,
+                            "close": close * 2, "volume": 5_000}, index=index)
+        cutoff = index[9].date()
+
+        bars = backtester.sealed_bars(stock, spy, cutoff)
+
+        self.assertEqual(bars["dates"][0], index[10].date().isoformat())
+        self.assertTrue(all(d > cutoff.isoformat() for d in bars["dates"]))
+        self.assertEqual(len(bars["dates"]), 30)
+        self.assertEqual(len(bars["open"]), len(bars["dates"]))
+        self.assertEqual(len(bars["spyClose"]), len(bars["dates"]))
+        self.assertAlmostEqual(bars["open"][0], close[10] - 0.5)
+        self.assertAlmostEqual(bars["spyClose"][0], close[10] * 2)
+
+    def test_sealed_bars_are_capped_and_survive_a_missing_benchmark(self):
+        index = pd.date_range("2024-01-01", periods=200, freq="B")
+        close = np.arange(100.0, 300.0)
+        stock = pd.DataFrame({"open": close, "high": close, "low": close,
+                              "close": close, "volume": 1}, index=index)
+        cutoff = index[0].date()
+
+        bars = backtester.sealed_bars(stock, pd.DataFrame(), cutoff, max_sessions=126)
+
+        self.assertEqual(len(bars["dates"]), 126)
+        # A missing benchmark must not shorten or misalign the stock series.
+        self.assertEqual(len(bars["spyClose"]), 126)
+        self.assertTrue(all(v is None for v in bars["spyClose"]))
+
 
 if __name__ == "__main__":
     unittest.main()
