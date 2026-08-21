@@ -848,6 +848,9 @@ function simulateTrade(decision, bars) {
       exitIdx = next < n ? next : i;
       exitPrice = next < n ? btFinite(open[next]) : c;
       if (exitPrice == null) exitPrice = c;
+      // Stop wins a same-close tie. Close-based evaluation makes a genuine tie
+      // near-impossible (a long's stop sits below entry and its target above),
+      // but resolving it toward the loss is the conservative direction.
       exitReason = hitStop ? "stop" : hitTarget ? "target" : "horizon";
       break;
     }

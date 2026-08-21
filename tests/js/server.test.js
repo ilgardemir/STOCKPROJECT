@@ -205,3 +205,51 @@ test("simulateTrade refuses a window with no usable bars", () => {
     { dates: [], open: [], close: [], spyOpen: [], spyClose: [] }), null);
   assert.equal(simulateTrade({ direction: "long", horizon: "3m" }, null), null);
 });
+
+test("a simulated trade that hits none of its exits runs to the horizon", () => {
+  // 30 rising sessions; close[i] = 100 + i, open[i] = 99.5 + i
+  const dates = [], open = [], close = [], spyOpen = [], spyClose = [];
+  for (let i = 0; i < 30; i++) {
+    dates.push(`2023-06-${String(i + 1).padStart(2, "0")}`);
+    open.push(99.5 + i); close.push(100 + i);
+    spyOpen.push(300); spyClose.push(300);
+  }
+  const result = simulateTrade(
+    { direction: "long", horizon: "1m", stop_pct: null, target_pct: null },
+    { dates, open, close, spyOpen, spyClose });
+
+  // 1m is 21 sessions: the 21st session is index 20, so the fill is index 21's open
+  assert.equal(result.exit.reason, "horizon");
+  assert.equal(result.exit.date, dates[21]);
+  assert.equal(result.exit.price, 120.5);
+  assert.equal(Math.round(result.stats.trade_return * 1e6) / 1e6, 0.211055);
+});
+
+test("an exit triggered on the final bar fills at that close, not an invented open", () => {
+  const bars = {
+    dates: ["2023-06-01", "2023-06-02", "2023-06-05", "2023-06-06", "2023-06-07"],
+    open:  [100, 100, 100, 100, 100],
+    close: [100, 100, 100, 100, 80],
+    spyOpen:  [300, 300, 300, 300, 300],
+    spyClose: [300, 300, 300, 300, 300]
+  };
+  const result = simulateTrade(
+    { direction: "long", horizon: "6m", stop_pct: 0.08, target_pct: null }, bars);
+
+  // The breach is on the last bar, so there is no next open to fill against.
+  assert.equal(result.exit.reason, "stop");
+  assert.equal(result.exit.date, "2023-06-07");
+  assert.equal(result.exit.price, 80);
+  assert.equal(Math.round(result.stats.trade_return * 1e6) / 1e6, -0.2);
+});
+
+test("simulated drawdown and excess return are measured against the right baselines", () => {
+  const result = simulateTrade(
+    { direction: "long", horizon: "6m", stop_pct: 0.08, target_pct: null }, BARS);
+
+  // Trade equity peaks at 11200 (close 112) and bottoms at the 9000 stop fill.
+  assert.equal(Math.round(result.stats.max_dd * 1e6) / 1e6, -0.196429);
+  // SPY ran 200 -> 210 over the window, so +5% against the trade's -10%.
+  assert.equal(Math.round(result.stats.spy_return * 1e6) / 1e6, 0.05);
+  assert.equal(Math.round(result.stats.excess_vs_spy * 1e6) / 1e6, -0.15);
+});
