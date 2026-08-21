@@ -276,6 +276,18 @@ test("backtest decisions reject prices masquerading as percentages", () => {
   assert.equal(safe.target_pct, 0.2);
 });
 
+test("backtest decisions reject sub-noise stops and clamp conviction upward", () => {
+  // Without these, deleting the 0.01 floor or the Math.max(1, …) clamp still passes
+  // every other test — only the ceiling checks above would be load-bearing.
+  const tiny = sanitizeBacktestDecision({ direction: "long", stop_pct: 0.009, target_pct: 0.009 });
+  assert.equal(tiny.stop_pct, null);
+  assert.equal(tiny.target_pct, null);
+  // 0.01 itself is inside the range — the floor is inclusive.
+  assert.equal(sanitizeBacktestDecision({ direction: "long", stop_pct: 0.01 }).stop_pct, 0.01);
+  assert.equal(sanitizeBacktestDecision({ direction: "long", conviction: 0 }).conviction, 1);
+  assert.equal(sanitizeBacktestDecision({ direction: "long", conviction: -7 }).conviction, 1);
+});
+
 test("a flat backtest call cannot carry a stop or target", () => {
   const safe = sanitizeBacktestDecision({ direction: "flat", stop_pct: 0.08, target_pct: 0.2 });
   assert.equal(safe.direction, "flat");
