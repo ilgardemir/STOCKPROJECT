@@ -2417,11 +2417,14 @@ Expected: all JS tests pass, all Python tests pass, and all three contract check
 
 `backtester.js` roughly doubled in size and `app.js` is shared across all three pages.
 
-Run: `PAGECHECK_POISON=1 node tests/js/pagecheck.js` — expected FAIL on all three pages.
-Run: `node tests/js/pagecheck.js` — expected `3/3 pages executed clean`.
+Run: `node tests/js/pagecheck.js` — expected `ok - self-check: …` followed by
+`3/3 pages executed clean`.
 
-Running the poisoned pass first is not ceremony: it is the only evidence that a clean
-pass means anything.
+The self-check is no longer an opt-in env var (`PAGECHECK_POISON` was removed after the
+Task 6 review): it runs on every invocation and the clean results are declared
+meaningless if it fails. Evidence that a clean pass means anything is therefore part of
+every run rather than a ritual someone has to remember. **If the `ok - self-check` line
+is missing from the output, the run proves nothing** — that is the line to look for.
 
 - [ ] **Step 3: Verify on Railway**
 

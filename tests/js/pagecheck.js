@@ -9,16 +9,42 @@ const vm = require("vm");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 
+// Must stay byte-identical to INCLUDE_RE in server.js. A looser pattern here
+// expands includes the server would ship to the browser as a literal comment,
+// so the harness would check a page that is never served — a superset id set,
+// which fails open.
+const INCLUDE_RE = /^[ \t]*<!--#include\s+([a-z0-9-]+)\s*-->[ \t]*$/gm;
+
 function assemble(page) {
   const html = fs.readFileSync(path.join(ROOT, page), "utf8");
-  return html.replace(/<!--#include\s+([\w-]+)\s*-->/g, (_, name) =>
+  return html.replace(INCLUDE_RE, (_, name) =>
     fs.readFileSync(path.join(ROOT, "partials", name + ".html"), "utf8"));
 }
 
 function idsOf(html) {
+  // Comments and inline script bodies are stripped first: a commented-out block
+  // leaves its ids in the source but not in the DOM, and `const id = "x"` inside
+  // an inline script is not an element. Either would invent an id the browser
+  // does not have, and an id set that is too large fails open.
+  const markup = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ");
   const ids = new Set();
-  for (const m of html.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)) ids.add(m[1]);
+  // Leading whitespace, not \b: \b matches after the hyphen in data-id="…",
+  // which is an attribute on an element whose own id may be absent.
+  for (const m of markup.matchAll(/\sid\s*=\s*["']([^"']+)["']/g)) ids.add(m[1]);
   return ids;
+}
+
+// The page's own <script src> tags, in document order. Derived rather than
+// listed: a hardcoded list silently stops covering a script the moment someone
+// adds one to a page, which is exactly the regression this harness exists to
+// prevent. Only same-origin relative sources are executable here.
+function scriptsOf(html) {
+  return [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)]
+    .map(m => m[1])
+    .filter(src => !/^(?:https?:)?\/\//.test(src))
+    .map(src => src.replace(/^\.?\//, "").split("?")[0]);
 }
 
 function makeEl(id) {
@@ -39,7 +65,7 @@ function makeEl(id) {
   };
 }
 
-function run(page, scripts) {
+function run(page, scripts, poisonId) {
   const html = assemble(page);
   const ids = idsOf(html);
   const bodyPage = (html.match(/<body[^>]*data-page\s*=\s*["']([^"']+)["']/) || [])[1] || "analyzer";
@@ -90,11 +116,13 @@ function run(page, scripts) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
+  const last = scripts[scripts.length - 1];
   for (const s of scripts) {
     let code = fs.readFileSync(path.join(ROOT, s), "utf8");
-    // Self-validation: prove the harness catches the shape it exists to find.
-    if (process.env.PAGECHECK_POISON && s === "app.js")
-      code += '\ndocument.getElementById("definitelyNotOnAnyPage").addEventListener("click", () => {});\n';
+    // Appended to the LAST script rather than to one matched by name, so that
+    // renaming or splitting a script cannot turn the self-check into a no-op.
+    if (poisonId && s === last)
+      code += `\ndocument.getElementById(${JSON.stringify(poisonId)}).addEventListener("click", () => {});\n`;
     try {
       vm.runInContext(code, sandbox, { filename: s });
     } catch (e) {
@@ -104,16 +132,58 @@ function run(page, scripts) {
   return { page, ok: true, ids: ids.size };
 }
 
-const JOBS = [
-  ["index.html", ["sp500.js", "market-universes.js", "app.js"]],
-  ["screener.html", ["sp500.js", "market-universes.js", "app.js"]],
-  ["ilgar.html", ["sp500.js", "market-universes.js", "app.js", "backtester.js"]]
-];
+const PAGES = ["index.html", "screener.html", "ilgar.html"];
+const JOBS = PAGES.map(page => [page, scriptsOf(assemble(page))]);
+
+/*
+ * Proves the harness can still fail, on every run rather than on a human
+ * remembering to set an env var. CLAUDE.md: "Validate the checker before
+ * trusting it" — a checker validated once at authoring time and never again
+ * drifts into passing on anything, and nothing announces when it does.
+ *
+ * Two assertions, because they fail for different reasons:
+ *   1. An id on no page must throw. Catches a stub that stopped returning null.
+ *   2. An id on exactly one page must throw on the others and NOT on its own.
+ *      Catches a stub that returns null for everything — which would also
+ *      satisfy (1) while proving nothing about page-specific markup.
+ * The discriminating id is derived from the real pages, never hardcoded, so it
+ * survives markup changes.
+ */
+function selfCheck() {
+  const problems = [];
+  const ABSENT = "__pagecheck_id_present_on_no_page__";
+  const [homePage, homeScripts] = JOBS[0];
+  const [otherPage, otherScripts] = JOBS[JOBS.length - 1];
+
+  if (run(homePage, homeScripts, ABSENT).ok)
+    problems.push(`poisoning ${homePage} with an absent id did not throw — the harness cannot fail`);
+
+  const homeIds = idsOf(assemble(homePage));
+  const otherIds = idsOf(assemble(otherPage));
+  const only = [...homeIds].find(id => !otherIds.has(id));
+  if (!only) problems.push(`no id distinguishes ${homePage} from ${otherPage}; cannot prove page-specificity`);
+  else {
+    if (!run(homePage, homeScripts, only).ok)
+      problems.push(`id "${only}" is in ${homePage} but the harness threw on it — false failures are likely`);
+    if (run(otherPage, otherScripts, only).ok)
+      problems.push(`id "${only}" is absent from ${otherPage} but the harness passed — id sets are not page-specific`);
+  }
+  return problems;
+}
+
+const selfProblems = selfCheck();
+for (const p of selfProblems) console.error(`not ok - self-check: ${p}`);
+if (selfProblems.length) {
+  console.error("\npagecheck self-validation FAILED — its clean results below mean nothing.");
+  process.exitCode = 1;
+} else {
+  console.log("ok - self-check: harness fails on a missing id and is page-specific");
+}
 
 let failed = 0;
 for (const [page, scripts] of JOBS) {
   const r = run(page, scripts);
-  if (r.ok) console.log(`ok - ${page} (${r.ids} ids) executed clean`);
+  if (r.ok) console.log(`ok - ${page} (${r.ids} ids, ${scripts.length} scripts) executed clean`);
   else {
     failed += 1;
     console.error(`not ok - ${r.page} threw in ${r.script}\n  ${r.error}\n${r.stack}`);
