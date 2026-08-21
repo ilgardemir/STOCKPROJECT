@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
-  validateBacktestDate, simulateTrade,
+  validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
   LIM, COST, clientIp, clientKey, admit, buckets, globals
 } = require("../../server");
 const BARS = require("../fixtures/backtest_bars.json");
@@ -252,4 +252,44 @@ test("simulated drawdown and excess return are measured against the right baseli
   // SPY ran 200 -> 210 over the window, so +5% against the trade's -10%.
   assert.equal(Math.round(result.stats.spy_return * 1e6) / 1e6, 0.05);
   assert.equal(Math.round(result.stats.excess_vs_spy * 1e6) / 1e6, -0.15);
+});
+
+test("backtest decisions are clamped to the supported enums and ranges", () => {
+  const safe = sanitizeBacktestDecision({
+    direction: "  LONG ", conviction: 99, horizon: "2y",
+    stop_pct: -0.08, target_pct: 0.25,
+    thesis: "  base breakout  on\nvolume  "
+  });
+  assert.equal(safe.direction, "long");
+  assert.equal(safe.conviction, 5);
+  assert.equal(safe.horizon, "3m");
+  // a negative percentage is a sign convention, not an error — a stop is always a loss
+  assert.equal(safe.stop_pct, 0.08);
+  assert.equal(safe.target_pct, 0.25);
+  assert.equal(safe.thesis, "base breakout on volume");
+});
+
+test("backtest decisions reject prices masquerading as percentages", () => {
+  // 145 is a stop PRICE, not a fraction — out of range, so it is dropped rather than simulated
+  const safe = sanitizeBacktestDecision({ direction: "long", stop_pct: 145.2, target_pct: 0.2 });
+  assert.equal(safe.stop_pct, null);
+  assert.equal(safe.target_pct, 0.2);
+});
+
+test("a flat backtest call cannot carry a stop or target", () => {
+  const safe = sanitizeBacktestDecision({ direction: "flat", stop_pct: 0.08, target_pct: 0.2 });
+  assert.equal(safe.direction, "flat");
+  assert.equal(safe.stop_pct, null);
+  assert.equal(safe.target_pct, null);
+});
+
+test("an unusable backtest decision degrades to no decision", () => {
+  assert.equal(sanitizeBacktestDecision({ direction: "moon" }), null);
+  assert.equal(sanitizeBacktestDecision("not json at all"), null);
+  assert.equal(sanitizeBacktestDecision(null), null);
+  assert.equal(sanitizeBacktestDecision([]), null);
+  // a JSON string is accepted, since that is what the model returns
+  assert.equal(sanitizeBacktestDecision('{"direction":"short"}').direction, "short");
+  // conviction is display-only and defaults rather than failing the decision
+  assert.equal(sanitizeBacktestDecision('{"direction":"short"}').conviction, 3);
 });

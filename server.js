@@ -785,6 +785,54 @@ function validateBacktestDate(raw, now = new Date()) {
   return { ok:true, value };
 }
 
+const BT_DIRECTIONS = new Set(["long", "short", "flat"]);
+const BT_HORIZONS = new Set(["1m", "3m", "6m"]);
+
+/**
+ * Re-checks the model's structured call against fixed enums and ranges, the same way
+ * sanitizeScreenerSpec does — nothing the model returns reaches the simulation on trust.
+ *
+ * Two conventions worth knowing. Stop and target are POSITIVE DISTANCES from entry and
+ * the direction decides the side, so a model that signs its stop negative is expressing
+ * the same intent and gets its magnitude taken rather than being dropped. And a value at
+ * or above the range ceiling is almost always an absolute PRICE the model returned where
+ * a fraction was asked for — dropping it is right, because simulating a $145 "8% stop"
+ * would silently produce a fabricated result.
+ */
+function sanitizeBacktestDecision(raw) {
+  let obj = raw;
+  if (typeof obj === "string") {
+    try { obj = JSON.parse(obj); } catch { return null; }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+
+  const direction = String(obj.direction || "").trim().toLowerCase();
+  if (!BT_DIRECTIONS.has(direction)) return null;
+
+  const conviction = Math.round(Number(obj.conviction));
+  const horizon = String(obj.horizon || "").trim().toLowerCase();
+  const pct = (value, max) => {
+    const n = Math.abs(Number(value));
+    return Number.isFinite(n) && n >= 0.01 && n <= max ? n : null;
+  };
+  const flat = direction === "flat";
+
+  return {
+    direction,
+    // Display-only: conviction never scales the position. A missing or absurd value
+    // must not throw away an otherwise usable decision.
+    conviction: Number.isFinite(conviction) ? Math.min(5, Math.max(1, conviction)) : 3,
+    horizon: BT_HORIZONS.has(horizon) ? horizon : "3m",
+    stop_pct: flat ? null : pct(obj.stop_pct, 0.5),
+    target_pct: flat ? null : pct(obj.target_pct, 2),
+    thesis: String(obj.thesis || "")
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240)
+  };
+}
+
 // Sessions per horizon — must stay in sync with HORIZONS in backtester.py.
 const BT_HORIZON_SESSIONS = { "1m": 21, "3m": 63, "6m": 126 };
 const BT_START_EQUITY = 10000;
@@ -2347,7 +2395,8 @@ if (require.main === module) {
 module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
-  fallbackRefineScreener, readMarketUniverse, validateBacktestDate, simulateTrade,
+  fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
+  simulateTrade, sanitizeBacktestDecision,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
