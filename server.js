@@ -2028,6 +2028,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse,
   // Abuse limits — exported so they can be exercised without starting the server.
