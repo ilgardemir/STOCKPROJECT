@@ -509,7 +509,9 @@ body[data-page="backtester"] header { flex: 0 0 auto; }
 .backtest-chart-wrap { position: relative; width: 100%; height: 320px; margin-bottom: 10px; }
 .backtest-chart-wrap canvas { width: 100%; height: 100%; display: block; }
 .backtest-legend { display: flex; flex-wrap: wrap; gap: 16px; color: var(--ink-dim); font-size: 10px; font-family: var(--mono); }
-.backtest-legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
+/* Wide enough to show a full dash cycle — the swatch has to carry the pattern,
+   because the three series are separated by weight and dash rather than hue. */
+.backtest-legend i { display: inline-block; width: 24px; height: 2px; vertical-align: middle; margin-right: 5px; }
 .backtest-thesis { margin-top: 12px; color: var(--ink); font-family: var(--doc); font-size: 13px; line-height: 1.6; }
 @media (max-width: 640px) { .backtest-chart-wrap { height: 240px; } }
 .screen-shell { width: min(1120px, 100%); margin: 0 auto; }

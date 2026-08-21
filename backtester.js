@@ -296,12 +296,37 @@ function drawLineChart(canvas, series, marks) {
     ctx.beginPath(); ctx.arc(X(dot.index), Y(v), 3.5, 0, Math.PI * 2);
     ctx.fillStyle = btVar("--chrome-0", "#0f1215"); ctx.fill();
     ctx.strokeStyle = dot.color; ctx.lineWidth = 1.6; ctx.stroke();
+    // Name the exit on the chart. Colour alone cannot carry it: a target hit and a
+    // stop-out are both "the trade ended here", and only the label says which.
+    if (dot.title) {
+      ctx.fillStyle = dot.color;
+      const right = X(dot.index) > W - padR - 60;
+      ctx.textAlign = right ? "right" : "left";
+      ctx.fillText(dot.title, X(dot.index) + (right ? -7 : 7), Y(v) - 9);
+    }
   }
 
   ctx.fillStyle = inkDim; ctx.textAlign = "left";
   ctx.fillText(labels[0], padL, H - padB + 12);
   ctx.textAlign = "right";
   ctx.fillText(labels[n - 1], W - padR, H - padB + 12);
+}
+
+/**
+ * Legend swatches that reproduce each series' dash pattern.
+ *
+ * A solid colour block would be a lie here: the lines are told apart by weight and
+ * dash, not hue, so three solid swatches in near-identical greys give the reader
+ * nothing to match against the chart. The gradient reproduces the on/off run
+ * lengths the canvas actually strokes.
+ */
+function btLegend(series) {
+  return series.map(s => {
+    const swatch = s.dash
+      ? `background:repeating-linear-gradient(to right, ${s.color} 0 ${s.dash[0] * 2}px, transparent ${s.dash[0] * 2}px ${(s.dash[0] + s.dash[1]) * 2}px);height:${Math.max(2, Math.round(s.width))}px`
+      : `background:${s.color};height:${Math.max(2, Math.round(s.width))}px`;
+    return `<span><i style="${swatch}"></i>${btEsc(s.label)}</span>`;
+  }).join("");
 }
 
 /** Registers a chart so it survives theme swaps and resizes. */
@@ -347,28 +372,48 @@ function renderBacktestDecision(data) {
 
 function renderBacktestCurve(simulation) {
   const host = document.getElementById("backtestCurve");
-  if (!host || !simulation || !simulation.curve || simulation.curve.length < 2) return;
+  if (!host) return;
+  // A cutoff within a session or two of today leaves nothing to plot. Say so — an
+  // empty panel where a chart belongs reads as a bug rather than as "no data yet".
+  if (!simulation || !simulation.curve || simulation.curve.length < 2) {
+    host.innerHTML = `<p class="backtest-empty">Too few sessions have passed since this cutoff to chart an outcome. The measured returns below are still valid.</p>`;
+    return;
+  }
   const curve = simulation.curve;
   const hasTrade = curve.some(p => Number.isFinite(p.trade));
+  // Weight and dash carry the distinction, not hue. Measured across all six themes,
+  // --ink against --ink-dim is only 1.11:1 (Daylight) to 1.45:1 (Noir), and --accent
+  // against --ink bottoms out at 1.25:1 — so on colour alone these three lines are one
+  // line. The design system also reserves the single accent and forbids inventing a
+  // second hue, which leaves weight and dash as the honest levers.
   const series = [
-    { key:"spy", label:"SPY", color:btVar("--ink-dim", "#7d8892"), points:curve.map(p => p.spy), width:1.4 },
-    { key:"stock", label:"Stock, buy & hold", color:btVar("--ink", "#b9c2ca"), points:curve.map(p => p.stock), width:1.4, dash:[4,3] }
+    { key:"spy", label:"SPY", color:btVar("--ink-dim", "#7d8892"),
+      points:curve.map(p => p.spy), width:1.2, dash:[1, 3] },
+    { key:"stock", label:"Stock, buy & hold", color:btVar("--ink", "#b9c2ca"),
+      points:curve.map(p => p.stock), width:1.5, dash:[5, 4] }
   ];
   if (hasTrade) series.push({ key:"trade", label:"Squall's trade",
-    color:btVar("--accent", "#e0a33a"), points:curve.map(p => p.trade), width:2 });
+    color:btVar("--accent", "#e0a33a"), points:curve.map(p => p.trade), width:2.2 });
 
   const dots = [];
   if (hasTrade && simulation.exit) {
     const exitIndex = curve.findIndex(p => p.d === simulation.exit.date);
+    // The exit reason decides the colour. Painting a target hit in loss-red because
+    // "the trade ended" reads as a stop-out and inverts the result at a glance.
+    const EXIT_LOOK = {
+      stop:    { token:"--down",    fallback:"#c25b5b", label:"stopped out" },
+      target:  { token:"--up",      fallback:"#4c9a72", label:"target hit" },
+      horizon: { token:"--ink-dim", fallback:"#8b959e", label:"horizon reached" },
+      end:     { token:"--ink-dim", fallback:"#8b959e", label:"window ended" }
+    };
+    const look = EXIT_LOOK[simulation.exit.reason] || EXIT_LOOK.end;
     if (exitIndex >= 0) dots.push({ index:exitIndex, series:"trade",
-      color:btVar("--down", "#c25b5b"), title:simulation.exit.reason });
+      color:btVar(look.token, look.fallback), title:look.label });
   }
 
-  const legend = series.map(s =>
-    `<span><i style="background:${s.color}"></i>${btEsc(s.label)}</span>`).join("");
   host.innerHTML = `
     <div class="backtest-chart-wrap"><canvas id="backtestCurveCanvas"></canvas></div>
-    <div class="backtest-legend">${legend}</div>`;
+    <div class="backtest-legend">${btLegend(series)}</div>`;
 
   btObserve(document.getElementById("backtestCurveCanvas"));
   btRegisterChart("curve", () => drawLineChart(
