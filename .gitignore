@@ -5,3 +5,4 @@ npm-debug.log
 __pycache__
 *.pyc
 .claude/settings.local.json
+.superpowers/
