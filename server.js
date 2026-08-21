@@ -11,7 +11,7 @@ const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE"
 // box without Python. Production leaves both unset.
 const SCRAPER_PATH = process.env.SQUALL_SCRAPER_PATH || "./scraperFinal.py";
 const SCREENER_PATH = process.env.SQUALL_SCREENER_PATH || "./screener.py";
-const BACKSCREENER_PATH = process.env.SQUALL_BACKSCREENER_PATH || "./backscreener.py";
+const BACKTESTER_PATH = process.env.SQUALL_BACKTESTER_PATH || "./backtester.py";
 const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = "deepseek/deepseek-v4-flash";         // interprets the structured payload; it never searches for market/news data
 const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines screener language only; no web plugin
@@ -197,6 +197,24 @@ function buildAiMessages(prompt, profile) {
         "You are a quantitative financial analyst writing a thorough, multi-section read for an investor who can already see all the underlying data.",
         "Reason carefully before answering, then interpret — connect valuation, fundamentals, technicals, and institutional positioning into judgments. Never restate figures, rebuild tables, or list metrics for their own sake; cite a number only when it anchors a specific conclusion.",
         "Be specific to this company, not generic. Use only the structured data and Finnhub source records supplied; never invent figures, strikes, expirations, or news events.",
+      ].join(" ")
+    },
+    { role: "user", content: userContent }
+  ];
+}
+
+function buildBacktestAiMessages(prompt, profile) {
+  let userContent = prompt;
+  const profileText = formatProfile(profile);
+  if (profileText) userContent += "\n\n" + profileText;
+  return [
+    {
+      role: "system",
+      content: [
+        "You are a point-in-time equity analyst participating in a historical blind test.",
+        "The cutoff date and supplied snapshot are absolute: never use knowledge from after that date, including facts you remember independently.",
+        "Never guess missing historical news, options, estimates, or outcomes. Analyze only the supplied price and SEC evidence, distinguish what was known from what was uncertain, and do not claim that a chart-pattern score proves a pattern.",
+        "Do not predict with certainty or provide individualized financial advice."
       ].join(" ")
     },
     { role: "user", content: userContent }
@@ -519,72 +537,6 @@ function attachScreenerDefinitions(spec) {
   return spec;
 }
 
-// A historical replay may use only fields reconstructed from bars at the cutoff.
-// Current Yahoo fundamentals, analyst targets, ownership, sector descriptions and beta
-// are not point-in-time data; letting them through would make the result look historical
-// while quietly leaking today's information into it.
-const HISTORICAL_CONCEPTS = new Set([
-  "consolidation", "volatility_contraction", "vcp", "cup_and_handle", "flat_base",
-  "double_bottom", "bull_flag", "uptrend", "downtrend", "accumulation", "distribution",
-  "breakout", "momentum", "relative_strength", "risk_adjusted_momentum", "near_highs",
-  "oversold", "recovery", "pullback_to_ma", "golden_cross", "volume_surge", "volume_dryup",
-  "low_volatility", "high_volatility", "trend_stability", "squeeze", "bullish_pullback",
-  "mean_reversion", "turnaround", "technical_strength"
-]);
-// Dollar volume remains comparable through splits because Yahoo adjusts both price and
-// share volume. Nominal price/share-volume filters do not, so they are excluded too.
-const HISTORICAL_FILTERS = new Set(["avg_dollar_volume_min"]);
-
-function prepareHistoricalSpec(rawSpec, asOf) {
-  const spec = JSON.parse(JSON.stringify(rawSpec || {}));
-  const originalConcepts = Array.isArray(spec.concepts) ? spec.concepts : [];
-  const unsupported = [];
-  spec.concepts = originalConcepts.filter(c => {
-    const keep = c && HISTORICAL_CONCEPTS.has(c.id);
-    if (!keep && c?.id) unsupported.push(SCREENER_CATALOG[c.id]?.[0] || c.id);
-    return keep;
-  });
-  if (!spec.concepts.length) {
-    spec.concepts = [{ id:"technical_strength", weight:1, required:false, source:"historical_default" }];
-    spec.historical_defaulted = true;
-  }
-  const filters = {};
-  for (const [key, value] of Object.entries(spec.filters || {})) {
-    if (HISTORICAL_FILTERS.has(key)) filters[key] = value;
-    else unsupported.push(key.replaceAll("_", " "));
-  }
-  spec.filters = filters;
-  if (spec.theme) {
-    unsupported.push(`${spec.theme.label || "theme"} theme`);
-    delete spec.theme;
-  }
-  spec.historical = true;
-  spec.as_of = asOf;
-  spec.unsupported_criteria = [...new Set(unsupported)];
-  spec.historical_notes = [
-    "Signals, displayed entries, and returns use split-adjusted price and volume dated on or before the selected date.",
-    "Returns begin at the next available session open, after the signal existed.",
-    "The universe uses today's stored index membership, so removed and delisted historical members are absent."
-  ];
-  if (spec.historical_defaulted) {
-    spec.historical_notes.unshift("No requested point-in-time technical criteria remained, so the replay uses a neutral technical-strength ranking.");
-  }
-  return attachScreenerDefinitions(spec);
-}
-
-function validateBackscreenDate(raw, now = new Date()) {
-  const value = String(raw || "");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return { ok:false, reason:"Choose a historical date." };
-  const parsed = new Date(value + "T00:00:00Z");
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value)
-    return { ok:false, reason:"Choose a real date in YYYY-MM-DD format." };
-  const earliest = new Date("2000-01-01T00:00:00Z");
-  const latest = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 35 * 86400000);
-  if (parsed < earliest) return { ok:false, reason:"Historical replays currently support dates from January 1, 2000 onward." };
-  if (parsed > latest) return { ok:false, reason:`Choose ${latest.toISOString().slice(0,10)} or earlier so at least a one-month outcome can be measured.` };
-  return { ok:true, value };
-}
-
 function sanitizeScreenerSpec(candidate, fallback, rawProfile = null, query = "") {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return attachScreenerDefinitions(applyProfileCalibration(fallback, rawProfile, query));
   const concepts = Array.isArray(candidate.concepts) ? candidate.concepts.filter(c => c && SCREENER_CONCEPTS.has(c.id)).slice(0, 10).map(c => ({
@@ -818,6 +770,19 @@ function sanitizeQuery(raw) {
   if (name.replace(/[^A-Za-z0-9]/g, "").length < 2)
     return { ok: false, reason: `"${q}" isn't a valid ticker or company name.`, invalid_ticker: true };
   return { ok: true, query: name };
+}
+
+function validateBacktestDate(raw, now = new Date()) {
+  const value = String(raw || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return { ok:false, reason:"Choose a historical date." };
+  const parsed = new Date(value + "T00:00:00Z");
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value)
+    return { ok:false, reason:"Choose a real date in YYYY-MM-DD format." };
+  const earliest = new Date("2000-01-01T00:00:00Z");
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (parsed < earliest) return { ok:false, reason:"Historical analyses currently support dates from January 1, 2000 onward." };
+  if (parsed >= today) return { ok:false, reason:"Choose a date before today." };
+  return { ok:true, value };
 }
 
 // Static file serving
@@ -1498,117 +1463,6 @@ const appServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // Point-in-time historical replay. Interpretation is shared with the live screener,
-  // but prepareHistoricalSpec removes anything that cannot be reconstructed at the
-  // cutoff before the isolated historical engine sees the job.
-  if (req.method === "GET" && req.url.startsWith("/backscreen-stream")) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
-    const universeId = SCREEN_UNIVERSES.has(url.searchParams.get("universe")) ? url.searchParams.get("universe") : "combined";
-    const profile = sanitizeProfile(url.searchParams.get("profile"));
-    const dateCheck = validateBackscreenDate(url.searchParams.get("as_of"));
-    let existing = null;
-    try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
-    const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
-
-    const gate = admit(req, "screen");
-    res.writeHead(200, sseHeaders(gate));
-    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    if (!gate.ok) {
-      send("screen_error", { error:gate.message, limited:true, rule:gate.rule, retry_after_s:gate.retryAfter, resets_at:gate.resetsAt });
-      return res.end();
-    }
-    if (query.length < 3) { send("screen_error", { error:"Describe the historical setup you want to test in a little more detail." }); return res.end(); }
-    if (!dateCheck.ok) { send("screen_error", { error:dateCheck.reason }); return res.end(); }
-
-    const aiBudget = spendAi(COST.screen.ai);
-    send("screen_progress", { percent:4, label:!aiBudget.ok
-      ? "AI interpretation unavailable today — using the deterministic recipe builder"
-      : (existing ? "Revising the historical criteria" : "Translating the request into point-in-time criteria") });
-    let spec;
-    if (existing) {
-      let refined;
-      if (!aiBudget.ok) refined = fallbackRefineScreener(query, existing, profile, priorCount);
-      else {
-        try { refined = await refineScreenerSpec(query, existing, profile, priorCount); }
-        catch { refined = fallbackRefineScreener(query, existing, profile, priorCount); }
-      }
-      spec = refined.spec;
-      send("screen_reply", { reply:refined.reply });
-    } else if (!aiBudget.ok) {
-      spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile));
-    } else {
-      try { spec = await interpretScreenerQuery(query, profile); }
-      catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
-    }
-
-    let universe;
-    try { universe = readMarketUniverse(universeId); }
-    catch (e) { send("screen_error", { error:"Could not load the selected market universe: " + e.message }); return res.end(); }
-    spec = prepareHistoricalSpec(spec, dateCheck.value);
-    spec.universe_id = universe.id;
-    spec.universe_label = universe.label;
-    send("screen_progress", { percent:8, label:`Preparing ${universe.label} as of ${dateCheck.value}` });
-    send("screen_interpretation", spec);
-
-    const slot = await acquirePy(req, pos =>
-      send("screen_progress", { percent:9, label:`Queued for a free historical-data slot (position ${pos})` }));
-    if (typeof slot !== "function") {
-      if (slot === "aborted") return res.end();
-      send("screen_error", {
-        error:slot === "full" ? "Squall is running at capacity right now — try again in a minute."
-          : "Timed out waiting for a free data slot — try again in a minute.",
-        limited:true, rule:"capacity", retry_after_s:30
-      });
-      return res.end();
-    }
-
-    const py = spawn(PYTHON, [BACKSCREENER_PATH], { env:process.env });
-    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
-    let timedOut = false, settled = false;
-    const killTimer = setTimeout(() => {
-      timedOut = true;
-      try { py.kill("SIGKILL"); } catch (_) {}
-    }, LIM.SCREENER_TIMEOUT_MS);
-    let stdout = "", stderr = "", buf = "";
-    py.stdout.on("data", chunk => { stdout += chunk.toString(); });
-    py.stderr.on("data", chunk => {
-      const text = chunk.toString(); stderr = (stderr + text).slice(-3000); buf += text;
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        const match = line.match(/^PROGRESS\|(\d+)\|(.*)$/);
-        if (match) send("screen_progress", { percent:Number(match[1]), label:match[2] });
-        else if (line) recordEngineWarning("backscreener", line);
-      }
-    });
-    py.on("error", e => {
-      if (settled) return; settled = true;
-      clearTimeout(killTimer); slot();
-      send("screen_error", { error:"Could not start the historical screening engine: " + e.message }); res.end();
-    });
-    py.on("close", code => {
-      if (settled) return; settled = true;
-      clearTimeout(killTimer); slot();
-      if (timedOut) {
-        send("screen_error", { error:`The historical replay took longer than ${Math.round(LIM.SCREENER_TIMEOUT_MS / 1000)}s and was stopped. Try a single index rather than the combined universe.`,
-                               limited:true, rule:"engine_timeout", retry_after_s:30 });
-        return res.end();
-      }
-      let result;
-      try { result = JSON.parse(stdout); }
-      catch { send("screen_error", { error:"The historical screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
-      if (code !== 0 || result.error) { send("screen_error", { error:result.error || "The historical screening engine failed.", detail:stderr.slice(-500) }); return res.end(); }
-      send("screen_progress", { percent:97, label:`Preparing ${result.results?.length || 0} historical matches for display` });
-      send("screen_result", result); res.end();
-    });
-    py.stdin.end(JSON.stringify({
-      tickers:universe.tickers, names:universe.names, memberships:universe.memberships,
-      universe_id:universe.id, universe_label:universe.label, as_of:dateCheck.value, spec
-    }));
-    return;
-  }
-
   // Natural-language multi-index screener. The model interprets intent; Python does
   // every numerical comparison so results remain reproducible and explainable.
   if (req.method === "GET" && req.url.startsWith("/screen-stream")) {
@@ -1726,6 +1580,170 @@ const appServer = http.createServer(async (req, res) => {
       tickers:universe.tickers, names:universe.names, memberships:universe.memberships,
       universe_id:universe.id, universe_label:universe.label, spec
     }));
+    return;
+  }
+
+  // Hidden point-in-time analyzer used from /ilgar. The Python engine returns the
+  // frozen snapshot and future outcomes together, but this route deliberately sends
+  // only the snapshot first. Outcomes are not released to the browser until the model
+  // finishes (or AI is unavailable), and only payload.ai_prompt reaches OpenRouter.
+  if (req.method === "GET" && req.url.startsWith("/backtest-stream")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const queryCheck = sanitizeQuery(url.searchParams.get("ticker") || "");
+    const dateCheck = validateBacktestDate(url.searchParams.get("as_of"));
+    const profile = sanitizeProfile(url.searchParams.get("profile"));
+    const gate = admit(req, "analyze");
+    res.writeHead(200, sseHeaders(gate));
+    let connected = true;
+    const send = (event, data) => {
+      if (connected && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    if (!gate.ok) {
+      send("backtest_error", { error:gate.message, limited:true, rule:gate.rule,
+        retry_after_s:gate.retryAfter, resets_at:gate.resetsAt });
+      return res.end();
+    }
+    if (!queryCheck.ok) { send("backtest_error", { error:queryCheck.reason }); return res.end(); }
+    if (!dateCheck.ok) { send("backtest_error", { error:dateCheck.reason }); return res.end(); }
+
+    send("backtest_progress", { percent:2, label:"Starting the historical data pipeline" });
+    const slot = await acquirePy(req, pos =>
+      send("backtest_progress", { percent:3, label:`Waiting for a free data slot (position ${pos})` }));
+    if (typeof slot !== "function") {
+      if (slot === "aborted") return res.end();
+      send("backtest_error", {
+        error:slot === "full" ? "Squall is running at capacity right now — try again in a minute."
+          : "Timed out waiting for a free data slot — try again in a minute.",
+        limited:true, rule:"capacity", retry_after_s:30
+      });
+      return res.end();
+    }
+
+    const py = spawn(PYTHON, [BACKTESTER_PATH], { env:process.env });
+    const aiAbort = new AbortController();
+    req.on("close", () => {
+      connected = false;
+      try { py.kill(); } catch (_) {}
+      try { aiAbort.abort(); } catch (_) {}
+      slot();
+    });
+    let timedOut = false, settled = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { py.kill("SIGKILL"); } catch (_) {}
+    }, LIM.SCRAPER_TIMEOUT_MS);
+    let stdout = "", stderr = "", buf = "";
+    py.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    py.stderr.on("data", chunk => {
+      const text = chunk.toString();
+      stderr = (stderr + text).slice(-3000);
+      buf += text;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        const match = line.match(/^PROGRESS\|(\d+)\|(.*)$/);
+        if (match) send("backtest_progress", { percent:Number(match[1]), label:match[2] });
+        else if (line) recordEngineWarning("backtester", line);
+      }
+    });
+    py.on("error", error => {
+      if (settled) return;
+      settled = true; clearTimeout(killTimer); slot();
+      send("backtest_error", { error:"Could not start the historical analyzer: " + error.message });
+      res.end();
+    });
+    py.on("close", async code => {
+      if (settled) return;
+      settled = true; clearTimeout(killTimer); slot();
+      if (!connected) return;
+      if (timedOut) {
+        send("backtest_error", { error:`The historical data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. Try again shortly.`,
+          limited:true, rule:"engine_timeout", retry_after_s:30 });
+        return res.end();
+      }
+      let payload;
+      try { payload = JSON.parse(stdout); }
+      catch { send("backtest_error", { error:"The historical analyzer returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
+      if (code !== 0 || payload.error) {
+        send("backtest_error", { error:payload.error || "The historical analyzer failed.", detail:stderr.slice(-500) });
+        return res.end();
+      }
+
+      const outcomes = payload.outcomes || {};
+      const { outcomes:_sealed, ai_prompt:_privatePrompt, ...publicSnapshot } = payload;
+      send("backtest_snapshot", { ...publicSnapshot, model:AI_MODEL });
+      send("backtest_progress", { percent:97, label:"Historical snapshot ready · asking AI without future outcomes" });
+
+      const revealOutcomes = () => {
+        send("backtest_outcomes", { outcomes });
+        send("backtest_done", { ok:true });
+        res.end();
+      };
+      const aiBudget = spendAi(COST.analyze.ai);
+      if (!aiBudget.ok) {
+        send("backtest_ai_error", { error:"AI capacity reached for today. The frozen snapshot and measured outcomes are still available.",
+          limited:true, resets_at:aiBudget.resetsAt });
+        return revealOutcomes();
+      }
+
+      send("backtest_ai_start", { model:AI_MODEL });
+      const body = JSON.stringify({
+        model:AI_MODEL, temperature:0.3, max_tokens:ANALYSIS_MAX,
+        reasoning:{ effort:REASON_EFFORT }, stream:true, provider:AI_PROVIDER,
+        messages:buildBacktestAiMessages(payload.ai_prompt, profile)
+      });
+      let answer = "", reasoning = "", emitted = false, lastError = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method:"POST", signal:aiAbort.signal,
+            headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`,
+              "HTTP-Referer":"http://localhost", "X-Title":"Squall" },
+            body
+          });
+          if (!aiRes.ok || !aiRes.body) {
+            const detail = await aiRes.text().catch(() => "");
+            const error = new Error(`OpenRouter ${aiRes.status}: ${detail.slice(0, 300)}`);
+            error.httpStatus = aiRes.status;
+            throw error;
+          }
+          let sseBuffer = "";
+          const decoder = new TextDecoder();
+          for await (const chunk of aiRes.body) {
+            sseBuffer += decoder.decode(chunk, { stream:true });
+            let nl;
+            while ((nl = sseBuffer.indexOf("\n")) >= 0) {
+              const line = sseBuffer.slice(0, nl).trim();
+              sseBuffer = sseBuffer.slice(nl + 1);
+              if (!line.startsWith("data:")) continue;
+              const raw = line.slice(5).trim();
+              if (!raw || raw === "[DONE]") continue;
+              let item; try { item = JSON.parse(raw); } catch { continue; }
+              if (item.error) throw new Error(item.error.message || "OpenRouter stream error");
+              const delta = item.choices?.[0]?.delta || {};
+              if (delta.reasoning) { reasoning += delta.reasoning; emitted = true; send("backtest_ai_thinking", { t:delta.reasoning }); }
+              if (delta.content) { answer += delta.content; emitted = true; send("backtest_ai_delta", { t:delta.content }); }
+            }
+          }
+          send("backtest_ai_done", { aiSummary:answer, aiReasoning:reasoning, model:AI_MODEL });
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (error.name === "AbortError") return;
+          const transient = /terminated|idle timeout|ECONNRESET|ETIMEDOUT|EPIPE|socket|network|fetch failed/i.test(error.message || "")
+            || error.httpStatus >= 500 || error.httpStatus === 429;
+          if (transient && !emitted && attempt < 3) continue;
+          break;
+        }
+      }
+      if (lastError) send("backtest_ai_error", { error:emitted
+        ? `The historical write-up was interrupted (${lastError.message}). Outcomes are still shown below.`
+        : `Historical AI write-up failed: ${lastError.message}` });
+      revealOutcomes();
+    });
+    py.stdin.end(JSON.stringify({ query:queryCheck.query, as_of:dateCheck.value }));
     return;
   }
 
@@ -2198,6 +2216,7 @@ if (require.main === module) {
     console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
     console.log(`   Model    : ${AI_MODEL}`);
     console.log(`   Scraper  : ${path.resolve(SCRAPER_PATH)}`);
+    console.log(`   Backtest : ${path.resolve(BACKTESTER_PATH)}`);
     console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
     console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}`);
     console.log(`   Limits   : ${LIM.IP_DAILY}/day per client · ${LIM.GLOBAL_AI_DAILY} AI credits/day · ${LIM.GLOBAL_SCRAPE_DAILY} scrapes/day · ${LIM.MAX_PY} concurrent`);
@@ -2208,7 +2227,7 @@ if (require.main === module) {
 module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
-  fallbackRefineScreener, readMarketUniverse, prepareHistoricalSpec, validateBackscreenDate,
+  fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,

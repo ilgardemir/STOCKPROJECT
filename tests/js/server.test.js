@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
-  prepareHistoricalSpec, validateBackscreenDate,
+  validateBacktestDate,
   LIM, COST, clientIp, clientKey, admit, buckets, globals
 } = require("../../server");
 
@@ -73,40 +73,12 @@ test("sanitizeScreenerSpec rejects unknown concepts and unsafe model defaults", 
   assert.equal(safe.definitions[0].id, "quality");
 });
 
-test("historical specs keep only point-in-time price and volume criteria", () => {
-  const safe = prepareHistoricalSpec({
-    title: "Historical quality VCP",
-    concepts: [
-      { id:"quality", weight:2, required:true },
-      { id:"vcp", weight:1.5, required:true },
-    ],
-    filters: { sectors:["Technology"], price_min:10, pe_max:20, avg_dollar_volume_min:5_000_000 },
-    theme: { label:"AI", keywords:["artificial intelligence"] },
-    settings: { match_threshold:55 },
-  }, "2024-03-15");
-  assert.deepEqual(safe.concepts.map(c => c.id), ["vcp"]);
-  assert.deepEqual(safe.filters, { avg_dollar_volume_min:5_000_000 });
-  assert.equal(safe.theme, undefined);
-  assert.equal(safe.historical, true);
-  assert.equal(safe.as_of, "2024-03-15");
-  assert.ok(safe.unsupported_criteria.includes("Business quality"));
-  assert.ok(safe.unsupported_criteria.includes("AI theme"));
-  assert.deepEqual(safe.definitions.map(d => d.id), ["vcp"]);
-});
-
-test("historical specs visibly default when no honest concept remains", () => {
-  const safe = prepareHistoricalSpec({ concepts:[{ id:"value", weight:1 }], filters:{} }, "2023-01-03");
-  assert.equal(safe.concepts[0].id, "technical_strength");
-  assert.equal(safe.historical_defaulted, true);
-  assert.match(safe.historical_notes[0], /No requested point-in-time technical criteria/);
-});
-
-test("historical dates are real and leave room for a forward outcome", () => {
+test("historical analyzer dates are real, past, and within the supported era", () => {
   const now = new Date("2026-08-20T12:00:00Z");
-  assert.deepEqual(validateBackscreenDate("2024-02-29", now), { ok:true, value:"2024-02-29" });
-  assert.equal(validateBackscreenDate("2024-02-30", now).ok, false);
-  assert.equal(validateBackscreenDate("1999-12-31", now).ok, false);
-  assert.equal(validateBackscreenDate("2026-08-01", now).ok, false);
+  assert.deepEqual(validateBacktestDate("2024-02-29", now), { ok:true, value:"2024-02-29" });
+  assert.equal(validateBacktestDate("2024-02-30", now).ok, false);
+  assert.equal(validateBacktestDate("1999-12-31", now).ok, false);
+  assert.equal(validateBacktestDate("2026-08-20", now).ok, false);
 });
 
 test("client identity ignores spoofed forwarding headers on a public peer", () => {
