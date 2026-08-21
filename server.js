@@ -221,6 +221,78 @@ function buildBacktestAiMessages(prompt, profile) {
   ];
 }
 
+/**
+ * Extracts the model's committed trade from the analysis it just wrote.
+ *
+ * Safe to send back to the model: the prose was generated from the frozen snapshot
+ * alone, so it contains no post-cutoff data. Reasoning is disabled outright — this is
+ * extraction, not analysis, and the thinking budget is pure latency here.
+ *
+ * Returns a sanitized decision or null. Never throws: a missing decision degrades the
+ * page to a stock-vs-SPY chart rather than failing the run.
+ */
+async function requestBacktestDecision(aiPrompt, prose, signal) {
+  const body = JSON.stringify({
+    model: AI_MODEL, temperature: 0, max_tokens: 400,
+    reasoning: { effort: "none" }, stream: false, provider: AI_PROVIDER,
+    messages: [
+      { role: "system", content: [
+        "You convert a historical equity analysis into one machine-readable trade decision.",
+        "Reply with a single JSON object and nothing else — no prose, no code fence.",
+        'Schema: {"direction":"long"|"short"|"flat","conviction":1-5,"horizon":"1m"|"3m"|"6m",',
+        '"stop_pct":number|null,"target_pct":number|null,"thesis":"one sentence"}.',
+        "stop_pct and target_pct are POSITIVE FRACTIONS of the entry price (0.08 means 8%), never prices.",
+        "Use \"flat\" when the analysis does not support taking a position."
+      ].join(" ") },
+      { role: "user", content: `${aiPrompt}\n\n--- THE ANALYSIS YOU WROTE ---\n${prose}` }
+    ]
+  });
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST", signal,
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}`,
+          "HTTP-Referer": "http://localhost", "X-Title": "Squall" },
+        body
+      });
+      if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
+      const json = await res.json();
+      const text = json?.choices?.[0]?.message?.content || "";
+      const decision = sanitizeBacktestDecision(text) || sanitizeBacktestDecision(firstJsonObject(text));
+      if (decision) return decision;
+      throw new Error("no parseable decision");
+    } catch (error) {
+      if (error.name === "AbortError") return null;
+      if (attempt === 2) {
+        console.warn(`BACKTEST decision extraction failed: ${error.message}`);
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/** First balanced {…} in a string — models fence or preface JSON despite instructions. */
+function firstJsonObject(text) {
+  const start = String(text || "").indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, quote = false, escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') quote = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") { depth -= 1; if (!depth) return text.slice(start, i + 1); }
+  }
+  return null;
+}
+
 // ─── NATURAL-LANGUAGE MULTI-INDEX SCREENER ───────────────────────────────────
 const SCREENER_CATALOG = {
   consolidation:["Consolidation", "Price-range width, ATR contraction, volume dry-up, and proximity to recent highs over the MySquall-selected window."],
@@ -1843,8 +1915,19 @@ const appServer = http.createServer(async (req, res) => {
       send("backtest_snapshot", { ...publicSnapshot, model:AI_MODEL });
       send("backtest_progress", { percent:97, label:"Historical snapshot ready · asking AI without future outcomes" });
 
-      const revealOutcomes = () => {
-        send("backtest_outcomes", { outcomes });
+      // Runs only after the AI stream has ended or failed. The decision call and the
+      // simulation both happen inside here, so no post-cutoff bar can precede the
+      // model's blind analysis on the wire.
+      const revealOutcomes = async (prose) => {
+        let decision = null;
+        if (prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
+          send("backtest_progress", { percent:99, label:"Extracting the trade the model committed to" });
+          decision = await requestBacktestDecision(payload.ai_prompt, prose, aiAbort.signal);
+        }
+        if (!connected) return;
+        send("backtest_decision", { decision, available: !!decision });
+        const simulation = simulateTrade(decision || { direction:"flat", horizon:"3m" }, outcomes.bars);
+        send("backtest_outcomes", { outcomes, simulation });
         send("backtest_done", { ok:true });
         res.end();
       };
@@ -1852,7 +1935,7 @@ const appServer = http.createServer(async (req, res) => {
       if (!aiBudget.ok) {
         send("backtest_ai_error", { error:"AI capacity reached for today. The frozen snapshot and measured outcomes are still available.",
           limited:true, resets_at:aiBudget.resetsAt });
-        return revealOutcomes();
+        return revealOutcomes(null);
       }
 
       send("backtest_ai_start", { model:AI_MODEL });
@@ -1909,7 +1992,7 @@ const appServer = http.createServer(async (req, res) => {
       if (lastError) send("backtest_ai_error", { error:emitted
         ? `The historical write-up was interrupted (${lastError.message}). Outcomes are still shown below.`
         : `Historical AI write-up failed: ${lastError.message}` });
-      revealOutcomes();
+      await revealOutcomes(answer);
     });
     py.stdin.end(JSON.stringify({ query:queryCheck.query, as_of:dateCheck.value }));
     return;
