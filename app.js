@@ -1046,12 +1046,38 @@ function openScreener() {
   renderTickerPills();
   setTimeout(() => document.getElementById("screenQuery")?.focus(), 0);
 }
+function dateDaysAgo(days) {
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
+function syncScreenerMode() {
+  const mode = document.getElementById("screenMode")?.value || "live";
+  const dateControl = document.getElementById("screenDateControl");
+  const dateInput = document.getElementById("screenDate");
+  const note = document.getElementById("screenModeNote");
+  const run = document.getElementById("screenRun");
+  const query = document.getElementById("screenQuery");
+  if (dateInput) {
+    dateInput.max = dateDaysAgo(35);
+    if (!dateInput.value) dateInput.value = dateDaysAgo(365);
+  }
+  if (dateControl) dateControl.hidden = mode !== "historical";
+  if (note) note.textContent = mode === "historical"
+    ? "Historical replay uses only split-adjusted price and volume known by the selected date, then enters at the next session's open. Current index membership creates survivorship bias."
+    : "Live screens use current price, company, valuation, and market data.";
+  if (run && !run.disabled) run.textContent = mode === "historical" ? "Run replay" : "Run screen";
+  if (query) query.placeholder = mode === "historical"
+    ? "For example: VCP candidates near 52-week highs with quiet volume"
+    : "For example: Profitable technology companies forming a VCP near their 52-week highs";
+}
 function openSavedScreener(id) {
   if (!IS_SCREENER_PAGE) return gotoScreener(id);
   const s = screeners[id]; if (!s) return;
   activeScreen = id; active = null; openScreener();
   document.getElementById("screenQuery").value = s.query;
   document.getElementById("screenUniverse").value = s.universe || s.spec?.universe_id || "combined";
+  document.getElementById("screenMode").value = s.mode || (s.result?.mode === "historical" ? "historical" : "live");
+  if (s.asOf) document.getElementById("screenDate").value = s.asOf;
+  syncScreenerMode();
   renderSavedScreener(s); renderTickerPills();
 }
 function showScreenProgress(percent, label, isErr = false) {
@@ -1111,7 +1137,10 @@ function renderScreenRecipe(spec) {
     ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))} · minimum evidence ${esc(theme.min_score || 24)}/100${theme.exclude_keywords?.length ? ` · excludes ${esc(theme.exclude_keywords.join(", "))}` : ""}</span></div>` : "";
   const themeNote = theme
     ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations — it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
-  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Screening criteria")}</h2><p>${esc(spec.summary || "Your request translated into measurable rules.")}</p></div><span class="recipe-source">${esc(screenSourceLabel(spec.interpretation_source))}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${momentumWindow}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">The <b>match score</b> shows how closely a company fits these criteria. It is not a recommendation or a price forecast.</div></div>`;
+  const historicalNotes = spec.historical
+    ? `<div class="backtest-warning">${(spec.historical_notes || []).map(esc).join(" ")}${spec.unsupported_criteria?.length ? ` Not used because point-in-time data is unavailable: ${esc(spec.unsupported_criteria.join(", "))}.` : ""}</div>` : "";
+  const source = `${screenSourceLabel(spec.interpretation_source)}${spec.historical ? " · historical" : ""}`;
+  return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Screening criteria")}</h2><p>${esc(spec.summary || "Your request translated into measurable rules.")}</p></div><span class="recipe-source">${esc(source)}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${momentumWindow}${themeNote}${historicalNotes}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">The <b>match score</b> shows how closely a company fits these criteria. It is not a recommendation or a price forecast.</div></div>`;
 }
 // Per-result breakdown of the components behind the match score: the theme
 // relevance (if any) plus each concept's 0-100 sub-score. Makes the circle
@@ -1137,9 +1166,25 @@ function renderScreenResults(result) {
   if (!result) return "";
   const rows = result.results || [];
   const spec = result.spec || {};
-  if (!rows.length) return `<div class="screen-empty"><b>No companies met every condition.</b><span>Broaden the match threshold or remove a required criterion, then run the screen again.</span></div>`;
+  const historical = result.mode === "historical" || spec.historical;
+  if (!rows.length) return `<div class="screen-empty"><b>No companies met every condition.</b><span>${historical ? "Broaden the technical criteria or choose another cutoff date." : "Broaden the match threshold or remove a required criterion, then run the screen again."}</span></div>`;
+  if (historical) return renderHistoricalScreenResults(result);
   const cards = rows.map((r, i) => `<article class="screen-result" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([(r.indexes || []).join(" / "), r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Match score: fit with this screen, not an investment rating">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20-day return</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>Below 52-week high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
   return `<div class="screen-results-head"><h2>${rows.length} matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} companies scored in ${esc(result.universe || spec.universe_label || "the selected universe")}${result.cache_hit ? " · current cache used" : ""}</span></div><div class="screen-grid">${cards}</div>`;
+}
+function renderHistoricalScreenResults(result) {
+  const rows = result.results || [], spec = result.spec || {};
+  const periods = [["1m","1 month"],["3m","3 months"],["6m","6 months"]];
+  const summary = periods.map(([key, label]) => {
+    const s = result.summary?.[key] || {};
+    return `<div class="backtest-period"><b>${label}</b><span>Average ${screenPct(s.average_return)} · median ${screenPct(s.median_return)}</span><span>${screenPct(s.win_rate)} positive · ${screenPct(s.beat_spy_rate)} beat SPY · ${esc(s.count || 0)} measured</span></div>`;
+  }).join("");
+  const cards = rows.map((r, i) => {
+    const periodMetrics = periods.map(([key, label]) => `<div class="screen-metric"><small>${label}</small><b class="${signCls(r.forward_returns?.[key])}">${screenPct(r.forward_returns?.[key])}</b><span class="screen-metric-note">vs SPY ${screenPct(r.excess_returns?.[key])}</span></div>`).join("");
+    const entry = r.entry_date ? `${fUsd(r.entry_price)} · ${r.entry_date}` : "Not available";
+    return `<article class="screen-result historical" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([(r.indexes || []).join(" / "), `signal through ${r.as_of || result.as_of}`].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Historical match score, calculated before forward returns">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Next-open entry · adjusted</small><b>${esc(entry)}</b></div>${periodMetrics}<div class="screen-metric"><small>6-month drawdown</small><b class="${signCls(r.max_drawdown_6m)}">${screenPct(r.max_drawdown_6m)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`;
+  }).join("");
+  return `<div class="screen-results-head"><h2>${rows.length} historical matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} current constituents replayed through ${esc(result.as_of)}${result.cache_hit ? " · historical cache used" : ""}</span></div><div class="backtest-summary">${summary}</div><div class="backtest-warning">This is a current-universe replay, not a survivorship-bias-free portfolio backtest. Forward returns are evaluation data and never affect the match score.</div><div class="screen-grid">${cards}</div>`;
 }
 /* Paint results and bring them to life: each match ring sweeps 0→score while
    the number counts up. Skipped (values set instantly) under reduced motion. */
@@ -1225,23 +1270,28 @@ function analyzeFromScreener(ticker) {
 function runScreener() {
   const query = document.getElementById("screenQuery").value.trim();
   const universe = document.getElementById("screenUniverse").value || "combined";
+  const mode = document.getElementById("screenMode")?.value === "historical" ? "historical" : "live";
+  const asOf = mode === "historical" ? document.getElementById("screenDate")?.value : null;
   if (query.length < 3) { showScreenProgress(0, "Describe the companies you want to find in a little more detail.", true); hideScreenProgress(2400); return; }
+  if (mode === "historical" && !asOf) { showScreenProgress(0, "Choose the date the replay should stop at.", true); hideScreenProgress(2400); return; }
   if (_screenES) _screenES.close();
   openScreener();
   const id = "screen-" + Date.now().toString(36), now = Date.now();
-  const s = screeners[id] = { id, query, universe, title: "New stock screen", spec: null, result: null, history:[], profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
+  const s = screeners[id] = { id, query, universe, mode, asOf, title: mode === "historical" ? "New historical replay" : "New stock screen", spec: null, result: null, history:[], profile: getMySquallProfile(), createdAt: now, updatedAt: now, loading: true };
   activeScreen = id;
   document.getElementById("screenRun").disabled = true;
-  showScreenProgress(2, "Interpreting your request");
+  document.getElementById("screenRun").textContent = mode === "historical" ? "Running replay…" : "Screening…";
+  showScreenProgress(2, mode === "historical" ? "Interpreting the historical setup" : "Interpreting your request");
   document.getElementById("screenInterpretation").innerHTML = ""; document.getElementById("screenResults").innerHTML = ""; document.getElementById("screenRefine").innerHTML = "";
   renderTickerPills();
-  let url = "/screen-stream?q=" + encodeURIComponent(query) + "&universe=" + encodeURIComponent(universe);
+  let url = (mode === "historical" ? "/backscreen-stream" : "/screen-stream") + "?q=" + encodeURIComponent(query) + "&universe=" + encodeURIComponent(universe);
+  if (asOf) url += "&as_of=" + encodeURIComponent(asOf);
   if (s.profile) url += "&profile=" + encodeURIComponent(JSON.stringify(s.profile));
   const es = _screenES = new EventSource(url);
-  const finish = (delay = 650) => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; hideScreenProgress(delay); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
+  const finish = (delay = 650) => { s.loading = false; s.updatedAt = Date.now(); document.getElementById("screenRun").disabled = false; syncScreenerMode(); hideScreenProgress(delay); persistScreeners(); renderScreenRefine(s); renderTickerPills(); es.close(); if (_screenES === es) _screenES = null; };
   es.addEventListener("screen_progress", e => applyScreenProgressEvent(JSON.parse(e.data), "Screening the selected universe"));
   es.addEventListener("screen_interpretation", e => { const d = JSON.parse(e.data); s.spec = d.spec || d; s.title = s.spec.title || "Saved stock screen"; s.updatedAt = Date.now(); document.getElementById("screenInterpretation").innerHTML = renderScreenRecipe(s.spec); persistScreeners(); renderTickerPills(); });
-  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `This screen returned ${count} matches. Describe anything that should be broader, stricter, added, or removed, and the criteria will be rescored.` : "No companies met every required condition. You can broaden the threshold, remove a requirement, or emphasize a different factor without accepting weaker matches automatically."}); showScreenProgress(97, `Rendering ${count} matches`); paintScreenResults(s.result); renderScreenRefine(s); requestAnimationFrame(() => showScreenProgress(100, `Screen complete · ${count} matches`)); finish(900); });
+  es.addEventListener("screen_result", e => { s.result = JSON.parse(e.data); const count=(s.result.results||[]).length; if (!s.history.length) s.history.push({role:"assistant",content:count ? `${mode === "historical" ? "This replay" : "This screen"} returned ${count} matches. Describe anything that should be broader, stricter, added, or removed, and the criteria will be rescored.` : "No companies met every required condition. You can broaden the threshold, remove a requirement, or emphasize a different factor without accepting weaker matches automatically."}); showScreenProgress(97, `Rendering ${count} matches`); paintScreenResults(s.result); renderScreenRefine(s); requestAnimationFrame(() => showScreenProgress(100, `${mode === "historical" ? "Replay" : "Screen"} complete · ${count} matches`)); finish(900); });
   es.addEventListener("screen_error", e => { let msg = "The screen could not be completed."; try { msg = JSON.parse(e.data).error || msg; } catch (_) {} document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Screen unavailable</b><span>${esc(msg)}</span></div>`; showScreenProgress(0, msg, true); finish(2200); });
   es.onerror = () => { if (_screenES === es) { document.getElementById("screenResults").innerHTML = `<div class="screen-empty"><b>Connection lost</b><span>Confirm that the Squall server is running, then try again.</span></div>`; showScreenProgress(0, "Connection lost before the screen completed.", true); finish(2200); } };
 }
@@ -1249,7 +1299,8 @@ function renderScreenRefine(s) {
   const el = document.getElementById("screenRefine"); if (!el) return;
   if (!s?.spec) { el.innerHTML=""; return; }
   const messages=(s.history||[]).map(m => `<div class="screen-chat-msg ${m.role}"><span>${m.role === "user" ? "You" : "Squall"}</span><p>${esc(m.content)}</p></div>`).join("");
-  el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Adjust this screen</h2><p>Describe what should be broader, stricter, added, or removed. The same market universe will be rescored.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden the criteria and remove unnecessary hard requirements')">Broaden criteria</button><button type="button" onclick="refineScreener('Limit the results to the strongest matches')">Show strongest matches</button><button type="button" onclick="refineScreener('Place more emphasis on relative strength')">Emphasize relative strength</button><button type="button" onclick="refineScreener('Require unusual trading volume')">Require unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="For example: remove value, emphasize cash flow, or make the pattern requirement less strict" aria-label="Adjust this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Updating…" : "Apply changes"}</button></form></section>`;
+  const historical=s.mode === "historical" || s.result?.mode === "historical";
+  el.innerHTML=`<section class="screen-refine"><div class="screen-refine-head"><div><h2>Adjust this ${historical ? "replay" : "screen"}</h2><p>Describe what should be broader, stricter, added, or removed. The same market universe${historical ? " and cutoff date" : ""} will be rescored.</p></div><span>${(s.result?.results||[]).length} current matches</span></div><div class="screen-chat-messages">${messages}</div><div class="screen-refine-prompts"><button type="button" onclick="refineScreener('Broaden the criteria and remove unnecessary hard requirements')">Broaden criteria</button><button type="button" onclick="refineScreener('Limit the results to the strongest matches')">Show strongest matches</button><button type="button" onclick="refineScreener('Place more emphasis on relative strength')">Emphasize relative strength</button><button type="button" onclick="refineScreener('Require unusual trading volume')">Require unusual volume</button></div><form class="screen-refine-form" onsubmit="event.preventDefault(); refineScreener(this.elements.message.value)"><input name="message" maxlength="500" autocomplete="off" placeholder="${historical ? "For example: make VCP required, or put more weight on quiet volume" : "For example: remove value, emphasize cash flow, or make the pattern requirement less strict"}" aria-label="Adjust this stock screen"><button type="submit" ${s.loading ? "disabled" : ""}>${s.loading ? "Updating…" : "Apply changes"}</button></form></section>`;
   const messagesEl=el.querySelector(".screen-chat-messages"); if(messagesEl) messagesEl.scrollTop=messagesEl.scrollHeight;
   // Sits below a full grid of matches, so on a fresh screen it is almost always off-screen.
   deferBelowFold([el.querySelector(".screen-refine")].filter(Boolean));
@@ -1262,7 +1313,9 @@ function refineScreener(rawMessage) {
   renderScreenRefine(s); persistScreeners();
   showScreenProgress(2, "Revising the measurable criteria");
   const universe=s.universe||s.spec?.universe_id||"combined";
-  let url="/screen-stream?q="+encodeURIComponent(message)+"&universe="+encodeURIComponent(universe)+"&existing="+encodeURIComponent(JSON.stringify(s.spec))+"&result_count="+encodeURIComponent((s.result?.results||[]).length);
+  const historical=s.mode === "historical" || s.result?.mode === "historical";
+  let url=(historical ? "/backscreen-stream" : "/screen-stream")+"?q="+encodeURIComponent(message)+"&universe="+encodeURIComponent(universe)+"&existing="+encodeURIComponent(JSON.stringify(s.spec))+"&result_count="+encodeURIComponent((s.result?.results||[]).length);
+  if(historical && s.asOf) url+="&as_of="+encodeURIComponent(s.asOf);
   if(s.profile) url+="&profile="+encodeURIComponent(JSON.stringify(s.profile));
   const es=_screenES=new EventSource(url); let reply="";
   const finish=(delay=650)=>{s.loading=false;s.updatedAt=Date.now();hideScreenProgress(delay);persistScreeners();renderScreenRefine(s);renderTickerPills();es.close();if(_screenES===es)_screenES=null;};
@@ -1336,8 +1389,9 @@ function renderTickerPills() {
     const when = new Date(s.createdAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     const label = item.kind === "analysis" ? item.key : (s.title || "Saved screen");
     const selected = item.kind === "analysis" ? (!activeScreen && item.key === active) : item.key === activeScreen;
+    const prefix = item.kind === "screen" ? (s.mode === "historical" || s.result?.mode === "historical" ? "Replay · " : "Screen · ") : "";
     return `<div class="analysis-tab ${item.kind === "screen" ? "screener-tab" : ""} ${selected ? "active" : ""}" data-kind="${item.kind}" data-key="${esc(item.key)}">
-      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "Screen · " : ""}${esc(label)}</b><span>${esc(when)}</span></button>
+      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${prefix}${esc(label)}</b><span>${esc(when)}</span></button>
       <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(label)}" title="Delete this saved item">×</button>
     </div>`;
   }).join("");
@@ -2205,6 +2259,8 @@ on("chatMessages", "scroll", function () {
 on("chatInput", "keydown", e => { if (e.key === "Enter") sendChat(); });
 syncChatThinkBtn();
 on("ticker", "keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
+on("screenMode", "change", syncScreenerMode);
+if (IS_SCREENER_PAGE) syncScreenerMode();
 renderTickerPills();
 if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria-current", "page");
 

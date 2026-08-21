@@ -11,6 +11,7 @@ const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE"
 // box without Python. Production leaves both unset.
 const SCRAPER_PATH = process.env.SQUALL_SCRAPER_PATH || "./scraperFinal.py";
 const SCREENER_PATH = process.env.SQUALL_SCREENER_PATH || "./screener.py";
+const BACKSCREENER_PATH = process.env.SQUALL_BACKSCREENER_PATH || "./backscreener.py";
 const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = "deepseek/deepseek-v4-flash";         // interprets the structured payload; it never searches for market/news data
 const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines screener language only; no web plugin
@@ -516,6 +517,72 @@ function fallbackScreenerSpec(query, rawProfile) {
 function attachScreenerDefinitions(spec) {
   spec.definitions = (spec.concepts || []).map(c => ({ id:c.id, label:SCREENER_CATALOG[c.id]?.[0] || c.id, definition:SCREENER_CATALOG[c.id]?.[1] || "Backend-defined quantitative score." }));
   return spec;
+}
+
+// A historical replay may use only fields reconstructed from bars at the cutoff.
+// Current Yahoo fundamentals, analyst targets, ownership, sector descriptions and beta
+// are not point-in-time data; letting them through would make the result look historical
+// while quietly leaking today's information into it.
+const HISTORICAL_CONCEPTS = new Set([
+  "consolidation", "volatility_contraction", "vcp", "cup_and_handle", "flat_base",
+  "double_bottom", "bull_flag", "uptrend", "downtrend", "accumulation", "distribution",
+  "breakout", "momentum", "relative_strength", "risk_adjusted_momentum", "near_highs",
+  "oversold", "recovery", "pullback_to_ma", "golden_cross", "volume_surge", "volume_dryup",
+  "low_volatility", "high_volatility", "trend_stability", "squeeze", "bullish_pullback",
+  "mean_reversion", "turnaround", "technical_strength"
+]);
+// Dollar volume remains comparable through splits because Yahoo adjusts both price and
+// share volume. Nominal price/share-volume filters do not, so they are excluded too.
+const HISTORICAL_FILTERS = new Set(["avg_dollar_volume_min"]);
+
+function prepareHistoricalSpec(rawSpec, asOf) {
+  const spec = JSON.parse(JSON.stringify(rawSpec || {}));
+  const originalConcepts = Array.isArray(spec.concepts) ? spec.concepts : [];
+  const unsupported = [];
+  spec.concepts = originalConcepts.filter(c => {
+    const keep = c && HISTORICAL_CONCEPTS.has(c.id);
+    if (!keep && c?.id) unsupported.push(SCREENER_CATALOG[c.id]?.[0] || c.id);
+    return keep;
+  });
+  if (!spec.concepts.length) {
+    spec.concepts = [{ id:"technical_strength", weight:1, required:false, source:"historical_default" }];
+    spec.historical_defaulted = true;
+  }
+  const filters = {};
+  for (const [key, value] of Object.entries(spec.filters || {})) {
+    if (HISTORICAL_FILTERS.has(key)) filters[key] = value;
+    else unsupported.push(key.replaceAll("_", " "));
+  }
+  spec.filters = filters;
+  if (spec.theme) {
+    unsupported.push(`${spec.theme.label || "theme"} theme`);
+    delete spec.theme;
+  }
+  spec.historical = true;
+  spec.as_of = asOf;
+  spec.unsupported_criteria = [...new Set(unsupported)];
+  spec.historical_notes = [
+    "Signals, displayed entries, and returns use split-adjusted price and volume dated on or before the selected date.",
+    "Returns begin at the next available session open, after the signal existed.",
+    "The universe uses today's stored index membership, so removed and delisted historical members are absent."
+  ];
+  if (spec.historical_defaulted) {
+    spec.historical_notes.unshift("No requested point-in-time technical criteria remained, so the replay uses a neutral technical-strength ranking.");
+  }
+  return attachScreenerDefinitions(spec);
+}
+
+function validateBackscreenDate(raw, now = new Date()) {
+  const value = String(raw || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return { ok:false, reason:"Choose a historical date." };
+  const parsed = new Date(value + "T00:00:00Z");
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value)
+    return { ok:false, reason:"Choose a real date in YYYY-MM-DD format." };
+  const earliest = new Date("2000-01-01T00:00:00Z");
+  const latest = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 35 * 86400000);
+  if (parsed < earliest) return { ok:false, reason:"Historical replays currently support dates from January 1, 2000 onward." };
+  if (parsed > latest) return { ok:false, reason:`Choose ${latest.toISOString().slice(0,10)} or earlier so at least a one-month outcome can be measured.` };
+  return { ok:true, value };
 }
 
 function sanitizeScreenerSpec(candidate, fallback, rawProfile = null, query = "") {
@@ -1431,6 +1498,117 @@ const appServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // Point-in-time historical replay. Interpretation is shared with the live screener,
+  // but prepareHistoricalSpec removes anything that cannot be reconstructed at the
+  // cutoff before the isolated historical engine sees the job.
+  if (req.method === "GET" && req.url.startsWith("/backscreen-stream")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const query = String(url.searchParams.get("q") || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 500);
+    const universeId = SCREEN_UNIVERSES.has(url.searchParams.get("universe")) ? url.searchParams.get("universe") : "combined";
+    const profile = sanitizeProfile(url.searchParams.get("profile"));
+    const dateCheck = validateBackscreenDate(url.searchParams.get("as_of"));
+    let existing = null;
+    try { const raw = url.searchParams.get("existing"); if (raw) existing = JSON.parse(raw); } catch {}
+    const priorCount = Math.max(0, Math.min(50, Number(url.searchParams.get("result_count")) || 0));
+
+    const gate = admit(req, "screen");
+    res.writeHead(200, sseHeaders(gate));
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!gate.ok) {
+      send("screen_error", { error:gate.message, limited:true, rule:gate.rule, retry_after_s:gate.retryAfter, resets_at:gate.resetsAt });
+      return res.end();
+    }
+    if (query.length < 3) { send("screen_error", { error:"Describe the historical setup you want to test in a little more detail." }); return res.end(); }
+    if (!dateCheck.ok) { send("screen_error", { error:dateCheck.reason }); return res.end(); }
+
+    const aiBudget = spendAi(COST.screen.ai);
+    send("screen_progress", { percent:4, label:!aiBudget.ok
+      ? "AI interpretation unavailable today — using the deterministic recipe builder"
+      : (existing ? "Revising the historical criteria" : "Translating the request into point-in-time criteria") });
+    let spec;
+    if (existing) {
+      let refined;
+      if (!aiBudget.ok) refined = fallbackRefineScreener(query, existing, profile, priorCount);
+      else {
+        try { refined = await refineScreenerSpec(query, existing, profile, priorCount); }
+        catch { refined = fallbackRefineScreener(query, existing, profile, priorCount); }
+      }
+      spec = refined.spec;
+      send("screen_reply", { reply:refined.reply });
+    } else if (!aiBudget.ok) {
+      spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile));
+    } else {
+      try { spec = await interpretScreenerQuery(query, profile); }
+      catch { spec = attachScreenerDefinitions(fallbackScreenerSpec(query, profile)); }
+    }
+
+    let universe;
+    try { universe = readMarketUniverse(universeId); }
+    catch (e) { send("screen_error", { error:"Could not load the selected market universe: " + e.message }); return res.end(); }
+    spec = prepareHistoricalSpec(spec, dateCheck.value);
+    spec.universe_id = universe.id;
+    spec.universe_label = universe.label;
+    send("screen_progress", { percent:8, label:`Preparing ${universe.label} as of ${dateCheck.value}` });
+    send("screen_interpretation", spec);
+
+    const slot = await acquirePy(req, pos =>
+      send("screen_progress", { percent:9, label:`Queued for a free historical-data slot (position ${pos})` }));
+    if (typeof slot !== "function") {
+      if (slot === "aborted") return res.end();
+      send("screen_error", {
+        error:slot === "full" ? "Squall is running at capacity right now — try again in a minute."
+          : "Timed out waiting for a free data slot — try again in a minute.",
+        limited:true, rule:"capacity", retry_after_s:30
+      });
+      return res.end();
+    }
+
+    const py = spawn(PYTHON, [BACKSCREENER_PATH], { env:process.env });
+    req.on("close", () => { try { py.kill(); } catch (_) {} slot(); });
+    let timedOut = false, settled = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { py.kill("SIGKILL"); } catch (_) {}
+    }, LIM.SCREENER_TIMEOUT_MS);
+    let stdout = "", stderr = "", buf = "";
+    py.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    py.stderr.on("data", chunk => {
+      const text = chunk.toString(); stderr = (stderr + text).slice(-3000); buf += text;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        const match = line.match(/^PROGRESS\|(\d+)\|(.*)$/);
+        if (match) send("screen_progress", { percent:Number(match[1]), label:match[2] });
+        else if (line) recordEngineWarning("backscreener", line);
+      }
+    });
+    py.on("error", e => {
+      if (settled) return; settled = true;
+      clearTimeout(killTimer); slot();
+      send("screen_error", { error:"Could not start the historical screening engine: " + e.message }); res.end();
+    });
+    py.on("close", code => {
+      if (settled) return; settled = true;
+      clearTimeout(killTimer); slot();
+      if (timedOut) {
+        send("screen_error", { error:`The historical replay took longer than ${Math.round(LIM.SCREENER_TIMEOUT_MS / 1000)}s and was stopped. Try a single index rather than the combined universe.`,
+                               limited:true, rule:"engine_timeout", retry_after_s:30 });
+        return res.end();
+      }
+      let result;
+      try { result = JSON.parse(stdout); }
+      catch { send("screen_error", { error:"The historical screening engine returned unreadable data.", detail:stderr.slice(-500) }); return res.end(); }
+      if (code !== 0 || result.error) { send("screen_error", { error:result.error || "The historical screening engine failed.", detail:stderr.slice(-500) }); return res.end(); }
+      send("screen_progress", { percent:97, label:`Preparing ${result.results?.length || 0} historical matches for display` });
+      send("screen_result", result); res.end();
+    });
+    py.stdin.end(JSON.stringify({
+      tickers:universe.tickers, names:universe.names, memberships:universe.memberships,
+      universe_id:universe.id, universe_label:universe.label, as_of:dateCheck.value, spec
+    }));
+    return;
+  }
+
   // Natural-language multi-index screener. The model interprets intent; Python does
   // every numerical comparison so results remain reproducible and explainable.
   if (req.method === "GET" && req.url.startsWith("/screen-stream")) {
@@ -2030,7 +2208,7 @@ if (require.main === module) {
 module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
-  fallbackRefineScreener, readMarketUniverse,
+  fallbackRefineScreener, readMarketUniverse, prepareHistoricalSpec, validateBackscreenDate,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,

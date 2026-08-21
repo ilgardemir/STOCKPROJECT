@@ -29,16 +29,30 @@
 
 <section id="screenerView" aria-label="Natural-language stock screener">
   <div class="screen-shell">
-    <div class="screen-head"><div><div class="screen-kicker">Explainable stock screening</div><h1>Describe the companies you want to find.</h1><p>Squall converts plain-language criteria into measurable rules, shows how each term is defined, and ranks companies using market and fundamental data.</p></div></div>
+    <div class="screen-head"><div><div class="screen-kicker">Explainable stock screening</div><h1>Describe the companies you want to find.</h1><p>Screen today's market, or replay a technical setup at a past date and measure what happened next.</p></div></div>
     <div class="screen-controls">
-      <label for="screenUniverse">Market universe</label>
-      <select id="screenUniverse">
-        <option value="combined">S&amp;P 500 + Nasdaq-100 + Dow 30</option>
-        <option value="sp500">S&amp;P 500</option>
-        <option value="nasdaq100">Nasdaq-100</option>
-        <option value="dow30">Dow 30</option>
-      </select>
+      <div class="screen-control-field">
+        <label for="screenMode">Screen type</label>
+        <select id="screenMode">
+          <option value="live">Live market</option>
+          <option value="historical">Historical replay</option>
+        </select>
+      </div>
+      <div class="screen-control-field">
+        <label for="screenUniverse">Market universe</label>
+        <select id="screenUniverse">
+          <option value="combined">S&amp;P 500 + Nasdaq-100 + Dow 30</option>
+          <option value="sp500">S&amp;P 500</option>
+          <option value="nasdaq100">Nasdaq-100</option>
+          <option value="dow30">Dow 30</option>
+        </select>
+      </div>
+      <div class="screen-control-field" id="screenDateControl" hidden>
+        <label for="screenDate">Information available through</label>
+        <input id="screenDate" type="date" min="2000-01-01" />
+      </div>
     </div>
+    <p id="screenModeNote" class="screen-mode-note">Live screens use current price, company, valuation, and market data.</p>
     <form id="screenForm" onsubmit="event.preventDefault(); runScreener();">
       <textarea id="screenQuery" maxlength="500" aria-label="Describe stocks to screen for" placeholder="For example: Profitable technology companies forming a VCP near their 52-week highs"></textarea>
       <button id="screenRun" type="submit">Run screen</button>
