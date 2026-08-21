@@ -77,6 +77,31 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertEqual(len(bars["spyClose"]), 126)
         self.assertTrue(all(v is None for v in bars["spyClose"]))
 
+    def test_adjusted_frame_scales_ohlc_by_the_adjustment_ratio(self):
+        index = pd.date_range("2023-01-02", periods=3, freq="B")
+        frame = pd.DataFrame({
+            "open": [100.0, 102.0, 104.0], "high": [101.0, 103.0, 105.0],
+            "low": [99.0, 101.0, 103.0], "close": [100.0, 102.0, 104.0],
+            "adjclose": [50.0, 51.0, 52.0], "volume": [1000, 1000, 1000],
+        }, index=index)
+
+        adjusted = backtester.adjusted_frame(frame)
+
+        # every bar halves, because adjclose is half of close throughout
+        self.assertAlmostEqual(adjusted["close"].iloc[0], 50.0)
+        self.assertAlmostEqual(adjusted["open"].iloc[1], 51.0)
+        self.assertAlmostEqual(adjusted["high"].iloc[2], 52.5)
+        # volume is never scaled
+        self.assertEqual(adjusted["volume"].iloc[0], 1000)
+
+    def test_adjusted_frame_falls_back_to_raw_without_adjclose(self):
+        index = pd.date_range("2023-01-02", periods=2, freq="B")
+        frame = pd.DataFrame({"open": [10.0, 11.0], "high": [10.5, 11.5],
+                              "low": [9.5, 10.5], "close": [10.0, 11.0],
+                              "volume": [5, 5]}, index=index)
+        adjusted = backtester.adjusted_frame(frame)
+        self.assertAlmostEqual(adjusted["close"].iloc[1], 11.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,33 @@ def dated_frame(frame):
     return out[~out.index.duplicated(keep="last")].sort_index()
 
 
+def adjusted_frame(frame):
+    """
+    Split- and dividend-adjusted OHLC derived from the adjclose/close ratio.
+
+    We request UNADJUSTED history and adjust here, rather than asking yahooquery for
+    adj_ohlc=True, because both bases are needed and they are needed for different
+    things. Adjusted drives returns and technicals — adjustment factors cancel in any
+    ratio, so returns are unaffected by post-cutoff events. RAW drives valuation,
+    because XBRL EPS and share counts are as-reported: a P/E built from a
+    post-split-adjusted price against an as-reported EPS is simply a wrong number,
+    and a split between the cutoff and today corrupts it silently.
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame()
+    out = frame.copy()
+    close_col, adj_col = _column(out, "close"), _column(out, "adjclose")
+    if close_col is None or adj_col is None:
+        return out
+    ratio = pd.to_numeric(out[adj_col], errors="coerce") / pd.to_numeric(out[close_col], errors="coerce")
+    ratio = ratio.replace([float("inf"), float("-inf")], float("nan")).fillna(1.0)
+    for name in ("open", "high", "low", "close"):
+        col = _column(out, name)
+        if col is not None:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * ratio
+    return out
+
+
 def extract_frames(history, symbols):
     frames = {}
     if not isinstance(history, pd.DataFrame) or history.empty:
@@ -92,7 +119,7 @@ def fetch_history(symbols, as_of):
     unique = list(dict.fromkeys(symbols))
     try:
         history = Ticker(unique, asynchronous=True, max_workers=2, timeout=25).history(
-            start=start.isoformat(), end=end.isoformat(), interval="1d", adj_ohlc=True
+            start=start.isoformat(), end=end.isoformat(), interval="1d"
         )
         frames = extract_frames(history, unique)
     except Exception as exc:
@@ -103,7 +130,7 @@ def fetch_history(symbols, as_of):
             continue
         try:
             history = Ticker(symbol, timeout=25).history(
-                start=start.isoformat(), end=end.isoformat(), interval="1d", adj_ohlc=True
+                start=start.isoformat(), end=end.isoformat(), interval="1d"
             )
             frames.update(extract_frames(history, [symbol]))
         except Exception as exc:
@@ -320,14 +347,24 @@ def main():
     frames = fetch_history([ticker, "SPY"], as_of)
     if ticker not in frames:
         raise ValueError(f"No historical market data was returned for {ticker}.")
-    before, _ = split_at_date(frames[ticker], as_of)
+    # Two bases from one download: adjusted drives returns, technicals and the replay
+    # bars; raw is the as-reported level valuation must be built from.
+    raw_before, _ = split_at_date(frames[ticker], as_of)
+    adjusted = adjusted_frame(frames[ticker])
+    spy_adjusted = adjusted_frame(frames.get("SPY", pd.DataFrame()))
+    before, _ = split_at_date(adjusted, as_of)
     if before.empty:
         raise ValueError(f"No market session was available for {ticker} on or before {as_of.isoformat()}.")
+    # As-reported price at the cutoff, for anything compared against XBRL per-share figures.
+    raw_close_col = _column(raw_before, "close")
+    raw_close_at_cutoff = finite(raw_before[raw_close_col].iloc[-1]) if raw_close_col is not None and not raw_before.empty else None
 
     progress(48, "Calculating signals using pre-cutoff bars only")
     technical = technical_snapshot(before)
-    stock_outcome = forward_outcomes(frames[ticker], as_of)
-    benchmark_outcome = forward_outcomes(frames.get("SPY", pd.DataFrame()), as_of)
+    # Both of these MUST be adjusted: a post-cutoff split in a raw frame would report a
+    # 10:1 splitter's realized return as roughly -90% and raise nothing.
+    stock_outcome = forward_outcomes(adjusted, as_of)
+    benchmark_outcome = forward_outcomes(spy_adjusted, as_of)
 
     progress(62, "Reconstructing SEC facts known at the cutoff")
     cik = scraper.get_cik_from_ticker(ticker)
@@ -338,7 +375,8 @@ def main():
     snapshot = {
         "ticker": ticker, "company_name": company_identity(ticker, companyfacts),
         "as_of": as_of.isoformat(), "effective_market_date": effective,
-        "price_basis": "Split-adjusted daily OHLCV", "technical": technical,
+        "price_basis": "Split- and dividend-adjusted daily OHLCV; valuation uses the as-reported close",
+        "technical": technical,
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
@@ -360,7 +398,7 @@ def main():
         },
         # The window the Node simulation replays the model's call over. Sealed by the
         # server until AI generation ends, exactly like every other key in this object.
-        "bars": sealed_bars(frames[ticker], frames.get("SPY", pd.DataFrame()), as_of),
+        "bars": sealed_bars(adjusted, spy_adjusted, as_of),
     }
     progress(88, "Sealing the future outcomes away from the AI prompt")
     output = {
