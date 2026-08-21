@@ -274,8 +274,9 @@ async function requestBacktestDecision(aiPrompt, prose, signal) {
 }
 
 /** First balanced {…} in a string — models fence or preface JSON despite instructions. */
-function firstJsonObject(text) {
-  const start = String(text || "").indexOf("{");
+function firstJsonObject(raw) {
+  const text = String(raw || "");
+  const start = text.indexOf("{");
   if (start < 0) return null;
   let depth = 0, quote = false, escaped = false;
   for (let i = start; i < text.length; i++) {
