@@ -8,7 +8,9 @@
    breaks the other page: one null and the whole script dies at that line, taking every
    listener below it with it. Use `on` instead — it no-ops when the element isn't there. */
 const PAGE = document.body.dataset.page || "analyzer";
+const IS_ANALYZER_PAGE = PAGE === "analyzer";
 const IS_SCREENER_PAGE = PAGE === "screener";
+const IS_BACKTESTER_PAGE = PAGE === "backtester";
 function on(id, ev, fn, opts) {
   const el = document.getElementById(id);
   if (el) el.addEventListener(ev, fn, opts);
@@ -516,6 +518,7 @@ function quick(t) { document.getElementById("ticker").value = t; runAnalysis(); 
 // stays the single source of truth for runAnalysis and everything downstream of it.
 function runHeroAnalysis() {
   const hero = document.getElementById("heroTicker");
+  if (hero?.value.trim().toLowerCase() === "/ilgar") { location.href = "/ilgar"; return; }
   if (hero) document.getElementById("ticker").value = hero.value.trim();
   runAnalysis();
 }
@@ -728,10 +731,11 @@ function runAnalysis() {
   // The input now accepts a ticker OR a company name; the server resolves it and the
   // real symbol comes back on the `result` event, at which point we re-key the session.
   const query = document.getElementById("ticker").value.trim();
+  if (query.toLowerCase() === "/ilgar") { location.href = "/ilgar"; return; }
   // The header search exists on both pages; running an analysis is the analyzer's job, so
   // from the screener this hands the query over rather than half-rendering a dashboard
   // into a page that has no dashboard to render into.
-  if (IS_SCREENER_PAGE) { if (query) gotoAnalyzer(query); return; }
+  if (!IS_ANALYZER_PAGE) { if (query) gotoAnalyzer(query); return; }
   const profileSnapshot = getMySquallProfile();
   const profileKey = mySquallKey(profileSnapshot);
   activeScreen = null;
@@ -984,7 +988,7 @@ function gotoScreener(id) { location.href = id ? `/screener?id=${encodeURICompon
 function gotoAnalyzer(ticker) { location.href = ticker ? `/?t=${encodeURIComponent(ticker)}` : "/"; }
 
 function goHome() {
-  if (IS_SCREENER_PAGE) return gotoAnalyzer();   // the wordmark is a link home from here
+  if (!IS_ANALYZER_PAGE) return gotoAnalyzer();   // the wordmark is a link home from secondary pages
   const ws = document.getElementById("workspace"), hero = document.getElementById("hero"), strip = document.getElementById("summaryStrip");
   const screen = document.getElementById("screenerView");
   if (!ws.classList.contains("show") && !screen?.classList.contains("show")) return;
@@ -1224,6 +1228,7 @@ function analyzeFromScreener(ticker) {
 }
 function runScreener() {
   const query = document.getElementById("screenQuery").value.trim();
+  if (query.toLowerCase() === "/ilgar") { location.href = "/ilgar"; return; }
   const universe = document.getElementById("screenUniverse").value || "combined";
   if (query.length < 3) { showScreenProgress(0, "Describe the companies you want to find in a little more detail.", true); hideScreenProgress(2400); return; }
   if (_screenES) _screenES.close();
@@ -2222,6 +2227,7 @@ if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria
     else document.getElementById("screenQuery")?.focus();
     return;
   }
+  if (IS_BACKTESTER_PAGE) return;
   const t = (params.get("t") || "").trim().toUpperCase();
   if (!t) { focusHeroSearch(); return; }
   const field = document.getElementById("ticker");

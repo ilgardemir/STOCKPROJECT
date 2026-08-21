@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-mode="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="robots" content="noindex,nofollow" />
+<title>Historical Analyzer — Squall</title>
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="backtester">
+
+<!--#include chrome-top-->
+
+<main id="backtestView">
+  <div class="backtest-shell">
+    <header class="backtest-intro">
+      <div>
+        <div class="screen-kicker">Private evaluation workspace</div>
+        <h1>Historical analyzer</h1>
+        <p>Freeze a company at a past date, let Squall analyze only what was knowable then, and reveal what happened afterward.</p>
+      </div>
+      <span class="backtest-private">Unlisted beta</span>
+    </header>
+
+    <section class="backtest-method" aria-label="How the backtest works">
+      <div><b>1</b><span>Market and SEC data are cut off at the selected date.</span></div>
+      <div><b>2</b><span>The AI writes its analysis without seeing future returns.</span></div>
+      <div><b>3</b><span>Measured outcomes are released only after generation ends.</span></div>
+    </section>
+
+    <form id="backtestForm" class="backtest-form">
+      <label>
+        <span>Company</span>
+        <input id="backtestTicker" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Ticker or company name" aria-label="Ticker symbol or company name">
+      </label>
+      <label>
+        <span>Analysis cutoff</span>
+        <input id="backtestDate" type="date" min="2000-01-01" aria-label="Historical analysis cutoff date">
+      </label>
+      <button id="backtestRun" type="submit">Run historical analysis</button>
+    </form>
+    <p class="backtest-caveat">Prices are split-adjusted. Historical news, options flow, analyst estimates, and historical index membership are omitted when they cannot be reconstructed honestly.</p>
+
+    <div id="backtestProgress" role="status" aria-live="polite">
+      <div class="backtest-progress-row"><span id="backtestProgressText">Preparing historical analysis…</span><b id="backtestProgressPct">0%</b></div>
+      <div class="backtest-progress-track" role="progressbar" aria-label="Historical analysis progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="backtestProgressFill"></div></div>
+    </div>
+
+    <div id="backtestError" role="alert"></div>
+    <section id="backtestSnapshot" aria-live="polite"></section>
+    <section id="backtestAi" aria-live="polite"></section>
+    <section id="backtestOutcomes" aria-live="polite"></section>
+  </div>
+</main>
+
+<script src="sp500.js"></script>
+<script src="market-universes.js"></script>
+<script src="app.js"></script>
+<script src="backtester.js"></script>
+</body>
+</html>

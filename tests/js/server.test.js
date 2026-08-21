@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
+  validateBacktestDate,
   LIM, COST, clientIp, clientKey, admit, buckets, globals
 } = require("../../server");
 
@@ -70,6 +71,14 @@ test("sanitizeScreenerSpec rejects unknown concepts and unsafe model defaults", 
   assert.deepEqual(safe.theme.keywords, ["gpu", "data center", "valid-term"]);
   assert.equal(safe.theme.min_score, 80);
   assert.equal(safe.definitions[0].id, "quality");
+});
+
+test("historical analyzer dates are real, past, and within the supported era", () => {
+  const now = new Date("2026-08-20T12:00:00Z");
+  assert.deepEqual(validateBacktestDate("2024-02-29", now), { ok:true, value:"2024-02-29" });
+  assert.equal(validateBacktestDate("2024-02-30", now).ok, false);
+  assert.equal(validateBacktestDate("1999-12-31", now).ok, false);
+  assert.equal(validateBacktestDate("2026-08-20", now).ok, false);
 });
 
 test("client identity ignores spoofed forwarding headers on a public peer", () => {
