@@ -126,9 +126,11 @@ function renderBacktestOutcomes(payload) {
   }).join("");
   document.getElementById("backtestOutcomes").innerHTML = `
     <div class="backtest-section-head"><div><span>Outcome reveal</span><h2>What happened afterward</h2></div><b>Not shown to the AI</b></div>
+    <section class="backtest-panel" id="backtestCurve"></section>
     <div class="backtest-outcome-entry">Next-session entry: <b>${outcome.entry_date ? `${btUsd(outcome.entry_price)} on ${btEsc(outcome.entry_date)}` : "Unavailable"}</b> · split-adjusted</div>
     <div class="backtest-outcomes">${cards}</div>
     <div class="backtest-integrity">Maximum six-month drawdown after entry: <b>${btPct(outcome.max_drawdown_6m)}</b>. These realized returns evaluate the historical analysis; they did not affect it.</div>`;
+  renderBacktestCurve(payload.simulation);
   const integrity = document.getElementById("backtestIntegrityState");
   if (integrity) integrity.textContent = "Everything in this section existed by the cutoff. The AI analysis finished before Squall released the outcome data below.";
 }
@@ -153,6 +155,7 @@ function runBacktest() {
   backtestFinished = false; backtestAnswer = ""; backtestThinking = "";
   document.getElementById("backtestError").innerHTML = "";
   document.getElementById("backtestSnapshot").innerHTML = "";
+  document.getElementById("backtestDecision").innerHTML = "";
   document.getElementById("backtestAi").innerHTML = "";
   document.getElementById("backtestOutcomes").innerHTML = "";
   const button = document.getElementById("backtestRun");
@@ -190,6 +193,9 @@ function runBacktest() {
     backtestAnswer += `${backtestAnswer ? "\n\n" : ""}> ${data.error}`;
     paintBacktestAi();
   });
+  source.addEventListener("backtest_decision", event => {
+    renderBacktestDecision(JSON.parse(event.data));
+  });
   source.addEventListener("backtest_outcomes", event => {
     renderBacktestOutcomes(JSON.parse(event.data));
   });
@@ -204,6 +210,173 @@ function runBacktest() {
     document.getElementById("backtestError").innerHTML = `<div class="backtest-error"><b>Connection lost</b><span>Confirm that the Squall server is running, then try again.</span></div>`;
     finishBacktest("Connection lost before completion", true);
   };
+}
+
+// ─── CHART ────────────────────────────────────────────────────────────────────
+// A local renderer rather than app.js's drawChart(), which is welded to
+// sessions[active], chartOpts and the analyzer's payload shape — the adapter would
+// be larger than this. Colors are read from CSS tokens and repainted on squall:theme,
+// because a canvas does not inherit them and silently loses them with no error.
+const btCharts = new Map();
+
+function btVar(name, fallback) {
+  const value = typeof cssVar === "function" ? cssVar(name) : "";
+  return value || fallback;
+}
+
+function drawLineChart(canvas, series, marks) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (!W || !H) return;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const labels = marks.labels || [];
+  const n = labels.length;
+  if (n < 2) return;
+
+  const values = [];
+  for (const s of series) for (const v of s.points) if (Number.isFinite(v)) values.push(v);
+  if (!values.length) return;
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.02 || 1;
+  lo -= pad; hi += pad;
+
+  const padL = 58, padR = 14, padT = 14, padB = 26;
+  const X = i => padL + (i / (n - 1)) * (W - padL - padR);
+  const Y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+
+  const rule = btVar("--rule", "#262c33");
+  const inkDim = btVar("--ink-dim", "#8b959e");
+  const fmt = marks.yFormat || (v => Math.round(v).toLocaleString());
+
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textBaseline = "middle";
+  for (let g = 0; g <= 4; g++) {
+    const v = lo + (hi - lo) * (g / 4), y = Y(v);
+    ctx.strokeStyle = rule; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y + 0.5); ctx.lineTo(W - padR, y + 0.5); ctx.stroke();
+    ctx.fillStyle = inkDim; ctx.textAlign = "right";
+    ctx.fillText(fmt(v), padL - 8, y);
+  }
+
+  for (const r of marks.rules || []) {
+    if (r.index == null || r.index >= n) continue;
+    const x = X(r.index);
+    ctx.strokeStyle = rule; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
+    ctx.setLineDash([]);
+    if (r.label) {
+      ctx.fillStyle = inkDim; ctx.textAlign = "center";
+      ctx.fillText(r.label, x, padT + 6);
+    }
+  }
+
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.6;
+    ctx.setLineDash(s.dash || []);
+    ctx.beginPath();
+    let drawing = false;
+    s.points.forEach((v, i) => {
+      if (!Number.isFinite(v)) { drawing = false; return; }
+      if (!drawing) { ctx.moveTo(X(i), Y(v)); drawing = true; }
+      else ctx.lineTo(X(i), Y(v));
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  for (const dot of marks.dots || []) {
+    const s = series.find(x => x.key === dot.series);
+    const v = s && s.points[dot.index];
+    if (!Number.isFinite(v)) continue;
+    ctx.beginPath(); ctx.arc(X(dot.index), Y(v), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = btVar("--chrome-0", "#0f1215"); ctx.fill();
+    ctx.strokeStyle = dot.color; ctx.lineWidth = 1.6; ctx.stroke();
+  }
+
+  ctx.fillStyle = inkDim; ctx.textAlign = "left";
+  ctx.fillText(labels[0], padL, H - padB + 12);
+  ctx.textAlign = "right";
+  ctx.fillText(labels[n - 1], W - padR, H - padB + 12);
+}
+
+/** Registers a chart so it survives theme swaps and resizes. */
+function btRegisterChart(id, build) {
+  btCharts.set(id, build);
+  build();
+}
+function btRepaintCharts() { for (const build of btCharts.values()) build(); }
+document.addEventListener("squall:theme", btRepaintCharts);
+// ResizeObserver rather than a window resize listener: the chart containers are
+// flex children, so they can change width without the window doing anything.
+const btResize = new ResizeObserver(btRepaintCharts);
+function btObserve(canvas) { if (canvas && canvas.parentElement) btResize.observe(canvas.parentElement); }
+
+const BT_DIRECTION_COPY = {
+  long: "Long", short: "Short", flat: "No position"
+};
+
+function renderBacktestDecision(data) {
+  const host = document.getElementById("backtestDecision");
+  if (!host) return;
+  const d = data.decision;
+  if (!d) {
+    host.innerHTML = `
+      <div class="backtest-section-head"><div><span>The call</span><h2>No decision recorded</h2></div></div>
+      <div class="backtest-integrity">The model did not return a usable trade, so only the stock and SPY are charted below.</div>`;
+    return;
+  }
+  const bits = [
+    `<div class="backtest-stat"><span>Direction</span><b>${btEsc(BT_DIRECTION_COPY[d.direction] || d.direction)}</b></div>`,
+    `<div class="backtest-stat"><span>Conviction</span><b>${btEsc(d.conviction)}/5</b></div>`,
+    `<div class="backtest-stat"><span>Horizon</span><b>${btEsc(d.horizon)}</b></div>`,
+    `<div class="backtest-stat"><span>Stop</span><b>${d.stop_pct == null ? "—" : btPct(-d.stop_pct)}</b></div>`,
+    `<div class="backtest-stat"><span>Target</span><b>${d.target_pct == null ? "—" : btPct(d.target_pct)}</b></div>`
+  ].join("");
+  host.innerHTML = `
+    <div class="backtest-section-head"><div><span>The call</span><h2>What Squall committed to</h2></div><b>Blind</b></div>
+    <section class="backtest-panel">
+      <div class="backtest-stats">${bits}</div>
+      ${d.thesis ? `<p class="backtest-thesis">${btEsc(d.thesis)}</p>` : ""}
+    </section>`;
+}
+
+function renderBacktestCurve(simulation) {
+  const host = document.getElementById("backtestCurve");
+  if (!host || !simulation || !simulation.curve || simulation.curve.length < 2) return;
+  const curve = simulation.curve;
+  const hasTrade = curve.some(p => Number.isFinite(p.trade));
+  const series = [
+    { key:"spy", label:"SPY", color:btVar("--ink-dim", "#7d8892"), points:curve.map(p => p.spy), width:1.4 },
+    { key:"stock", label:"Stock, buy & hold", color:btVar("--ink", "#b9c2ca"), points:curve.map(p => p.stock), width:1.4, dash:[4,3] }
+  ];
+  if (hasTrade) series.push({ key:"trade", label:"Squall's trade",
+    color:btVar("--accent", "#e0a33a"), points:curve.map(p => p.trade), width:2 });
+
+  const dots = [];
+  if (hasTrade && simulation.exit) {
+    const exitIndex = curve.findIndex(p => p.d === simulation.exit.date);
+    if (exitIndex >= 0) dots.push({ index:exitIndex, series:"trade",
+      color:btVar("--down", "#c25b5b"), title:simulation.exit.reason });
+  }
+
+  const legend = series.map(s =>
+    `<span><i style="background:${s.color}"></i>${btEsc(s.label)}</span>`).join("");
+  host.innerHTML = `
+    <div class="backtest-chart-wrap"><canvas id="backtestCurveCanvas"></canvas></div>
+    <div class="backtest-legend">${legend}</div>`;
+
+  btObserve(document.getElementById("backtestCurveCanvas"));
+  btRegisterChart("curve", () => drawLineChart(
+    document.getElementById("backtestCurveCanvas"), series, {
+      labels: curve.map(p => p.d),
+      dots,
+      yFormat: v => `$${Math.round(v).toLocaleString()}`
+    }));
 }
 
 const backtestDate = document.getElementById("backtestDate");
