@@ -3,9 +3,10 @@
 const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
-  validateBacktestDate,
+  validateBacktestDate, simulateTrade,
   LIM, COST, clientIp, clientKey, admit, buckets, globals
 } = require("../../server");
+const BARS = require("../fixtures/backtest_bars.json");
 
 const BASE_LIMITS = { ...LIM };
 
@@ -138,4 +139,69 @@ test("admit applies engine costs only after every gate passes", () => {
   assert.equal(admit(analyzeReq, "analyze").ok, true);
   assert.equal(buckets.get("4:192.0.2.22").analyzeN, COST.analyze.scrape);
   assert.equal(globals.scrape, COST.analyze.scrape);
+});
+
+test("simulated long exits at the next open after a stop is breached on the close", () => {
+  const result = simulateTrade(
+    { direction: "long", horizon: "6m", stop_pct: 0.08, target_pct: null }, BARS);
+  // entry is bar 0's open; stop trigger is 100 * 0.92 = 92.0
+  assert.equal(result.entry.price, 100);
+  assert.equal(result.entry.date, "2023-03-16");
+  // close 91.0 at index 8 breaches; fill at index 9's open of 90.0
+  assert.equal(result.exit.reason, "stop");
+  assert.equal(result.exit.date, "2023-03-29");
+  assert.equal(result.exit.price, 90);
+  assert.equal(Math.round(result.stats.trade_return * 1e6) / 1e6, -0.1);
+  // the trade line is flat in cash from the exit bar onward
+  assert.equal(result.curve[9].trade, result.curve[11].trade);
+  // the stock line keeps moving after the trade is out
+  assert.notEqual(result.curve[9].stock, result.curve[11].stock);
+});
+
+test("simulated long exits at the horizon when no stop or target is hit", () => {
+  const result = simulateTrade(
+    { direction: "long", horizon: "1m", stop_pct: null, target_pct: null }, BARS);
+  // 21 sessions requested but only 12 exist, so the window runs out first
+  assert.equal(result.exit.reason, "end");
+  assert.equal(result.exit.date, "2023-03-31");
+  assert.equal(result.exit.price, 96);
+});
+
+test("simulated long takes profit at the next open after the target prints", () => {
+  const result = simulateTrade(
+    { direction: "long", horizon: "6m", stop_pct: null, target_pct: 0.10 }, BARS);
+  // target trigger 110.0; close 112.0 at index 3 clears it, fill at index 4's open 112.0
+  assert.equal(result.exit.reason, "target");
+  assert.equal(result.exit.date, "2023-03-22");
+  assert.equal(result.exit.price, 112);
+  assert.equal(Math.round(result.stats.trade_return * 1e6) / 1e6, 0.12);
+});
+
+test("a short profits as the stock falls and flips the stop to the upside", () => {
+  const result = simulateTrade(
+    { direction: "short", horizon: "6m", stop_pct: 0.08, target_pct: null }, BARS);
+  // for a short the stop is a RISE through 100 * 1.08 = 108.0
+  // close 109.0 at index 2 breaches; fill at index 3's open of 109.0
+  assert.equal(result.exit.reason, "stop");
+  assert.equal(result.exit.price, 109);
+  // short equity multiplier is 2 - price/entry = 2 - 1.09 = 0.91
+  assert.equal(Math.round(result.stats.trade_return * 1e6) / 1e6, -0.09);
+});
+
+test("a flat call draws no trade line but still returns both benchmarks", () => {
+  const result = simulateTrade(
+    { direction: "flat", horizon: "3m", stop_pct: null, target_pct: null }, BARS);
+  assert.equal(result.exit, null);
+  assert.equal(result.stats.trade_return, null);
+  assert.equal(result.curve.every(p => p.trade === null), true);
+  assert.equal(result.curve.every(p => typeof p.stock === "number"), true);
+  assert.equal(result.curve.every(p => typeof p.spy === "number"), true);
+  // buy-and-hold still measurable: 96/100 - 1
+  assert.equal(Math.round(result.stats.stock_return * 1e6) / 1e6, -0.04);
+});
+
+test("simulateTrade refuses a window with no usable bars", () => {
+  assert.equal(simulateTrade({ direction: "long", horizon: "3m" },
+    { dates: [], open: [], close: [], spyOpen: [], spyClose: [] }), null);
+  assert.equal(simulateTrade({ direction: "long", horizon: "3m" }, null), null);
 });

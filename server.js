@@ -785,6 +785,123 @@ function validateBacktestDate(raw, now = new Date()) {
   return { ok:true, value };
 }
 
+// Sessions per horizon — must stay in sync with HORIZONS in backtester.py.
+const BT_HORIZON_SESSIONS = { "1m": 21, "3m": 63, "6m": 126 };
+const BT_START_EQUITY = 10000;
+
+function btFinite(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Simulates the model's decision over the sealed post-cutoff window.
+ *
+ * Pure: no I/O, no clock, no globals — so it drops straight into tests/js.
+ *
+ * Deliberately conservative. Stops and targets are tested against the daily CLOSE
+ * and fill at the NEXT session's open, because testing against the intraday low
+ * and filling at the stop price assumes a fill you could not have been guaranteed
+ * through a gap — and the OHLC here is back-adjusted, so those extremes are not
+ * the prices that actually printed anyway.
+ */
+function simulateTrade(decision, bars) {
+  const dates = (bars && bars.dates) || [];
+  const open = (bars && bars.open) || [];
+  const close = (bars && bars.close) || [];
+  const spyOpen = (bars && bars.spyOpen) || [];
+  const spyClose = (bars && bars.spyClose) || [];
+  const n = Math.min(dates.length, open.length, close.length);
+  if (!n) return null;
+
+  const entry = btFinite(open[0]);
+  if (!(entry > 0)) return null;
+  const spyEntry = btFinite(spyOpen[0]);
+
+  const direction = decision && decision.direction;
+  const long = direction === "long";
+  const short = direction === "short";
+  const trading = long || short;
+
+  const stopPct = decision ? btFinite(decision.stop_pct) : null;
+  const targetPct = decision ? btFinite(decision.target_pct) : null;
+  const horizonN = BT_HORIZON_SESSIONS[decision && decision.horizon] || BT_HORIZON_SESSIONS["3m"];
+
+  // Both percentages are positive distances from entry; the direction decides the side.
+  const stopPrice = stopPct == null ? null : long ? entry * (1 - stopPct) : entry * (1 + stopPct);
+  const targetPrice = targetPct == null ? null : long ? entry * (1 + targetPct) : entry * (1 - targetPct);
+  const equity = price => BT_START_EQUITY * (long ? price / entry : 2 - price / entry);
+
+  let exitIdx = null, exitPrice = null, exitReason = null;
+  if (trading) {
+    for (let i = 0; i < n; i++) {
+      const c = btFinite(close[i]);
+      if (c == null) continue;
+      const hitStop = stopPrice != null && (long ? c <= stopPrice : c >= stopPrice);
+      const hitTarget = targetPrice != null && (long ? c >= targetPrice : c <= targetPrice);
+      const hitHorizon = i + 1 >= horizonN;
+      if (!hitStop && !hitTarget && !hitHorizon) continue;
+      // Fill at the next session's open. On the final bar there is no next open,
+      // so the close stands in rather than inventing a price.
+      const next = i + 1;
+      exitIdx = next < n ? next : i;
+      exitPrice = next < n ? btFinite(open[next]) : c;
+      if (exitPrice == null) exitPrice = c;
+      exitReason = hitStop ? "stop" : hitTarget ? "target" : "horizon";
+      break;
+    }
+    if (exitIdx === null) {
+      exitIdx = n - 1;
+      exitPrice = btFinite(close[n - 1]);
+      exitReason = "end";
+    }
+  }
+
+  const curve = [];
+  for (let i = 0; i < n; i++) {
+    const c = btFinite(close[i]);
+    const sc = btFinite(spyClose[i]);
+    let trade = null;
+    if (trading && exitPrice != null && i >= exitIdx) trade = equity(exitPrice);
+    else if (trading && c != null) trade = equity(c);
+    curve.push({
+      d: dates[i],
+      trade,
+      stock: c == null ? null : BT_START_EQUITY * (c / entry),
+      spy: sc == null || !(spyEntry > 0) ? null : BT_START_EQUITY * (sc / spyEntry)
+    });
+  }
+
+  const lastClose = btFinite(close[n - 1]);
+  const lastSpy = btFinite(spyClose[n - 1]);
+  const stats = {
+    trade_return: trading && exitPrice != null ? equity(exitPrice) / BT_START_EQUITY - 1 : null,
+    stock_return: lastClose == null ? null : lastClose / entry - 1,
+    spy_return: lastSpy == null || !(spyEntry > 0) ? null : lastSpy / spyEntry - 1,
+    excess_vs_spy: null,
+    max_dd: null
+  };
+  if (stats.trade_return != null && stats.spy_return != null)
+    stats.excess_vs_spy = stats.trade_return - stats.spy_return;
+  if (trading) {
+    let peak = BT_START_EQUITY, dd = 0;
+    for (const point of curve) {
+      if (point.trade == null) continue;
+      peak = Math.max(peak, point.trade);
+      dd = Math.min(dd, point.trade / peak - 1);
+    }
+    stats.max_dd = dd;
+  }
+
+  return {
+    curve,
+    entry: { date: dates[0], price: entry },
+    exit: trading ? { date: dates[exitIdx], price: exitPrice, reason: exitReason } : null,
+    stats
+  };
+}
+
 // Static file serving
 const PUBLIC_DIR = __dirname;
 const MIME = {
@@ -2227,7 +2344,7 @@ if (require.main === module) {
 module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
-  fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
+  fallbackRefineScreener, readMarketUniverse, validateBacktestDate, simulateTrade,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
