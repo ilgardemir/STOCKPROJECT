@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
+  backtestProfilePlan, ensureBacktestPosition,
   LIM, COST, clientIp, clientKey, admit, buckets, globals
 } = require("../../server");
 const BARS = require("../fixtures/backtest_bars.json");
@@ -304,4 +305,65 @@ test("an unusable backtest decision degrades to no decision", () => {
   assert.equal(sanitizeBacktestDecision('{"direction":"short"}').direction, "short");
   // conviction is display-only and defaults rather than failing the decision
   assert.equal(sanitizeBacktestDecision('{"direction":"short"}').conviction, 3);
+});
+
+test("MySquall deterministically controls backtest exposure and supported horizon", () => {
+  const cautious = backtestProfilePlan({ risk:1, horizon:1, style:"balanced" });
+  assert.equal(cautious.position_pct, 0.10);
+  assert.equal(cautious.horizon, "1m");
+
+  const options = backtestProfilePlan({ risk:5, horizon:5, style:"options" });
+  assert.equal(options.position_pct, 0.33);
+  assert.equal(options.horizon, "6m");
+  assert.equal(options.options_proxy, true);
+  assert.equal(options.instrument, "underlying_stock_proxy");
+});
+
+test("completed backtests always receive a long or short position", () => {
+  const snapshot = { technical:{
+    scores:{ uptrend:72, accumulation:65, momentum:70, breakout:60,
+      downtrend:28, distribution:35 },
+    metrics:{ return_20d:0.08, return_60d:0.15, atr_pct:0.025 }
+  }};
+  const decision = ensureBacktestPosition(null, snapshot,
+    { risk:2, horizon:3, style:"balanced" });
+  assert.equal(decision.direction, "long");
+  assert.equal(decision.decision_source, "rules_fallback");
+  assert.equal(decision.position_pct, 0.20);
+  assert.equal(decision.horizon, "3m");
+  assert.ok(decision.stop_pct > 0);
+  assert.ok(decision.target_pct > decision.stop_pct);
+});
+
+test("AI direction survives while MySquall overrides sizing and horizon", () => {
+  const decision = ensureBacktestPosition(
+    { direction:"short", conviction:4, horizon:"1m", stop_pct:0.08, target_pct:0.2,
+      thesis:"Weak trend." },
+    { technical:{ metrics:{ atr_pct:0.03 } } },
+    { risk:4, horizon:5, style:"long-term" });
+  assert.equal(decision.direction, "short");
+  assert.equal(decision.decision_source, "ai");
+  assert.equal(decision.position_pct, 0.50);
+  assert.equal(decision.horizon, "6m");
+});
+
+test("MySquall risk settings bound an extracted stop and reward target", () => {
+  const decision = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"6m", stop_pct:0.40, target_pct:0.01 },
+    { technical:{ metrics:{ atr_pct:0.04 } } },
+    { risk:1, horizon:1, style:"balanced" });
+  assert.equal(decision.stop_pct, 0.05);
+  assert.equal(decision.target_pct, 0.075);
+  assert.equal(decision.position_pct, 0.10);
+});
+
+test("simulated trade return scales with the MySquall position size", () => {
+  const bars = {
+    dates:["2024-01-02", "2024-01-03"], open:[100, 110], close:[100, 110],
+    spyOpen:[100, 100], spyClose:[100, 100]
+  };
+  const result = simulateTrade(
+    { direction:"long", horizon:"6m", position_pct:0.25, stop_pct:null, target_pct:null }, bars);
+  assert.equal(Math.round(result.stats.trade_return * 10000) / 10000, 0.025);
+  assert.equal(result.curve.at(-1).trade, 10250);
 });

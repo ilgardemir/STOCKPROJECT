@@ -35,6 +35,10 @@ function btPct(value, digits = 1) {
   const number = btNum(value);
   return number === null ? "—" : `${number > 0 ? "+" : ""}${(number * 100).toFixed(digits)}%`;
 }
+function btMagnitudePct(value, digits = 1) {
+  const number = btNum(value);
+  return number === null ? "—" : `${(Math.abs(number) * 100).toFixed(digits)}%`;
+}
 function btUsd(value) {
   const number = btNum(value);
   if (number === null) return "—";
@@ -474,9 +478,24 @@ function renderBacktestDecision(data) {
       <div class="backtest-integrity">The model did not return a usable trade, so only the stock and SPY are charted below.</div>`;
     return;
   }
+  const positionPct = btNum(d.position_pct);
+  const positionLabel = positionPct == null ? "—" : btMagnitudePct(positionPct);
+  const instrumentLabel = d.options_proxy ? "Underlying stock proxy" : "Stock";
+  const sourceLabel = d.decision_source === "rules_fallback" ? "Rules fallback" : "Blind AI call";
+  const side = d.direction === "short" ? "short" : "long";
+  const stopMove = d.direction === "short" ? "rises" : "falls";
+  const targetMove = d.direction === "short" ? "falls" : "rises";
+  const executionPlan = [
+    `Enter a ${positionLabel} ${side} ${d.options_proxy ? "position in the underlying stock proxy" : "stock position"} at the next session's open.`,
+    d.stop_pct == null ? "" : `If a daily close ${stopMove} ${btMagnitudePct(d.stop_pct)} from entry, exit at the following session's open.`,
+    d.target_pct == null ? "" : `If a daily close ${targetMove} ${btMagnitudePct(d.target_pct)} from entry, exit at the following session's open.`,
+    `Otherwise, exit when the ${btEsc(d.horizon)} maximum holding period ends.`
+  ].filter(Boolean).join(" ");
   const bits = [
     `<div class="backtest-stat"><span>Direction</span><b>${btEsc(BT_DIRECTION_COPY[d.direction] || d.direction)}</b></div>`,
     `<div class="backtest-stat"><span>Conviction</span><b>${btEsc(d.conviction)}/5</b></div>`,
+    `<div class="backtest-stat"><span>Position size</span><b>${positionLabel}</b></div>`,
+    `<div class="backtest-stat"><span>Instrument</span><b>${btEsc(instrumentLabel)}</b></div>`,
     `<div class="backtest-stat"><span>Horizon</span><b>${btEsc(d.horizon)}</b></div>`,
     `<div class="backtest-stat"><span>Stop</span><b>${d.stop_pct == null ? "—" : btPct(-d.stop_pct)}</b></div>`,
     `<div class="backtest-stat"><span>Target</span><b>${d.target_pct == null ? "—" : btPct(d.target_pct)}</b></div>`
@@ -486,6 +505,8 @@ function renderBacktestDecision(data) {
     <section class="backtest-panel">
       <div class="backtest-stats">${bits}</div>
       ${d.thesis ? `<p class="backtest-thesis">${btEsc(d.thesis)}</p>` : ""}
+      <p class="backtest-thesis"><b>Execution plan:</b> ${executionPlan}</p>
+      <p class="backtest-curve-note">${btEsc(sourceLabel)} · MySquall calibration: ${btEsc(d.profile_basis || "balanced defaults")}.${d.options_proxy ? " Historical options-chain data is unavailable, so this tests the underlying stock rather than inventing an options contract." : ""}</p>
     </section>`;
 }
 

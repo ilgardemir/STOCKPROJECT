@@ -352,6 +352,9 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         # The derived reads must survive the projection.
         self.assertIn("TRENDING", prompt)
         self.assertIn("AAA", prompt)
+        self.assertIn("You must choose LONG or SHORT", prompt)
+        self.assertIn("entry at the next session open", prompt)
+        self.assertIn("MySquall preferences", prompt)
         # Sanity: the fixture is realistic enough that a naive dump WOULD have leaked.
         self.assertIn("123.456789", json.dumps({**snapshot, **outcomes}))
 
