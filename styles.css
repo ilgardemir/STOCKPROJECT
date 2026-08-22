@@ -453,6 +453,10 @@ body[data-page="backtester"] header { flex: 0 0 auto; }
 .backtest-integrity { margin: 0 0 12px; padding: 10px 12px; border-left: 2px solid var(--accent); background: var(--chrome-1); color: var(--ink-dim); font: 10px/1.55 var(--mono); }
 .backtest-integrity b { color: var(--ink-bright); }
 .backtest-panel { margin-top: 10px; padding: 17px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--chrome-1); box-shadow: var(--shadow); }
+/* #backtestSetup is emitted by the snapshot template but only filled once there are
+   enough pre-cutoff bars to chart. Without this, a short history leaves a bordered,
+   padded, empty box where a chart belongs, which reads as a broken render. */
+.backtest-panel:empty { display: none; }
 .backtest-panel h3 { margin-bottom: 13px; color: var(--ink-bright); font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .055em; }
 .backtest-stats { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--rule); border-left: 1px solid var(--rule); }
 .backtest-stat { padding: 10px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }

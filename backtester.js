@@ -99,9 +99,11 @@ function renderBacktestSnapshot(payload) {
   document.getElementById("backtestSnapshot").innerHTML = `
     <div class="backtest-section-head"><div><span>Frozen snapshot</span><h2>${btEsc(snapshot.company_name || snapshot.ticker)} <small>${btEsc(snapshot.ticker)}</small></h2></div><b>As of ${btEsc(snapshot.effective_market_date || snapshot.as_of)}</b></div>
     <div class="backtest-integrity" id="backtestIntegrityState">Everything in this section existed by the cutoff. The AI is now analyzing this snapshot while the future outcome remains sealed.</div>
+    <section class="backtest-panel" id="backtestSetup"></section>
     <section class="backtest-panel"><h3>Price and technical condition</h3><div class="backtest-stats">${metricCards}</div><div class="backtest-scores">${scoreCards}</div></section>
     <section class="backtest-panel"><h3>SEC facts known by the cutoff</h3><div class="backtest-facts">${factCards}</div></section>
     <section class="backtest-panel"><h3>Recent filings known by the cutoff</h3><div class="backtest-filings">${filings}</div></section>`;
+  renderBacktestSetupChart(snapshot);
 }
 
 function paintBacktestAi() {
@@ -349,6 +351,65 @@ document.addEventListener("squall:theme", btRepaintCharts);
 // flex children, so they can change width without the window doing anything.
 const btResize = new ResizeObserver(btRepaintCharts);
 function btObserve(canvas) { if (canvas && canvas.parentElement) btResize.observe(canvas.parentElement); }
+
+/**
+ * Simple moving average over a series that may contain nulls.
+ *
+ * The running sum is kept over the last n NON-NULL values rather than the last n
+ * slots, so a gap in the source shortens the window instead of poisoning the sum
+ * with a subtracted null. price_history_rows drops bars with no close, so gaps are
+ * rare — but a silently wrong MA is indistinguishable from a right one on a chart.
+ */
+function btMovingAvg(values, n) {
+  const out = new Array(values.length).fill(null);
+  const window = [];
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = btNum(values[i]);
+    if (v === null) continue;
+    window.push(v); sum += v;
+    if (window.length > n) sum -= window.shift();
+    if (window.length === n) out[i] = sum / n;
+  }
+  return out;
+}
+
+/*
+ * The pre-cutoff price chart. It lands with the snapshot, so the page shows the
+ * setup the model is reading while the model is still writing about it.
+ *
+ * Same rule as the equity curve: the three lines are told apart by weight and dash,
+ * not hue. --ink against --ink-dim measures as little as 1.11:1, and the design
+ * system reserves the single accent, so hue is not an available lever here either.
+ * A moving average is only added once enough bars exist to compute one — a legend
+ * entry for a line that is entirely null is a label pointing at nothing.
+ */
+function renderBacktestSetupChart(snapshot) {
+  const host = document.getElementById("backtestSetup");
+  const bars = snapshot.price_history;
+  if (!host || !Array.isArray(bars) || bars.length < 30) return;
+  const closes = bars.map(b => btNum(b.c));
+  const series = [
+    { key:"close", label:"Close", color:btVar("--ink-bright", "#d7dee5"), points:closes, width:1.8 }
+  ];
+  if (bars.length >= 50) series.push({ key:"ma50", label:"MA50", color:btVar("--ink", "#b9c2ca"),
+    points:btMovingAvg(closes, 50), width:1.4, dash:[5, 4] });
+  if (bars.length >= 200) series.push({ key:"ma200", label:"MA200", color:btVar("--ink-dim", "#8b959e"),
+    points:btMovingAvg(closes, 200), width:1.2, dash:[1, 3] });
+
+  host.innerHTML = `
+    <h3>What it looked like then</h3>
+    <div class="backtest-chart-wrap"><canvas id="backtestSetupCanvas"></canvas></div>
+    <div class="backtest-legend">${btLegend(series)}</div>
+    <p class="backtest-curve-note">${bars.length} sessions up to ${btEsc(bars[bars.length - 1].d)}. Split-adjusted closes on the current share basis, so a later split has already been applied and these levels may never have traded.</p>`;
+
+  btObserve(document.getElementById("backtestSetupCanvas"));
+  btRegisterChart("setup", () => drawLineChart(
+    document.getElementById("backtestSetupCanvas"), series, {
+      labels: bars.map(b => b.d),
+      yFormat: v => `$${v < 20 ? v.toFixed(2) : Math.round(v).toLocaleString()}`
+    }));
+}
 
 const BT_DIRECTION_COPY = {
   long: "Long", short: "Short", flat: "No position"
