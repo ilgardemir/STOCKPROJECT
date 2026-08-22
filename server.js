@@ -214,6 +214,8 @@ function buildBacktestAiMessages(prompt, profile) {
         "You are a point-in-time equity analyst participating in a historical blind test.",
         "The cutoff date and supplied snapshot are absolute: never use knowledge from after that date, including facts you remember independently.",
         "Never guess missing historical news, options, estimates, or outcomes. Analyze only the supplied price and SEC evidence, distinguish what was known from what was uncertain, and do not claim that a chart-pattern score proves a pattern.",
+        "This is a forced-choice backtest: finish with one explicit simulated LONG or SHORT stock position. Never answer flat, neutral, wait, watch, or avoid; express uncertainty through lower conviction and smaller MySquall-calibrated sizing.",
+        "State next-session-open entry, stop distance, target distance, and maximum holding period. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
         "Do not predict with certainty or provide individualized financial advice."
       ].join(" ")
     },
@@ -228,10 +230,10 @@ function buildBacktestAiMessages(prompt, profile) {
  * alone, so it contains no post-cutoff data. Reasoning is disabled outright — this is
  * extraction, not analysis, and the thinking budget is pure latency here.
  *
- * Returns a sanitized decision or null. Never throws: a missing decision degrades the
- * page to a stock-vs-SPY chart rather than failing the run.
+ * Returns a sanitized decision or null. Never throws: the route converts a missing or
+ * unusable extraction into a labeled, deterministic pre-cutoff rules fallback.
  */
-async function requestBacktestDecision(aiPrompt, prose, signal) {
+async function requestBacktestDecision(aiPrompt, prose, profile, signal) {
   const body = JSON.stringify({
     model: AI_MODEL, temperature: 0, max_tokens: 400,
     reasoning: { effort: "none" }, stream: false, provider: AI_PROVIDER,
@@ -239,12 +241,14 @@ async function requestBacktestDecision(aiPrompt, prose, signal) {
       { role: "system", content: [
         "You convert a historical equity analysis into one machine-readable trade decision.",
         "Reply with a single JSON object and nothing else — no prose, no code fence.",
-        'Schema: {"direction":"long"|"short"|"flat","conviction":1-5,"horizon":"1m"|"3m"|"6m",',
+        'Schema: {"direction":"long"|"short","conviction":1-5,"horizon":"1m"|"3m"|"6m",',
         '"stop_pct":number|null,"target_pct":number|null,"thesis":"one sentence"}.',
         "stop_pct and target_pct are POSITIVE FRACTIONS of the entry price (0.08 means 8%), never prices.",
-        "Use \"flat\" when the analysis does not support taking a position."
+        "You must choose long or short for this experiment. Never return flat, neutral, wait, watch, or avoid; lower conviction when evidence is mixed.",
+        "Use the supplied MySquall risk tolerance, holding period, style, priorities, and custom preference when selecting direction, conviction, stop, target, and horizon.",
+        "If the profile prefers options, choose the underlying stock direction only; no historical option chain exists and no contract may be invented."
       ].join(" ") },
-      { role: "user", content: `${aiPrompt}\n\n--- THE ANALYSIS YOU WROTE ---\n${prose}` }
+      { role: "user", content: `${aiPrompt}\n\n${formatProfile(profile) || "--- MYSQUALL USER PREFERENCES ---\nNo saved profile; use balanced defaults."}\n\n--- THE ANALYSIS YOU WROTE ---\n${prose}` }
     ]
   });
 
@@ -860,6 +864,8 @@ function validateBacktestDate(raw, now = new Date()) {
 
 const BT_DIRECTIONS = new Set(["long", "short", "flat"]);
 const BT_HORIZONS = new Set(["1m", "3m", "6m"]);
+const BT_PROFILE_HORIZONS = ["1m", "1m", "3m", "6m", "6m"];
+const BT_PROFILE_POSITION_PCT = [0.10, 0.20, 0.35, 0.50, 0.65];
 
 /**
  * Re-checks the model's structured call against fixed enums and ranges, the same way
@@ -906,6 +912,109 @@ function sanitizeBacktestDecision(raw) {
   };
 }
 
+function backtestProfilePlan(raw) {
+  const profile = sanitizeProfile(raw) || sanitizeProfile({});
+  let horizon = BT_PROFILE_HORIZONS[profile.horizon - 1];
+  if (profile.style === "swing") horizon = "1m";
+  if (profile.style === "long-term" || profile.style === "income") horizon = "6m";
+
+  const styleMultiplier = {
+    balanced: 1, "long-term": 1, swing: 0.8, value: 0.9,
+    growth: 1, income: 0.8, options: 0.5
+  }[profile.style] || 1;
+  const positionPct = Math.max(0.05, Math.min(0.75,
+    BT_PROFILE_POSITION_PCT[profile.risk - 1] * styleMultiplier));
+  const riskStopCap = [0.05, 0.07, 0.10, 0.14, 0.18][profile.risk - 1];
+  const rewardRatio = [1.5, 1.75, 2, 2.25, 2.5][profile.risk - 1];
+  const optionsProxy = profile.style === "options" || profile.priorities.includes("options");
+
+  return {
+    profile, horizon,
+    position_pct: Math.round(positionPct * 100) / 100,
+    risk_stop_cap: riskStopCap,
+    reward_ratio: rewardRatio,
+    instrument: optionsProxy ? "underlying_stock_proxy" : "stock",
+    options_proxy: optionsProxy,
+    profile_basis: `${profile.style} style · risk ${profile.risk}/5 · holding preference ${profile.horizon}/5`
+  };
+}
+
+function fallbackBacktestDecision(snapshot, rawProfile) {
+  const scores = snapshot?.technical?.scores || {};
+  const metrics = snapshot?.technical?.metrics || {};
+  const average = (keys) => {
+    const values = keys.map(key => btFinite(scores[key])).filter(value => value != null);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 50;
+  };
+  let longScore = average(["uptrend", "accumulation", "momentum", "breakout"]);
+  let shortScore = average(["downtrend", "distribution"]);
+  const return20 = btFinite(metrics.return_20d);
+  const return60 = btFinite(metrics.return_60d);
+  if (return20 != null) {
+    if (return20 >= 0) longScore += Math.min(10, Math.abs(return20) * 50);
+    else shortScore += Math.min(10, Math.abs(return20) * 50);
+  }
+  if (return60 != null) {
+    if (return60 >= 0) longScore += Math.min(10, Math.abs(return60) * 25);
+    else shortScore += Math.min(10, Math.abs(return60) * 25);
+  }
+
+  const plan = backtestProfilePlan(rawProfile);
+  const direction = longScore >= shortScore ? "long" : "short";
+  const spread = Math.abs(longScore - shortScore);
+  // A mechanical fallback can make a decisive call, but it must not impersonate
+  // high-confidence AI judgment merely because two derived scores are far apart.
+  const conviction = Math.max(1, Math.min(3, 1 + Math.round(spread / 20)));
+  const atrPct = btFinite(metrics.atr_pct);
+  const volatilityStop = atrPct != null ? Math.max(0.03, Math.min(0.18, atrPct * 2.5)) : 0.08;
+  const stopPct = Math.min(volatilityStop, plan.risk_stop_cap);
+  const targetPct = Math.min(0.50, Math.max(0.03, stopPct * plan.reward_ratio));
+
+  return {
+    direction, conviction, horizon: plan.horizon,
+    stop_pct: Math.round(stopPct * 10000) / 10000,
+    target_pct: Math.round(targetPct * 10000) / 10000,
+    thesis: `${direction === "long" ? "Bullish" : "Bearish"} pre-cutoff trend and volume evidence was stronger in the deterministic fallback.`,
+    decision_source: "rules_fallback"
+  };
+}
+
+/**
+ * Guarantees that every completed replay has a tradable, profile-calibrated call.
+ * The model chooses direction when it returned usable JSON. MySquall deterministically
+ * controls exposure and the supported holding window, so prompt compliance is not the
+ * only thing standing between a saved profile and the simulated result.
+ */
+function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
+  const plan = backtestProfilePlan(rawProfile);
+  let decision = sanitizeBacktestDecision(rawDecision);
+  if (!decision || decision.direction === "flat") {
+    decision = fallbackBacktestDecision(snapshot, plan.profile);
+  } else {
+    decision.decision_source = "ai";
+  }
+
+  const metrics = snapshot?.technical?.metrics || {};
+  const atrPct = btFinite(metrics.atr_pct);
+  const volatilityStop = atrPct != null ? Math.max(0.03, Math.min(0.18, atrPct * 2.5)) : 0.08;
+  const requestedStop = decision.stop_pct == null ? volatilityStop : decision.stop_pct;
+  decision.stop_pct = Math.round(Math.min(requestedStop, plan.risk_stop_cap) * 10000) / 10000;
+  const profileTarget = decision.stop_pct * plan.reward_ratio;
+  const requestedTarget = decision.target_pct == null ? profileTarget : decision.target_pct;
+  decision.target_pct = Math.round(Math.min(0.50, Math.max(0.03,
+    requestedTarget, profileTarget)) * 10000) / 10000;
+
+  return {
+    ...decision,
+    horizon: plan.horizon,
+    position_pct: plan.position_pct,
+    instrument: plan.instrument,
+    options_proxy: plan.options_proxy,
+    entry_rule: "next_open",
+    profile_basis: plan.profile_basis
+  };
+}
+
 // Sessions per horizon — must stay in sync with HORIZONS in backtester.py.
 const BT_HORIZON_SESSIONS = { "1m": 21, "3m": 63, "6m": 126 };
 const BT_START_EQUITY = 10000;
@@ -944,6 +1053,11 @@ function simulateTrade(decision, bars) {
   const long = direction === "long";
   const short = direction === "short";
   const trading = long || short;
+  const requestedPositionPct = decision ? btFinite(decision.position_pct) : null;
+  // Legacy/unit-test decisions without sizing retain the original fully-invested
+  // behavior. Route decisions always arrive through ensureBacktestPosition.
+  const positionPct = requestedPositionPct == null
+    ? 1 : Math.max(0, Math.min(1, requestedPositionPct));
 
   const stopPct = decision ? btFinite(decision.stop_pct) : null;
   const targetPct = decision ? btFinite(decision.target_pct) : null;
@@ -952,7 +1066,8 @@ function simulateTrade(decision, bars) {
   // Both percentages are positive distances from entry; the direction decides the side.
   const stopPrice = stopPct == null ? null : long ? entry * (1 - stopPct) : entry * (1 + stopPct);
   const targetPrice = targetPct == null ? null : long ? entry * (1 + targetPct) : entry * (1 - targetPct);
-  const equity = price => BT_START_EQUITY * (long ? price / entry : 2 - price / entry);
+  const equity = price => BT_START_EQUITY * (1 + positionPct * (
+    long ? price / entry - 1 : 1 - price / entry));
 
   let exitIdx = null, exitPrice = null, exitReason = null;
   if (trading) {
@@ -1920,14 +2035,15 @@ const appServer = http.createServer(async (req, res) => {
       // simulation both happen inside here, so no post-cutoff bar can precede the
       // model's blind analysis on the wire.
       const revealOutcomes = async (prose) => {
-        let decision = null;
+        let extractedDecision = null;
         if (prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
           send("backtest_progress", { percent:99, label:"Extracting the trade the model committed to" });
-          decision = await requestBacktestDecision(payload.ai_prompt, prose, aiAbort.signal);
+          extractedDecision = await requestBacktestDecision(payload.ai_prompt, prose, profile, aiAbort.signal);
         }
         if (!connected) return;
-        send("backtest_decision", { decision, available: !!decision });
-        const simulation = simulateTrade(decision || { direction:"flat", horizon:"3m" }, outcomes.bars);
+        const decision = ensureBacktestPosition(extractedDecision, payload.snapshot, profile);
+        send("backtest_decision", { decision, available:true });
+        const simulation = simulateTrade(decision, outcomes.bars);
         send("backtest_outcomes", { outcomes, simulation });
         send("backtest_done", { ok:true });
         res.end();
@@ -2480,7 +2596,8 @@ module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
-  simulateTrade, sanitizeBacktestDecision,
+  simulateTrade, sanitizeBacktestDecision, backtestProfilePlan,
+  fallbackBacktestDecision, ensureBacktestPosition,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
