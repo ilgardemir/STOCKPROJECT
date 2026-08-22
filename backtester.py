@@ -353,6 +353,63 @@ def technical_snapshot(before):
     return {"metrics": {key: features.get(key) for key in keep}, "scores": features.get("scores") or {}}
 
 
+# Matches the col_map in scraperFinal.YQData.history — the analyzer's signal engines
+# all expect yfinance-convention capitalised columns.
+SCRAPER_COLUMNS = {"open": "Open", "high": "High", "low": "Low",
+                   "close": "Close", "volume": "Volume"}
+
+
+def scraper_frame(frame):
+    out = frame.copy()
+    renames = {}
+    for lower, upper in SCRAPER_COLUMNS.items():
+        col = _column(out, lower)
+        if col is not None:
+            renames[col] = upper
+    return out.rename(columns=renames)
+
+
+def derived_signals(before, price):
+    """
+    The analyzer's four signal engines applied to pre-cutoff bars only.
+
+    All four are pure functions of a price frame, so they reconstruct honestly at any
+    cutoff. Each is wrapped independently: one engine choking on an odd frame must
+    degrade its own block, not lose the other three or fail the run.
+    """
+    if not isinstance(before, pd.DataFrame) or before.empty:
+        return {}
+    hist = scraper_frame(before)
+    out = {}
+
+    def attempt(name, fn):
+        try:
+            return fn()
+        except Exception as exc:
+            print(f"WARN|backtest_signal|{name}|{type(exc).__name__}", file=sys.stderr, flush=True)
+            return None
+
+    patterns = attempt("chart_patterns", lambda: scraper.detect_chart_patterns(hist, price or 0))
+    if patterns is not None:
+        out["chart_patterns"], out["key_levels"] = patterns
+
+    price_action = attempt("price_action", lambda: scraper.analyze_price_action(hist, price or 0))
+    if price_action is not None:
+        out["price_action"] = price_action
+
+    institutional = attempt("institutional", lambda: scraper.analyze_institutional(hist))
+    if institutional is not None:
+        out["institutional"] = institutional
+
+    if price_action is not None and institutional is not None:
+        regime = attempt("market_regime",
+                         lambda: scraper.classify_market_regime(hist, price_action, institutional))
+        if regime is not None:
+            out["market_regime"] = regime
+
+    return out
+
+
 def build_ai_prompt(snapshot):
     return "\n".join([
         f"You are performing a historical stock analysis as if today were {snapshot['as_of']}.",
@@ -397,6 +454,7 @@ def main():
 
     progress(48, "Calculating signals using pre-cutoff bars only")
     technical = technical_snapshot(before)
+    signals = derived_signals(before, (technical.get("metrics") or {}).get("price"))
     # Both of these MUST be adjusted: a post-cutoff split in a raw frame would report a
     # 10:1 splitter's realized return as roughly -90% and raise nothing.
     stock_outcome = forward_outcomes(adjusted, as_of)
@@ -432,6 +490,7 @@ def main():
         # a wrong P/E gets computed with confidence. Task 14 needs another source.
         "split_adjusted_close": split_adj_close_at_cutoff,
         "technical": technical,
+        **signals,
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
@@ -439,6 +498,9 @@ def main():
             # every downstream number stays plausible and nothing raises.
             "adjusted_price_basis": bool(stock_adjusted_ok),
             "benchmark_adjusted_price_basis": bool(spy_adjusted_ok),
+            "chart_patterns": "chart_patterns" in signals,
+            "price_action": "price_action" in signals,
+            "market_regime": "market_regime" in signals,
             "historical_news": False, "historical_options_flow": False,
             "historical_analyst_estimates": False, "historical_index_membership": False,
         },

@@ -167,6 +167,51 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertAlmostEqual(adj["returns"]["1m"], 95.0 / 90.0 - 1, places=6)
         self.assertGreater(adj["returns"]["1m"], 0.0)
 
+    @staticmethod
+    def _wavy_frame(periods=260, start="2023-01-02", base=100.0, rise=100.0, wave=5.0):
+        """A rising tape with real swings.
+
+        A straight line has no interior local maximum, so find_swings returns nothing
+        and analyze_price_action reports RANGE no matter how hard the line climbs. The
+        sine term is what makes the fixture express a trend the swing engines can see.
+        """
+        index = pd.date_range(start, periods=periods, freq="B")
+        close = base + np.linspace(0.0, rise, periods) + wave * np.sin(np.arange(periods) / 6.0)
+        return pd.DataFrame({"open": close - 0.4, "high": close + 1.0, "low": close - 1.0,
+                             "close": close, "volume": 1_000_000}, index=index)
+
+    def test_scraper_frame_renames_columns_for_the_analyzer_engines(self):
+        frame = self._wavy_frame(periods=5)
+        out = backtester.scraper_frame(frame)
+        for column in ("Open", "High", "Low", "Close", "Volume"):
+            self.assertIn(column, out.columns)
+        self.assertNotIn("close", out.columns)
+        # the caller's frame is untouched
+        self.assertIn("close", frame.columns)
+
+    def test_derived_signals_produce_the_four_analyzer_blocks(self):
+        frame = self._wavy_frame()
+        signals = backtester.derived_signals(frame, float(frame["close"].iloc[-1]))
+
+        self.assertIn("chart_patterns", signals)
+        self.assertIn("key_levels", signals)
+        self.assertEqual(signals["price_action"]["trend"], "UPTREND")
+        self.assertIn("TRENDING", signals["market_regime"]["label"])
+        self.assertIn("net_bias", signals["institutional"])
+        # The blocks land in the snapshot, which is serialized with allow_nan=False.
+        json.dumps(signals, allow_nan=False)
+
+    def test_derived_signals_degrade_one_engine_without_losing_the_others(self):
+        # No volume column: the two volume-reading engines must fail alone rather than
+        # take the run, or the two that only need price, down with them.
+        frame = self._wavy_frame().drop(columns=["volume"])
+        signals = backtester.derived_signals(frame, float(frame["close"].iloc[-1]))
+
+        self.assertNotIn("chart_patterns", signals)
+        self.assertNotIn("institutional", signals)
+        self.assertNotIn("market_regime", signals)
+        self.assertEqual(signals["price_action"]["trend"], "UPTREND")
+
 
 if __name__ == "__main__":
     unittest.main()
