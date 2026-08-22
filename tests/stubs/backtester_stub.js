@@ -9,13 +9,13 @@ process.stdin.on("end", () => {
   const snapshot = {
     ticker: "AAA", company_name: "Stub Industries", as_of: job.as_of,
     effective_market_date: job.as_of,
-    price_basis: "Split- and dividend-adjusted daily OHLCV; as_reported_close is the " +
-      "unadjusted close and is the correct basis for any per-share valuation",
-    as_reported_close: 1000,
+    price_basis: "Split- and dividend-adjusted daily OHLCV. NOTE: prices are stated " +
+      "on the CURRENT share basis, so a split after this date has already been applied.",
+    split_adjusted_close: 101,
     technical: { metrics: { price: 100, rsi14: 55.5 }, scores: { uptrend: 71 } },
     sec_facts: {}, filings_known_by_cutoff: [],
-    // Deliberately 100 vs 1000: the stub models a 10:1 split so that anything reading
-    // the wrong basis produces an obviously wrong number rather than a plausible one.
+    // 101 vs 100: the two bases differ by dividends only, which is all Yahoo's
+    // close/adjclose actually captures. Splits are already applied to both.
     availability: { market_history: true, adjusted_price_basis: true,
       benchmark_adjusted_price_basis: true, historical_news: false },
     data_sources: { market_history: "stub" }

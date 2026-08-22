@@ -388,8 +388,8 @@ def main():
         print(f"WARN|backtest_basis|mixed|{ticker}={stock_adjusted_ok}|SPY={spy_adjusted_ok}",
               file=sys.stderr, flush=True)
     # As-reported price at the cutoff, for anything compared against XBRL per-share figures.
-    raw_close_col = _column(raw_before, "close")
-    raw_close_at_cutoff = finite(raw_before[raw_close_col].iloc[-1]) if raw_close_col is not None and not raw_before.empty else None
+    split_adj_close_col = _column(raw_before, "close")
+    split_adj_close_at_cutoff = finite(raw_before[split_adj_close_col].iloc[-1]) if split_adj_close_col is not None and not raw_before.empty else None
 
     progress(48, "Calculating signals using pre-cutoff bars only")
     technical = technical_snapshot(before)
@@ -412,17 +412,21 @@ def main():
         # into ai_prompt, which is the one place a wrong claim becomes user-visible
         # prose rather than a number someone can sanity-check.
         "price_basis": (
-            "Split- and dividend-adjusted daily OHLCV; as_reported_close is the "
-            "unadjusted close and is the correct basis for any per-share valuation"
+            "Split- and dividend-adjusted daily OHLCV. NOTE: prices are stated on the "
+            "CURRENT share basis, so a split after this date has already been applied "
+            "and these levels may never have traded. Do not compute a per-share ratio "
+            "against as-reported filing figures."
             if stock_adjusted_ok else
-            "As-reported (UNADJUSTED) daily OHLCV — the adjusted basis was unavailable, "
-            "so levels and returns spanning a split or dividend may be wrong"
+            "Split-adjusted, NOT dividend-adjusted daily OHLCV — the dividend-adjusted "
+            "basis was unavailable, so returns spanning a dividend may be understated."
         ),
-        # The price that actually printed at the cutoff. technical.metrics.price is on
-        # the adjusted basis and can be a level that never traded (NVDA reads ~$83 for
-        # 2024-05-01, when it traded ~$830), so an as-reported EPS must be divided by
-        # THIS, never by that. Pre-cutoff data: emitting it does not touch the seal.
-        "as_reported_close": raw_close_at_cutoff,
+        # Measured, not assumed: Yahoo's `close` is ALREADY split-adjusted, so
+        # close/adjclose captures dividends only. Verified live — NVDA 2024-05-01
+        # returns 83.04 here against a real traded close of ~830, i.e. the June-2024
+        # 10:1 split is baked into both columns. There is therefore NO as-reported
+        # price available from this source; naming this field as if there were is how
+        # a wrong P/E gets computed with confidence. Task 14 needs another source.
+        "split_adjusted_close": split_adj_close_at_cutoff,
         "technical": technical,
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
