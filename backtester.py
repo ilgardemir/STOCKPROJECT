@@ -274,9 +274,23 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
 # discrete quarter and the year-to-date period), so 8 stops one row short of the
 # prior-year comparative the year-to-date roll forward in ttm_value needs.
 def fact_series(companyfacts, concepts, unit, as_of, limit=10):
+    """
+    The most recent rows for the best-tagged of `concepts`, as known at the cutoff.
+
+    "Best" is the concept carrying the FRESHEST data, not the first that carries any.
+    Filers migrate XBRL tags mid-life and leave the retired one populated: NVDA stopped
+    tagging RevenueFromContractWithCustomerExcludingAssessedTax after FY2022 and moved
+    to Revenues, so first-match froze revenue at FY2022 while gross profit tracked
+    FY2024 -- a 165% gross margin from two different fiscal years. Concept order is
+    still the tie-break, so the preferred tag wins whenever both are up to date.
+    """
     cutoff = as_of.isoformat()
-    for concept in concepts:
-        fact = ((companyfacts or {}).get("facts") or {}).get("us-gaap", {}).get(concept)
+    best = None
+    for rank, concept in enumerate(concepts):
+        # dei as well as us-gaap: EntityCommonStockSharesOutstanding lives in dei, so
+        # a us-gaap-only lookup made that fallback permanently unreachable.
+        taxonomies = (companyfacts or {}).get("facts") or {}
+        fact = (taxonomies.get("us-gaap") or {}).get(concept) or (taxonomies.get("dei") or {}).get(concept)
         units = (fact or {}).get("units") or {}
         # Record the unit actually read, not the one asked for. Falling back to an
         # arbitrary unit while still stamping the requested one renders a CAD filer
@@ -302,8 +316,11 @@ def fact_series(companyfacts, concepts, unit, as_of, limit=10):
             key = (row["period_start"], row["period_end"])
             latest_by_period.setdefault(key, row)
         series = sorted(latest_by_period.values(), key=lambda row: (row["period_end"], row["filed"]), reverse=True)[:limit]
-        return {"concept": concept, "label": fact.get("label") or concept, "series": series}
-    return None
+        key = (series[0]["period_end"], -rank)
+        if best is None or key > best[0]:
+            best = (key, {"concept": concept, "label": fact.get("label") or concept,
+                          "series": series})
+    return best[1] if best else None
 
 
 def _parse_day(value):
@@ -421,6 +438,26 @@ def point_in_time_facts(companyfacts, as_of):
             if (result := fact_series(companyfacts, concepts, unit, as_of)) is not None}
 
 
+_SUBMISSIONS_CACHE = {}
+
+
+def sec_submissions(cik):
+    """
+    SEC's submissions document for a CIK, fetched at most once per process.
+
+    Both the filing list and the point-in-time company name read it. Fetching twice
+    would double this engine's SEC pressure for one document that cannot change
+    between the two reads.
+    """
+    if not cik:
+        return None
+    if cik not in _SUBMISSIONS_CACHE:
+        _SUBMISSIONS_CACHE[cik] = scraper._sec_get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json", "backtest_submissions",
+            timeout=10, as_json=True)
+    return _SUBMISSIONS_CACHE[cik]
+
+
 def entity_name_at(submissions, when):
     """
     The registrant's name on `when`, from SEC's dated `formerNames` records, or None.
@@ -450,9 +487,7 @@ def entity_name_at(submissions, when):
 def point_in_time_filings(cik, as_of, limit=10):
     if not cik:
         return []
-    payload = scraper._sec_get(
-        f"https://data.sec.gov/submissions/CIK{cik}.json", "backtest_submissions", timeout=10, as_json=True
-    )
+    payload = sec_submissions(cik)
     recent = ((payload or {}).get("filings") or {}).get("recent") or {}
     fields = ["form", "filingDate", "reportDate", "accessionNumber", "primaryDocument"]
     size = min((len(recent.get(field) or []) for field in fields), default=0)
@@ -482,19 +517,23 @@ def point_in_time_filings(cik, as_of, limit=10):
     return rows
 
 
-def company_identity(ticker, companyfacts, filings=None):
+def company_identity(ticker, companyfacts, filings=None, submissions=None, as_of=None):
     """
     The company's name AS OF the cutoff.
 
     companyfacts["entityName"] is today's name, so a company renamed after the cutoff
     (Facebook to Meta) would stamp a post-cutoff fact onto a frozen snapshot. Prefer a
-    name carried on a filing known by the cutoff; fall back to the ticker rather than
-    to a name we know is anachronistic. `companyfacts` stays in the signature because
-    callers pass it and because dropping the argument would silently change every
-    call site's meaning rather than failing loudly.
+    name carried on a filing known by the cutoff, then SEC's dated formerNames records
+    directly -- `filings` comes from the submissions `recent` list, which only reaches
+    back so far, and is empty for any cutoff older than that window. Fall back to the
+    ticker rather than to a name we know is anachronistic.
     """
     for filing in filings or []:
         name = filing.get("entity_name")
+        if name:
+            return name
+    if submissions is not None and as_of is not None:
+        name = entity_name_at(submissions, as_of.isoformat() if hasattr(as_of, "isoformat") else as_of)
         if name:
             return name
     for row in scraper._load_sec_tickers():
@@ -660,6 +699,112 @@ def price_history_rows(before, limit=252):
     return rows
 
 
+# Every price-derived ratio below is divided by whatever cumulative split factor lands
+# between the cutoff and today, because the only price this pipeline has is stated on
+# today's share basis (see adjusted_frame). That factor is post-cutoff information by
+# construction -- a split that has not happened yet leaves no trace in pre-cutoff data --
+# so it cannot be recovered without breaking the seal, and it is not guessed at here.
+# The caveat travels inside the block so it cannot be separated from the numbers.
+BASIS_CAVEAT = (
+    "UNRELIABLE IN LEVEL. pe, ps, pb, ev_ebitda, fcf_yield, market_cap and "
+    "enterprise_value are computed from a split-adjusted price stated on TODAY's share "
+    "basis against as-reported filing figures stated on the cutoff's basis. A stock "
+    "split between this date and today divides every one of them by the split ratio, so "
+    "a later 10:1 split makes them read ten times too cheap. Whether such a split "
+    "happened is not knowable from data dated on or before the cutoff, so this is not "
+    "corrected. Do not compare these levels against remembered multiples or call the "
+    "stock cheap on them. The margins, returns and ratios in `fundamentals` use no "
+    "price at all and are exact."
+)
+PRICE_BASIS_NOTE = (
+    "Split-adjusted close at the cutoff, on the current share basis. This pipeline has "
+    "no as-reported close: the unadjusted column from the price source is itself already "
+    "split-adjusted."
+)
+
+
+def valuation_block(facts, split_adjusted_price):
+    """
+    Multiples and margins as they stood at the cutoff.
+
+    Two halves with very different standing. `fundamentals` is built from filing figures
+    alone -- margins, ROE, leverage, liquidity -- and is exactly right, so it is emitted
+    whether or not a price exists. `valuation` needs a price, and the only price
+    available is on the wrong share basis (see BASIS_CAVEAT), so it ships with the
+    caveat attached rather than as a bare number the model would read as fact.
+    """
+    ttm = {name: ttm_value(facts.get(name)) for name in
+           ("revenue", "net_income", "operating_income", "operating_cash_flow",
+            "diluted_eps", "gross_profit", "cost_of_revenue", "depreciation", "capex")}
+    instant = {name: point_in_time_value(facts.get(name)) for name in
+               ("equity", "assets", "liabilities", "cash", "shares_outstanding",
+                "current_assets", "current_liabilities", "long_term_debt", "short_term_debt")}
+
+    def flow(name):
+        return (ttm.get(name) or {}).get("value")
+
+    def level(name):
+        return (instant.get(name) or {}).get("value")
+
+    def ratio(numerator, denominator):
+        return finite(numerator / denominator) if numerator is not None and denominator else None
+
+    revenue, net_income, eps = flow("revenue"), flow("net_income"), flow("diluted_eps")
+    equity, cash = level("equity"), level("cash")
+    # Plenty of filers never tag GrossProfit, so fall back to the subtraction they did tag.
+    gross_profit = flow("gross_profit")
+    if gross_profit is None and revenue is not None and flow("cost_of_revenue") is not None:
+        gross_profit = revenue - flow("cost_of_revenue")
+    debt_parts = [v for v in (level("long_term_debt"), level("short_term_debt")) if v is not None]
+    debt = sum(debt_parts) if debt_parts else None
+    ebitda = None
+    if flow("operating_income") is not None and flow("depreciation") is not None:
+        ebitda = flow("operating_income") + flow("depreciation")
+    fcf = None
+    if flow("operating_cash_flow") is not None and flow("capex") is not None:
+        fcf = flow("operating_cash_flow") - flow("capex")
+
+    fundamentals = {
+        "gross_margin": ratio(gross_profit, revenue),
+        "operating_margin": ratio(flow("operating_income"), revenue),
+        "net_margin": ratio(net_income, revenue),
+        "roe": ratio(net_income, equity),
+        "current_ratio": ratio(level("current_assets"), level("current_liabilities")),
+        "debt_to_equity": ratio(debt, equity),
+        "free_cash_flow_ttm": finite(fcf),
+        "ttm_basis": (ttm.get("revenue") or {}).get("basis"),
+        "ttm_period_end": (ttm.get("revenue") or {}).get("period_end"),
+    }
+
+    valuation = {}
+    price = finite(split_adjusted_price)
+    if price and price > 0:
+        shares = level("shares_outstanding")
+        market_cap = price * shares if shares else None
+        enterprise = market_cap + (debt or 0) - (cash or 0) if market_cap else None
+        valuation = {k: v for k, v in {
+            "pe": ratio(price, eps),
+            "ps": ratio(market_cap, revenue),
+            "pb": ratio(market_cap, equity),
+            "ev_ebitda": ratio(enterprise, ebitda),
+            "fcf_yield": ratio(fcf, market_cap),
+            "market_cap": finite(market_cap),
+            "enterprise_value": finite(enterprise),
+            "ttm_basis": (ttm.get("revenue") or {}).get("basis"),
+        }.items() if v is not None}
+        if valuation:
+            valuation["price_basis"] = PRICE_BASIS_NOTE
+            valuation["per_share_ratios_reliable"] = False
+            valuation["basis_caveat"] = BASIS_CAVEAT
+
+    fundamentals = {k: v for k, v in fundamentals.items() if v is not None}
+    # ttm_basis/ttm_period_end only describe other numbers; alone they are not a block.
+    if not any(key not in ("ttm_basis", "ttm_period_end") for key in fundamentals):
+        fundamentals = {}
+    return {name: block for name, block in
+            (("valuation", valuation), ("fundamentals", fundamentals)) if block}
+
+
 # Blocks the model reasons from. price_history is deliberately absent: 252 bars of raw
 # OHLCV would bury the analysis in numbers the derived blocks already summarise, and the
 # bars exist for the chart. Anything not named here never reaches the model.
@@ -731,9 +876,14 @@ def main():
     companyfacts = scraper.get_company_facts(cik) if cik else None
     facts = point_in_time_facts(companyfacts, as_of) if companyfacts else {}
     filings = point_in_time_filings(cik, as_of) if cik else []
+    # Priced off the only close this pipeline has. valuation_block states plainly what
+    # that basis is and does not pretend the per-share ratios are trustworthy in level.
+    derived = valuation_block(facts, split_adj_close_at_cutoff)
     effective = before.index[-1].date().isoformat()
     snapshot = {
-        "ticker": ticker, "company_name": company_identity(ticker, companyfacts, filings),
+        "ticker": ticker,
+        "company_name": company_identity(ticker, companyfacts, filings,
+                                         submissions=sec_submissions(cik), as_of=as_of),
         "as_of": as_of.isoformat(), "effective_market_date": effective,
         # Describes what was actually done, not what was intended. Claiming an
         # adjusted basis while silently serving raw bars would put a false statement
@@ -753,11 +903,13 @@ def main():
         # returns 83.04 here against a real traded close of ~830, i.e. the June-2024
         # 10:1 split is baked into both columns. There is therefore NO as-reported
         # price available from this source; naming this field as if there were is how
-        # a wrong P/E gets computed with confidence. Task 14 needs another source.
+        # a wrong P/E gets computed with confidence. valuation_block prices off this
+        # and says so; there is no other source that does not break the seal.
         "split_adjusted_close": split_adj_close_at_cutoff,
         "technical": technical,
         **signals,
         "relative": relative,
+        **derived,
         "price_history": price_history_rows(before),
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
@@ -770,6 +922,12 @@ def main():
             "price_action": "price_action" in signals,
             "market_regime": "market_regime" in signals,
             "relative": bool(relative),
+            "valuation": "valuation" in derived,
+            "fundamentals": "fundamentals" in derived,
+            # Not a data-availability question but a correctness one, and the two read
+            # the same way to anything consuming this block: there is no price basis on
+            # which the per-share multiples are trustworthy in level. See BASIS_CAVEAT.
+            "as_reported_price_basis": False,
             "historical_news": False, "historical_options_flow": False,
             "historical_analyst_estimates": False, "historical_index_membership": False,
         },

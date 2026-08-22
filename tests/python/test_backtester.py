@@ -14,6 +14,11 @@ import backtester
 
 
 class HistoricalAnalyzerTests(unittest.TestCase):
+    def setUp(self):
+        # The submissions fetch is memoized per process so two callers cost one
+        # request; tests must not inherit each other's entry.
+        backtester._SUBMISSIONS_CACHE.clear()
+
     def test_forward_outcomes_enter_after_the_cutoff(self):
         index = pd.date_range("2024-01-01", periods=150, freq="B")
         close = np.arange(100.0, 250.0)
@@ -56,6 +61,77 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         # than reached over the network; the production fall-through order is unchanged.
         with mock.patch.object(backtester.scraper, "_load_sec_tickers", return_value=[]):
             self.assertEqual(backtester.company_identity("AAA", {"entityName": "Renamed"}, filings=[]), "AAA")
+
+    def test_fact_series_prefers_the_concept_carrying_the_freshest_data(self):
+        """
+        Filers migrate XBRL tags mid-life and leave the retired one populated with
+        stale rows. Taking the first concept with ANY eligible data froze NVDA's
+        revenue at FY2022 while its gross profit tracked FY2024 -- measured on live
+        SEC data, a 165% gross margin and a 111% net margin, computed with total
+        confidence from two different fiscal years.
+        """
+        payload = {"facts": {"us-gaap": {
+            "Retired": {"label": "Retired", "units": {"USD": [
+                {"val": 10, "start": "2021-01-01", "end": "2021-12-31",
+                 "filed": "2022-02-01", "form": "10-K"}]}},
+            "Current": {"label": "Current", "units": {"USD": [
+                {"val": 40, "start": "2022-01-01", "end": "2022-12-31",
+                 "filed": "2023-02-01", "form": "10-K"}]}},
+        }}}
+        fact = backtester.fact_series(payload, ["Retired", "Current"], "USD", date(2023, 3, 15))
+        self.assertEqual(fact["concept"], "Current")
+        self.assertEqual(fact["series"][0]["value"], 40)
+
+    def test_fact_series_keeps_concept_order_when_both_are_equally_fresh(self):
+        # Freshness decides; the caller's ordering is still the tie-break, so the
+        # preferred (usually more precise) tag wins when both are up to date.
+        rows = [{"val": 1, "start": "2022-01-01", "end": "2022-12-31",
+                 "filed": "2023-02-01", "form": "10-K"}]
+        payload = {"facts": {"us-gaap": {
+            "Preferred": {"label": "Preferred", "units": {"USD": list(rows)}},
+            "Fallback": {"label": "Fallback", "units": {"USD": list(rows)}},
+        }}}
+        fact = backtester.fact_series(payload, ["Preferred", "Fallback"], "USD", date(2023, 3, 15))
+        self.assertEqual(fact["concept"], "Preferred")
+
+    def test_fact_series_finds_concepts_in_the_dei_taxonomy(self):
+        # EntityCommonStockSharesOutstanding is a dei concept, not a us-gaap one, so
+        # the shares_outstanding fallback could never match: a filer that tags only
+        # dei got no share count, and with it no market cap, P/S, P/B, EV/EBITDA or
+        # FCF yield -- silently, with the fallback sitting right there in FACTS.
+        payload = {"facts": {"dei": {"EntityCommonStockSharesOutstanding": {
+            "label": "Shares", "units": {"shares": [
+                {"val": 50, "end": "2022-12-31", "filed": "2023-02-01", "form": "10-K"}]}}}}}
+        fact = backtester.fact_series(payload, ["CommonStockSharesOutstanding",
+                                               "EntityCommonStockSharesOutstanding"],
+                                      "shares", date(2023, 3, 15))
+        self.assertEqual(fact["series"][0]["value"], 50)
+
+    def test_company_identity_reads_former_names_when_no_filing_survives(self):
+        """
+        SEC's `recent` filing list only reaches back so far. Measured live: for META
+        at 2019-02-01 every row in it postdates the cutoff, so `filings` is empty,
+        the filing-stamped name never gets a chance, and the fall-through returns
+        today's "Meta Platforms, Inc." -- the exact leak Task 12 exists to stop.
+        """
+        submissions = {"name": "Meta Platforms, Inc.", "formerNames": [
+            {"name": "Facebook Inc", "from": "2012-01-30T00:00:00.000Z",
+             "to": "2021-10-28T00:00:00.000Z"}]}
+        with mock.patch.object(backtester.scraper, "_load_sec_tickers",
+                               return_value=[{"ticker": "META", "title": "Meta Platforms, Inc."}]):
+            name = backtester.company_identity(
+                "META", {"entityName": "Meta Platforms, Inc."}, filings=[],
+                submissions=submissions, as_of=date(2019, 2, 1))
+        self.assertEqual(name, "Facebook Inc")
+
+    def test_submissions_are_fetched_once_for_both_readers(self):
+        # Filings and the name both need this document. Two fetches would double the
+        # per-run SEC pressure for one document that has not changed in between.
+        with mock.patch.object(backtester.scraper, "_sec_get",
+                               return_value={"name": "X"}) as fetch:
+            backtester.sec_submissions("0000000001")
+            backtester.point_in_time_filings("0000000001", date(2020, 1, 1))
+        self.assertEqual(fetch.call_count, 1)
 
     def test_entity_name_at_reads_the_dated_former_name_records(self):
         submissions = {"name": "Meta Platforms, Inc.", "formerNames": [
@@ -161,6 +237,97 @@ class HistoricalAnalyzerTests(unittest.TestCase):
                          {"value": 500.0, "period_end": "2022-12-31"})
         self.assertIsNone(backtester.point_in_time_value(None))
         self.assertIsNone(backtester.point_in_time_value(self._fact([])))
+
+    @staticmethod
+    def _flow_fact(value, end, start):
+        return {"concept": "X", "series": [
+            {"value": value, "period_start": start, "period_end": end,
+             "filed": end, "form": "10-K"}]}
+
+    @staticmethod
+    def _instant_fact(value, end):
+        return {"concept": "X", "series": [
+            {"value": value, "period_end": end, "filed": end, "form": "10-K"}]}
+
+    def _valuation_facts(self):
+        return {
+            "revenue": self._flow_fact(1000.0, "2022-12-31", "2022-01-01"),
+            "net_income": self._flow_fact(100.0, "2022-12-31", "2022-01-01"),
+            "diluted_eps": self._flow_fact(2.0, "2022-12-31", "2022-01-01"),
+            "equity": self._instant_fact(500.0, "2022-12-31"),
+            "shares_outstanding": self._instant_fact(50.0, "2022-12-31"),
+        }
+
+    def test_valuation_prices_off_the_split_adjusted_close(self):
+        block = backtester.valuation_block(self._valuation_facts(), split_adjusted_price=40.0)
+
+        self.assertAlmostEqual(block["valuation"]["pe"], 20.0)          # 40 / 2
+        self.assertAlmostEqual(block["valuation"]["ps"], 2.0)           # 40*50 / 1000
+        self.assertAlmostEqual(block["valuation"]["pb"], 4.0)           # 40*50 / 500
+        self.assertAlmostEqual(block["fundamentals"]["net_margin"], 0.1)
+        self.assertEqual(block["valuation"]["ttm_basis"], "annual")
+
+    def test_valuation_never_claims_a_price_basis_it_does_not_have(self):
+        """
+        The plan asserted price_basis == "as-reported close at the cutoff". No such
+        price exists anywhere in this pipeline: Yahoo's unadjusted close is already
+        split-adjusted, so every price-derived ratio here is divided by whatever
+        split factor lands between the cutoff and today. Shipping the plan's string
+        would have put that claim into the AI prompt as prose.
+        """
+        block = backtester.valuation_block(self._valuation_facts(), split_adjusted_price=40.0)
+        valuation = block["valuation"]
+
+        self.assertNotIn("as-reported close at the cutoff", valuation["price_basis"])
+        self.assertIn("no as-reported close", valuation["price_basis"])
+        # Machine-readable, not only prose: a reader that never parses English still
+        # learns the level is untrustworthy.
+        self.assertFalse(valuation["per_share_ratios_reliable"])
+        self.assertIn("split", valuation["basis_caveat"].lower())
+        # The caveat has to name the fields it applies to, or it is decoration.
+        for key in ("pe", "ps", "pb", "market_cap"):
+            self.assertIn(key, valuation["basis_caveat"])
+
+    def test_fundamentals_survive_a_missing_price(self):
+        # Margins, ROE and leverage need no price at all, so they are the one part of
+        # this block that is exactly right. Dropping them with the valuation, as the
+        # plan's early return did, throws away the only trustworthy half.
+        facts = self._valuation_facts()
+        block = backtester.valuation_block(facts, split_adjusted_price=None)
+
+        self.assertNotIn("valuation", block)
+        self.assertAlmostEqual(block["fundamentals"]["net_margin"], 0.1)
+        self.assertAlmostEqual(block["fundamentals"]["roe"], 0.2)
+
+    def test_valuation_is_omitted_without_a_price(self):
+        self.assertEqual(backtester.valuation_block({"revenue": None}, split_adjusted_price=None), {})
+
+    def test_gross_margin_falls_back_to_revenue_less_cost_of_revenue(self):
+        # Plenty of filers never tag GrossProfit. Without this the concept is fetched,
+        # shipped in the prompt, and used by nothing.
+        facts = self._valuation_facts()
+        facts["cost_of_revenue"] = self._flow_fact(600.0, "2022-12-31", "2022-01-01")
+        block = backtester.valuation_block(facts, split_adjusted_price=40.0)
+        self.assertAlmostEqual(block["fundamentals"]["gross_margin"], 0.4)
+
+    def test_valuation_block_serializes_under_the_payload_rules(self):
+        facts = self._valuation_facts()
+        facts["equity"] = self._instant_fact(0.0, "2022-12-31")   # roe and pb divide by zero
+        block = backtester.valuation_block(facts, split_adjusted_price=40.0)
+        self.assertNotIn("pb", block["valuation"])
+        self.assertNotIn("roe", block["fundamentals"])
+        json.dumps(block, allow_nan=False)
+
+    def test_prompt_blocks_carry_the_derived_valuation_to_the_model(self):
+        # PROMPT_BLOCKS is an allowlist: a snapshot key absent from it silently never
+        # reaches the model, with nothing anywhere to say so.
+        prompt = backtester.build_ai_prompt({
+            "ticker": "AAA", "as_of": "2023-03-15",
+            "valuation": {"pe": 20.0}, "fundamentals": {"net_margin": 0.1},
+        })
+        self.assertIn('"valuation"', prompt)
+        self.assertIn('"fundamentals"', prompt)
+        self.assertIn("20.0", prompt)
 
     def test_ai_prompt_excludes_realized_outcomes_and_raw_bars(self):
         snapshot = {
