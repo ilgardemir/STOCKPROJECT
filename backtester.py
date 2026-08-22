@@ -267,7 +267,11 @@ def fact_series(companyfacts, concepts, unit, as_of, limit=5):
     for concept in concepts:
         fact = ((companyfacts or {}).get("facts") or {}).get("us-gaap", {}).get(concept)
         units = (fact or {}).get("units") or {}
-        rows = units.get(unit) or (next(iter(units.values())) if units else [])
+        # Record the unit actually read, not the one asked for. Falling back to an
+        # arbitrary unit while still stamping the requested one renders a CAD filer
+        # with a dollar sign and hands the model a currency error it cannot see.
+        used_unit = unit if unit in units else (next(iter(units)) if units else None)
+        rows = units.get(used_unit) or []
         eligible = []
         for row in rows:
             if row.get("form") not in FORMS or not row.get("filed") or not row.get("end"):
@@ -275,7 +279,7 @@ def fact_series(companyfacts, concepts, unit, as_of, limit=5):
             if row["filed"] > cutoff or row["end"] > cutoff or finite(row.get("val")) is None:
                 continue
             eligible.append({
-                "value": finite(row["val"]), "unit": unit, "period_end": row["end"],
+                "value": finite(row["val"]), "unit": used_unit, "period_end": row["end"],
                 "period_start": row.get("start"), "filed": row["filed"],
                 "form": row.get("form"), "fiscal_year": row.get("fy"), "fiscal_period": row.get("fp"),
             })
@@ -294,6 +298,32 @@ def fact_series(companyfacts, concepts, unit, as_of, limit=5):
 def point_in_time_facts(companyfacts, as_of):
     return {name: result for name, (concepts, unit) in FACTS.items()
             if (result := fact_series(companyfacts, concepts, unit, as_of)) is not None}
+
+
+def entity_name_at(submissions, when):
+    """
+    The registrant's name on `when`, from SEC's dated `formerNames` records, or None.
+
+    This is the only genuinely historical name source available: `entityName` in
+    companyfacts and `title` in the ticker directory are both today's name, so a
+    company renamed after the cutoff (Facebook to Meta) would stamp a post-cutoff
+    fact onto a frozen snapshot. Returns None rather than guessing when the date
+    predates every record SEC holds.
+    """
+    stamp = str(when)[:10]
+    formers = [f for f in ((submissions or {}).get("formerNames") or []) if f.get("name")]
+    latest_close = ""
+    for former in formers:
+        start, end = str(former.get("from") or "")[:10], str(former.get("to") or "")[:10]
+        if (not start or start <= stamp) and (not end or stamp <= end):
+            return former["name"]
+        latest_close = max(latest_close, end)
+    current = (submissions or {}).get("name") or None
+    # Past the last former-name window (or never renamed) the current name IS the
+    # point-in-time name. Before the first one, we have no dated evidence at all.
+    if current and (not formers or stamp > latest_close):
+        return current
+    return None
 
 
 def point_in_time_filings(cik, as_of, limit=10):
@@ -322,16 +352,30 @@ def point_in_time_filings(cik, as_of, limit=10):
             "report_date": recent["reportDate"][index],
             "accession_number": recent["accessionNumber"][index],
             "primary_document": recent["primaryDocument"][index],
+            # The name the registrant filed under, so company_identity has dated
+            # evidence to read instead of today's entityName.
+            "entity_name": entity_name_at(payload, filed),
         })
         if len(rows) >= limit:
             break
     return rows
 
 
-def company_identity(ticker, companyfacts):
-    name = (companyfacts or {}).get("entityName")
-    if name:
-        return name
+def company_identity(ticker, companyfacts, filings=None):
+    """
+    The company's name AS OF the cutoff.
+
+    companyfacts["entityName"] is today's name, so a company renamed after the cutoff
+    (Facebook to Meta) would stamp a post-cutoff fact onto a frozen snapshot. Prefer a
+    name carried on a filing known by the cutoff; fall back to the ticker rather than
+    to a name we know is anachronistic. `companyfacts` stays in the signature because
+    callers pass it and because dropping the argument would silently change every
+    call site's meaning rather than failing loudly.
+    """
+    for filing in filings or []:
+        name = filing.get("entity_name")
+        if name:
+            return name
     for row in scraper._load_sec_tickers():
         if str(row.get("ticker", "")).upper().replace(".", "-") == ticker:
             return row.get("title") or ticker
@@ -568,7 +612,7 @@ def main():
     filings = point_in_time_filings(cik, as_of) if cik else []
     effective = before.index[-1].date().isoformat()
     snapshot = {
-        "ticker": ticker, "company_name": company_identity(ticker, companyfacts),
+        "ticker": ticker, "company_name": company_identity(ticker, companyfacts, filings),
         "as_of": as_of.isoformat(), "effective_market_date": effective,
         # Describes what was actually done, not what was intended. Claiming an
         # adjusted basis while silently serving raw bars would put a false statement
@@ -608,7 +652,9 @@ def main():
             "historical_news": False, "historical_options_flow": False,
             "historical_analyst_estimates": False, "historical_index_membership": False,
         },
-        "data_sources": {"market_history": "Yahoo Finance via yahooquery", "filings": "SEC EDGAR" if cik else "Unavailable"},
+        "data_sources": {"market_history": "Yahoo Finance via yahooquery",
+                         "filings": "SEC EDGAR" if cik else "Unavailable",
+                         "company_name": "Best available at the cutoff; SEC name records are not fully historical"},
     }
     benchmark_returns = benchmark_outcome.get("returns") or {}
     stock_returns = stock_outcome.get("returns") or {}

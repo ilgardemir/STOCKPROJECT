@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import date
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,59 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         fact = backtester.fact_series(payload, ["Assets"], "USD", date(2023, 3, 15))
         self.assertEqual(fact["series"][0]["value"], 100)
         self.assertEqual(fact["series"][0]["filed"], "2023-02-01")
+
+    def test_fact_series_records_the_unit_it_actually_used(self):
+        payload = {"facts": {"us-gaap": {"Revenues": {"label": "Revenues", "units": {"CAD": [
+            {"val": 500, "end": "2022-12-31", "filed": "2023-02-01", "form": "10-K"},
+        ]}}}}}
+        fact = backtester.fact_series(payload, ["Revenues"], "USD", date(2023, 3, 15))
+        # The requested unit was USD but only CAD exists; the row must not claim USD.
+        self.assertEqual(fact["series"][0]["unit"], "CAD")
+
+    def test_company_identity_does_not_stamp_a_post_cutoff_rename(self):
+        # entityName is today's name. A snapshot dated before a rename must not carry it.
+        name = backtester.company_identity("AAA", {"entityName": "Renamed Holdings"},
+                                           filings=[{"form": "10-K", "filed": "2019-02-01",
+                                                     "entity_name": "Original Corp"}])
+        self.assertEqual(name, "Original Corp")
+        # With no dated evidence, fall back to the ticker rather than the current name.
+        # The SEC ticker directory is today's data too, so it is patched out here rather
+        # than reached over the network; the production fall-through order is unchanged.
+        with mock.patch.object(backtester.scraper, "_load_sec_tickers", return_value=[]):
+            self.assertEqual(backtester.company_identity("AAA", {"entityName": "Renamed"}, filings=[]), "AAA")
+
+    def test_entity_name_at_reads_the_dated_former_name_records(self):
+        submissions = {"name": "Meta Platforms, Inc.", "formerNames": [
+            {"name": "Facebook Inc", "from": "2012-01-30T00:00:00.000Z", "to": "2021-10-28T00:00:00.000Z"},
+        ]}
+        self.assertEqual(backtester.entity_name_at(submissions, "2019-02-01"), "Facebook Inc")
+        # After the last former-name window closed, the current name is the right one.
+        self.assertEqual(backtester.entity_name_at(submissions, "2023-02-01"), "Meta Platforms, Inc.")
+        # Before any record exists there is no dated evidence, so say nothing.
+        self.assertIsNone(backtester.entity_name_at(submissions, "2010-01-01"))
+        # A filer SEC has never seen renamed carries its one name at any date.
+        self.assertEqual(backtester.entity_name_at({"name": "Apple Inc."}, "2010-01-01"), "Apple Inc.")
+
+    def test_point_in_time_filings_stamp_the_name_in_force_when_filed(self):
+        # Without this, company_identity's `filings` argument reads a key no row has
+        # ever carried: the loop falls through on every real run, forever, silently.
+        submissions = {
+            "name": "Renamed Holdings",
+            "formerNames": [{"name": "Original Corp", "from": "2000-01-01T00:00:00.000Z",
+                             "to": "2020-06-30T00:00:00.000Z"}],
+            "filings": {"recent": {
+                "form": ["10-K", "10-K"],
+                "filingDate": ["2021-02-01", "2019-02-01"],
+                "reportDate": ["2020-12-31", "2018-12-31"],
+                "accessionNumber": ["0001", "0002"],
+                "primaryDocument": ["a.htm", "b.htm"],
+            }},
+        }
+        with mock.patch.object(backtester.scraper, "_sec_get", return_value=submissions):
+            rows = backtester.point_in_time_filings("0000000001", date(2019, 6, 1))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["filed"], "2019-02-01")
+        self.assertEqual(rows[0]["entity_name"], "Original Corp")
 
     def test_ai_prompt_excludes_realized_outcomes_and_raw_bars(self):
         snapshot = {
