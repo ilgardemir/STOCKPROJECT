@@ -73,13 +73,17 @@ def adjusted_frame(frame):
     """
     Split- and dividend-adjusted OHLC derived from the adjclose/close ratio.
 
-    We request UNADJUSTED history and adjust here, rather than asking yahooquery for
-    adj_ohlc=True, because both bases are needed and they are needed for different
-    things. Adjusted drives returns and technicals — adjustment factors cancel in any
-    ratio, so returns are unaffected by post-cutoff events. RAW drives valuation,
-    because XBRL EPS and share counts are as-reported: a P/E built from a
-    post-split-adjusted price against an as-reported EPS is simply a wrong number,
-    and a split between the cutoff and today corrupts it silently.
+    We adjust here rather than asking yahooquery for adj_ohlc=True so that the
+    adjustment is ours to inspect and to report on. Adjusted drives returns and
+    technicals: the factors cancel in any ratio, so returns are unaffected by
+    post-cutoff events.
+
+    WHAT THIS DOES NOT GIVE YOU (measured, 2026-08-22): Yahoo's `close` is ALREADY
+    split-adjusted, so close/adjclose captures DIVIDENDS ONLY. NVDA at 2024-05-01
+    returns 83.04 from the unadjusted column against a real traded close of ~830 —
+    the June-2024 10:1 split is baked into both. There is therefore no as-reported
+    price anywhere in this source, and valuation against as-reported XBRL per-share
+    figures needs a different one. Do not reintroduce a field implying otherwise.
 
     Returns (frame, adjusted) so the caller can tell a real adjustment from a
     fall-through. Silence here is dangerous in a way the old code was not: with
