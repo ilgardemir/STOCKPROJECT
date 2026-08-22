@@ -21,7 +21,16 @@ const BT_SCORE_LABELS = {
 function btEsc(value) {
   return String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[char]);
 }
-function btNum(value) { const number = Number(value); return Number.isFinite(number) ? number : null; }
+function btNum(value) {
+  // Number(null) is 0 and 0 passes Number.isFinite, so a missing figure would render
+  // as a confident "0.0%" rather than an em dash — and btPct's caller would style it
+  // as a positive result. The engine sends null for a horizon that has not elapsed
+  // yet, so this is reachable from any recent cutoff. Same trap as btFinite in
+  // server.js, which was caught during Task 1 and is the reason this was looked for.
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
 function btPct(value, digits = 1) {
   const number = btNum(value);
   return number === null ? "—" : `${number > 0 ? "+" : ""}${(number * 100).toFixed(digits)}%`;
@@ -370,6 +379,40 @@ function renderBacktestDecision(data) {
     </section>`;
 }
 
+/*
+ * The scoreboard under the chart. simulateTrade computes these five figures and,
+ * until now, nothing read them — the curve showed whether the call was profitable
+ * but never said so in a number, which is the first thing anyone actually asks.
+ *
+ * Four cells rather than five: max drawdown is a qualifier on the trade, not a
+ * competitor to it, so it belongs in the caption with the exit. Only the trade's
+ * own return is tinted by direction — --up/--down mean direction and nothing else,
+ * and tinting all four would turn a comparison into a wall of colour.
+ */
+function btCurveStats(simulation, hasTrade, exitLook) {
+  const stats = (simulation && simulation.stats) || {};
+  if (!hasTrade) {
+    // A flat call is a real answer, not a missing one. Say what it cost or saved
+    // rather than rendering an empty trade row.
+    return `<p class="backtest-curve-note">Squall took no position, so there is no trade to score. Holding the stock instead would have returned <b>${btPct(stats.stock_return)}</b> against SPY's <b>${btPct(stats.spy_return)}</b>.</p>`;
+  }
+  const traded = btNum(stats.trade_return);
+  const cells = [
+    ["Squall's trade", btPct(stats.trade_return), traded === null ? "" : traded >= 0 ? " positive" : " negative"],
+    ["Stock, buy & hold", btPct(stats.stock_return), ""],
+    ["SPY", btPct(stats.spy_return), ""],
+    ["Excess vs SPY", btPct(stats.excess_vs_spy), ""]
+  ].map(([label, value, cls]) =>
+    `<div class="backtest-stat${cls}"><span>${btEsc(label)}</span><b>${btEsc(value)}</b></div>`).join("");
+
+  const exit = simulation.exit && exitLook
+    ? `Exited ${btEsc(simulation.exit.date)} at ${btUsd(simulation.exit.price)} — ${btEsc(exitLook.label)}.`
+    : "The trade was still open when the window ended.";
+  const dd = btNum(stats.max_dd) === null ? "" : ` Worst drawdown while in the trade: <b>${btPct(stats.max_dd)}</b>.`;
+  return `<div class="backtest-stats backtest-curve-stats">${cells}</div>
+    <p class="backtest-curve-note">${exit}${dd}</p>`;
+}
+
 function renderBacktestCurve(simulation) {
   const host = document.getElementById("backtestCurve");
   if (!host) return;
@@ -395,25 +438,27 @@ function renderBacktestCurve(simulation) {
   if (hasTrade) series.push({ key:"trade", label:"Squall's trade",
     color:btVar("--accent", "#e0a33a"), points:curve.map(p => p.trade), width:2.2 });
 
+  // The exit reason decides the colour. Painting a target hit in loss-red because
+  // "the trade ended" reads as a stop-out and inverts the result at a glance.
+  const EXIT_LOOK = {
+    stop:    { token:"--down",    fallback:"#c25b5b", label:"stopped out" },
+    target:  { token:"--up",      fallback:"#4c9a72", label:"target hit" },
+    horizon: { token:"--ink-dim", fallback:"#8b959e", label:"horizon reached" },
+    end:     { token:"--ink-dim", fallback:"#8b959e", label:"window ended" }
+  };
+  const exitLook = simulation.exit ? (EXIT_LOOK[simulation.exit.reason] || EXIT_LOOK.end) : null;
+
   const dots = [];
   if (hasTrade && simulation.exit) {
     const exitIndex = curve.findIndex(p => p.d === simulation.exit.date);
-    // The exit reason decides the colour. Painting a target hit in loss-red because
-    // "the trade ended" reads as a stop-out and inverts the result at a glance.
-    const EXIT_LOOK = {
-      stop:    { token:"--down",    fallback:"#c25b5b", label:"stopped out" },
-      target:  { token:"--up",      fallback:"#4c9a72", label:"target hit" },
-      horizon: { token:"--ink-dim", fallback:"#8b959e", label:"horizon reached" },
-      end:     { token:"--ink-dim", fallback:"#8b959e", label:"window ended" }
-    };
-    const look = EXIT_LOOK[simulation.exit.reason] || EXIT_LOOK.end;
     if (exitIndex >= 0) dots.push({ index:exitIndex, series:"trade",
-      color:btVar(look.token, look.fallback), title:look.label });
+      color:btVar(exitLook.token, exitLook.fallback), title:exitLook.label });
   }
 
   host.innerHTML = `
     <div class="backtest-chart-wrap"><canvas id="backtestCurveCanvas"></canvas></div>
-    <div class="backtest-legend">${btLegend(series)}</div>`;
+    <div class="backtest-legend">${btLegend(series)}</div>
+    ${btCurveStats(simulation, hasTrade, exitLook)}`;
 
   btObserve(document.getElementById("backtestCurveCanvas"));
   btRegisterChart("curve", () => drawLineChart(

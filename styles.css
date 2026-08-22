@@ -512,6 +512,13 @@ body[data-page="backtester"] header { flex: 0 0 auto; }
 /* Wide enough to show a full dash cycle — the swatch has to carry the pattern,
    because the three series are separated by weight and dash rather than hue. */
 .backtest-legend i { display: inline-block; width: 24px; height: 2px; vertical-align: middle; margin-right: 5px; }
+.backtest-curve-stats { margin-top: 14px; }
+/* Mirrors .backtest-outcome.positive/.negative so a return means the same thing
+   wherever it appears. Direction only — never used to make a value stand out. */
+.backtest-stat.positive b { color: var(--up); }
+.backtest-stat.negative b { color: var(--down); }
+.backtest-curve-note { margin-top: 9px; color: var(--ink-dim); font: 10px var(--mono); line-height: 1.5; }
+.backtest-curve-note b { color: var(--ink-bright); font-weight: 600; }
 .backtest-thesis { margin-top: 12px; color: var(--ink); font-family: var(--doc); font-size: 13px; line-height: 1.6; }
 @media (max-width: 640px) { .backtest-chart-wrap { height: 240px; } }
 .screen-shell { width: min(1120px, 100%); margin: 0 auto; }
