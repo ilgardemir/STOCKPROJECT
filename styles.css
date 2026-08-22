@@ -434,6 +434,12 @@ body[data-page="backtester"] header { flex: 0 0 auto; }
 #backtestRun { min-height: 43px; padding: 0 17px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); font-weight: 700; cursor: pointer; }
 #backtestRun:disabled { opacity: .55; cursor: progress; }
 .backtest-caveat { margin: 9px 0 0; color: var(--ink-dim); font: 10px/1.5 var(--mono); }
+/* The valuation caveat has to carry more weight than a footnote without becoming a
+   second accent: --up/--down are direction only and there is exactly one accent, so
+   emphasis here is weight and ink, never hue. */
+.backtest-caveat b { color: var(--ink-bright); font-weight: 600; }
+.backtest-caveat details { margin-top: 6px; }
+.backtest-caveat summary { cursor: pointer; }
 #backtestProgress { display: none; margin-top: 20px; }
 #backtestProgress.show { display: block; }
 .backtest-progress-row { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 7px; color: var(--ink-dim); font: 10px var(--mono); }

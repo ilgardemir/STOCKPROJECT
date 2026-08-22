@@ -92,6 +92,54 @@ function renderBacktestSnapshot(payload) {
     return `<article class="backtest-fact"><span>${btEsc(BT_FACT_LABELS[key] || key)}</span><b>${btFactValue(latest)}</b><small>${latest ? `${btEsc(latest.form)} · period ended ${btEsc(latest.period_end)} · filed ${btEsc(latest.filed)}` : "Unavailable"}</small>${history ? `<details><summary>Earlier reported periods</summary>${history}</details>` : ""}</article>`;
   }).join("") || `<p class="backtest-empty">No structured SEC facts were available for this issuer by the cutoff.</p>`;
 
+  /*
+   * Two blocks, two panels, deliberately not one.
+   *
+   * `fundamentals` is built from filing figures alone — no price enters it — so it is
+   * exact as reported. `valuation` divides a split-adjusted price stated on TODAY's
+   * share basis by as-reported filing figures stated on the cutoff's basis, which the
+   * engine flags with per_share_ratios_reliable:false. NVDA at a 2024-05-01 cutoff
+   * computes a P/E of 6.96 against a true ~70 because of the June-2024 10:1 split.
+   * Rendering "P/E 7.0" as a bare number publishes a wrong figure with confidence, so
+   * the caveat ships inside the same panel and cannot be read apart from the ratios.
+   * A single shared panel would have done the opposite damage as well: it would cast
+   * the caveat over margins and ROE, which need no caveat at all.
+   */
+  const VAL_LABELS = { pe:"P/E", ps:"P/S", pb:"P/B", ev_ebitda:"EV/EBITDA", fcf_yield:"FCF yield" };
+  const FUND_LABELS = { gross_margin:"Gross margin", operating_margin:"Operating margin",
+    net_margin:"Net margin", roe:"ROE", current_ratio:"Current ratio", debt_to_equity:"Debt/equity" };
+  const valuation = snapshot.valuation || {};
+  const fundamentals = snapshot.fundamentals || {};
+  const btStat = (label, value) => `<div class="backtest-stat"><span>${btEsc(label)}</span><b>${btEsc(value)}</b></div>`;
+  const ratioCards = Object.entries(VAL_LABELS).map(([key, label]) => {
+    const value = btNum(valuation[key]);
+    return value === null ? "" : btStat(label, key === "fcf_yield" ? btPct(value) : `${value.toFixed(1)}×`);
+  }).join("");
+  const fundCards = Object.entries(FUND_LABELS).map(([key, label]) => {
+    const value = btNum(fundamentals[key]);
+    if (value === null) return "";
+    return btStat(label, key.endsWith("_margin") || key === "roe" ? btPct(value) : value.toFixed(2));
+  }).join("");
+  const ttm = valuation.ttm_basis || fundamentals.ttm_basis;
+  const ttmNote = ttm ? ` Trailing-twelve-month figures are on a ${btEsc(ttm)} basis.` : "";
+  // The engine's own wording is reproduced rather than paraphrased, so this cannot
+  // drift into understating a caveat that backtester.py later strengthens.
+  const ratioCaveat = valuation.per_share_ratios_reliable === true
+    ? `<p class="backtest-caveat">Priced off the close at the cutoff.${ttmNote}</p>`
+    : `<div class="backtest-caveat"><b>Unreliable in level.</b> Every ratio above divides a
+        split-adjusted price stated on today's share basis by as-reported filing figures stated
+        on the cutoff's basis. A split between that date and now divides all of them by the split
+        ratio, so a later 10-for-1 makes them read ten times too cheap. Whether one happened is
+        not knowable from data dated on or before the cutoff, so it is not corrected. Read them
+        against each other, never against a remembered multiple.${ttmNote}${
+      valuation.basis_caveat ? `<details><summary>The engine's own wording</summary>${btEsc(valuation.basis_caveat)}</details>` : ""}</div>`;
+  const valuationPanel = ratioCards
+    ? `<section class="backtest-panel"><h3>Valuation multiples known by the cutoff</h3><div class="backtest-stats">${ratioCards}</div>${ratioCaveat}</section>`
+    : "";
+  const fundamentalsPanel = fundCards
+    ? `<section class="backtest-panel"><h3>Fundamentals known by the cutoff</h3><div class="backtest-stats">${fundCards}</div><p class="backtest-caveat">Computed from filing figures alone. No price enters these, so unlike the multiples above they are exact as reported.${ttmNote}</p></section>`
+    : "";
+
   const filings = (snapshot.filings_known_by_cutoff || []).slice(0, 8).map(filing =>
     `<div class="backtest-filing"><b>${btEsc(filing.form)}</b><span>Filed ${btEsc(filing.filed)}${filing.report_date ? ` · report date ${btEsc(filing.report_date)}` : ""}</span></div>`
   ).join("") || `<p class="backtest-empty">No SEC filing list was available by the cutoff.</p>`;
@@ -101,6 +149,7 @@ function renderBacktestSnapshot(payload) {
     <div class="backtest-integrity" id="backtestIntegrityState">Everything in this section existed by the cutoff. The AI is now analyzing this snapshot while the future outcome remains sealed.</div>
     <section class="backtest-panel" id="backtestSetup"></section>
     <section class="backtest-panel"><h3>Price and technical condition</h3><div class="backtest-stats">${metricCards}</div><div class="backtest-scores">${scoreCards}</div></section>
+    ${valuationPanel}${fundamentalsPanel}
     <section class="backtest-panel"><h3>SEC facts known by the cutoff</h3><div class="backtest-facts">${factCards}</div></section>
     <section class="backtest-panel"><h3>Recent filings known by the cutoff</h3><div class="backtest-filings">${filings}</div></section>`;
   renderBacktestSetupChart(snapshot);
