@@ -470,7 +470,44 @@ def relative_context(before, spy_before):
     return out
 
 
+def price_history_rows(before, limit=252):
+    """Pre-cutoff daily bars for the chart. Rounded — six decimals of a close is noise."""
+    if before is None or before.empty:
+        return []
+    frame = before.iloc[-limit:]
+    cols = {name: _column(frame, name) for name in ("open", "high", "low", "close", "volume")}
+    if cols["close"] is None:
+        return []
+    rows = []
+    for stamp, row in frame.iterrows():
+        close = finite(row[cols["close"]])
+        if close is None:
+            continue
+
+        def at(name, default=None):
+            col = cols[name]
+            value = finite(row[col]) if col is not None else None
+            return round(value, 4) if value is not None else default
+
+        rows.append({"d": stamp.date().isoformat(), "o": at("open", round(close, 4)),
+                     "h": at("high", round(close, 4)), "l": at("low", round(close, 4)),
+                     "c": round(close, 4), "v": at("volume", 0)})
+    return rows
+
+
+# Blocks the model reasons from. price_history is deliberately absent: 252 bars of raw
+# OHLCV would bury the analysis in numbers the derived blocks already summarise, and the
+# bars exist for the chart. Anything not named here never reaches the model.
+PROMPT_BLOCKS = (
+    "ticker", "company_name", "as_of", "effective_market_date", "price_basis",
+    "technical", "chart_patterns", "key_levels", "price_action", "institutional",
+    "market_regime", "relative", "valuation", "fundamentals",
+    "sec_facts", "filings_known_by_cutoff", "availability", "data_sources",
+)
+
+
 def build_ai_prompt(snapshot):
+    projection = {key: snapshot[key] for key in PROMPT_BLOCKS if key in snapshot}
     return "\n".join([
         f"You are performing a historical stock analysis as if today were {snapshot['as_of']}.",
         "Use only the frozen snapshot below. Do not use or imply knowledge of any later price, filing, news, product event, macro event, or outcome.",
@@ -478,7 +515,7 @@ def build_ai_prompt(snapshot):
         "Write a concise but substantive report with: setup at the cutoff, technical condition, fundamentals known by then, bull case, bear case, decision/watch conditions, and a confidence/data-limitations note.",
         "Treat chart-pattern scores as candidate detectors rather than facts. This is research, not individualized financial advice.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
-        json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
+        json.dumps(projection, separators=(",", ":"), allow_nan=False),
     ])
 
 
@@ -556,6 +593,7 @@ def main():
         "technical": technical,
         **signals,
         "relative": relative,
+        "price_history": price_history_rows(before),
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),

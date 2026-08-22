@@ -36,13 +36,45 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertEqual(fact["series"][0]["value"], 100)
         self.assertEqual(fact["series"][0]["filed"], "2023-02-01")
 
-    def test_ai_prompt_contains_snapshot_but_no_realized_outcomes(self):
-        snapshot = {"ticker": "AAA", "as_of": "2023-03-15", "technical": {"metrics": {"price": 10}}}
+    def test_ai_prompt_excludes_realized_outcomes_and_raw_bars(self):
+        snapshot = {
+            "ticker": "AAA", "as_of": "2023-03-15",
+            "technical": {"metrics": {"price": 10}},
+            "price_history": [{"d": "2023-03-14", "o": 9.5, "h": 10.1, "l": 9.4, "c": 10.0, "v": 100}],
+            "market_regime": {"regime": "TRENDING"},
+        }
+        outcomes = {
+            "entry_price": 123.456789, "returns": {"1m": 0.077712345},
+            "benchmark_returns": {"1m": 0.011198765}, "max_drawdown_6m": -0.198765,
+            "bars": {"dates": ["2023-03-16"], "close": [124.5]},
+        }
         prompt = backtester.build_ai_prompt(snapshot)
-        self.assertIn('"ticker":"AAA"', prompt)
-        self.assertNotIn("forward_returns", prompt)
-        self.assertNotIn("excess_returns", prompt)
-        json.dumps(snapshot, allow_nan=False)
+
+        # Every realized number must be absent, not merely a key name we happen to avoid.
+        for value in ("123.456789", "0.077712345", "0.011198765", "-0.198765", "124.5"):
+            self.assertNotIn(value, prompt, f"{value} leaked into the AI prompt")
+        # The raw bar array is for the chart, not the prompt.
+        self.assertNotIn('"price_history"', prompt)
+        self.assertNotIn("9.4", prompt)
+        # The derived reads must survive the projection.
+        self.assertIn("TRENDING", prompt)
+        self.assertIn("AAA", prompt)
+        # Sanity: the fixture is realistic enough that a naive dump WOULD have leaked.
+        self.assertIn("123.456789", json.dumps({**snapshot, **outcomes}))
+
+    def test_price_history_stops_at_the_cutoff(self):
+        index = pd.date_range("2024-01-01", periods=30, freq="B")
+        close = np.arange(50.0, 80.0)
+        frame = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                              "close": close, "volume": 1000}, index=index)
+        cutoff = index[20].date()
+        before, _ = backtester.split_at_date(frame, cutoff)
+
+        bars = backtester.price_history_rows(before, limit=252)
+
+        self.assertEqual(bars[-1]["d"], cutoff.isoformat())
+        self.assertTrue(all(row["d"] <= cutoff.isoformat() for row in bars))
+        self.assertEqual(len(bars), 21)
 
     def test_sealed_bars_contain_only_post_cutoff_sessions(self):
         index = pd.date_range("2024-01-01", periods=40, freq="B")
