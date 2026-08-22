@@ -8,10 +8,16 @@ process.stdin.on("end", () => {
   process.stderr.write("PROGRESS|48|Calculating stub signals\n");
   const snapshot = {
     ticker: "AAA", company_name: "Stub Industries", as_of: job.as_of,
-    effective_market_date: job.as_of, price_basis: "Split-adjusted daily OHLCV",
+    effective_market_date: job.as_of,
+    price_basis: "Split- and dividend-adjusted daily OHLCV; as_reported_close is the " +
+      "unadjusted close and is the correct basis for any per-share valuation",
+    as_reported_close: 1000,
     technical: { metrics: { price: 100, rsi14: 55.5 }, scores: { uptrend: 71 } },
     sec_facts: {}, filings_known_by_cutoff: [],
-    availability: { market_history: true, historical_news: false },
+    // Deliberately 100 vs 1000: the stub models a 10:1 split so that anything reading
+    // the wrong basis produces an obviously wrong number rather than a plausible one.
+    availability: { market_history: true, adjusted_price_basis: true,
+      benchmark_adjusted_price_basis: true, historical_news: false },
     data_sources: { market_history: "stub" }
   };
   const dates = [], open = [], close = [], spyOpen = [], spyClose = [];

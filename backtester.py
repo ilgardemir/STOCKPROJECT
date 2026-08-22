@@ -80,20 +80,40 @@ def adjusted_frame(frame):
     because XBRL EPS and share counts are as-reported: a P/E built from a
     post-split-adjusted price against an as-reported EPS is simply a wrong number,
     and a split between the cutoff and today corrupts it silently.
+
+    Returns (frame, adjusted) so the caller can tell a real adjustment from a
+    fall-through. Silence here is dangerous in a way the old code was not: with
+    adj_ohlc=True a missing adjclose surfaced as an exception out of yahooquery, and
+    fetch_history turned that into a WARN and a retry. Deriving the basis ourselves,
+    the same condition degrades to "returned the raw frame and said nothing" — and a
+    raw frame spanning a split reports a ~-90% return that nothing would question.
     """
     if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), False
     out = frame.copy()
     close_col, adj_col = _column(out, "close"), _column(out, "adjclose")
     if close_col is None or adj_col is None:
-        return out
+        print("WARN|backtest_basis|no_adjclose_column", file=sys.stderr, flush=True)
+        return out, False
     ratio = pd.to_numeric(out[adj_col], errors="coerce") / pd.to_numeric(out[close_col], errors="coerce")
-    ratio = ratio.replace([float("inf"), float("-inf")], float("nan")).fillna(1.0)
+    ratio = ratio.replace([float("inf"), float("-inf")], float("nan"))
+    # A column that exists but is entirely null is the same no-op as a missing one,
+    # and _column cannot see the difference. Yahoo does return null adjclose for a
+    # symbol in a batch response, so this is reachable, not defensive padding.
+    if not ratio.notna().any():
+        print("WARN|backtest_basis|adjclose_all_null", file=sys.stderr, flush=True)
+        return out, False
+    # Carry the neighbouring factor across a gap rather than substituting 1.0. The
+    # adjustment factor is piecewise-constant and only steps at a split or dividend,
+    # so a neighbour is right in every case; 1.0 is a raw bar dropped into an adjusted
+    # series, i.e. a single 10x spike that becomes the 52-week high and poisons every
+    # range, ATR and drawdown feature computed from it.
+    ratio = ratio.ffill().bfill().fillna(1.0)
     for name in ("open", "high", "low", "close"):
         col = _column(out, name)
         if col is not None:
             out[col] = pd.to_numeric(out[col], errors="coerce") * ratio
-    return out
+    return out, True
 
 
 def extract_frames(history, symbols):
@@ -178,9 +198,15 @@ def forward_outcomes(frame, as_of):
             "max_drawdown_6m": drawdown}
 
 
+# yahooquery has shipped this column under more than one spelling, and the cost of a
+# miss is not an error but a silent fall-through to the raw price basis.
+_COLUMN_ALIASES = {"adjclose": ("adjclose", "adj_close", "adjusted_close", "adj close")}
+
+
 def _column(frame, name):
+    wanted = _COLUMN_ALIASES.get(name, (name,))
     for col in frame.columns:
-        if str(col).lower() == name:
+        if str(col).lower() in wanted:
             return col
     return None
 
@@ -350,11 +376,17 @@ def main():
     # Two bases from one download: adjusted drives returns, technicals and the replay
     # bars; raw is the as-reported level valuation must be built from.
     raw_before, _ = split_at_date(frames[ticker], as_of)
-    adjusted = adjusted_frame(frames[ticker])
-    spy_adjusted = adjusted_frame(frames.get("SPY", pd.DataFrame()))
+    adjusted, stock_adjusted_ok = adjusted_frame(frames[ticker])
+    spy_adjusted, spy_adjusted_ok = adjusted_frame(frames.get("SPY", pd.DataFrame()))
     before, _ = split_at_date(adjusted, as_of)
     if before.empty:
         raise ValueError(f"No market session was available for {ticker} on or before {as_of.isoformat()}.")
+    # One leg adjusted and the other not makes excess_returns a subtraction across two
+    # different bases — total return minus price return at best, and off by a split
+    # factor at worst. The flags reach the payload; this makes it greppable in the logs.
+    if stock_adjusted_ok != spy_adjusted_ok:
+        print(f"WARN|backtest_basis|mixed|{ticker}={stock_adjusted_ok}|SPY={spy_adjusted_ok}",
+              file=sys.stderr, flush=True)
     # As-reported price at the cutoff, for anything compared against XBRL per-share figures.
     raw_close_col = _column(raw_before, "close")
     raw_close_at_cutoff = finite(raw_before[raw_close_col].iloc[-1]) if raw_close_col is not None and not raw_before.empty else None
@@ -375,11 +407,30 @@ def main():
     snapshot = {
         "ticker": ticker, "company_name": company_identity(ticker, companyfacts),
         "as_of": as_of.isoformat(), "effective_market_date": effective,
-        "price_basis": "Split- and dividend-adjusted daily OHLCV; valuation uses the as-reported close",
+        # Describes what was actually done, not what was intended. Claiming an
+        # adjusted basis while silently serving raw bars would put a false statement
+        # into ai_prompt, which is the one place a wrong claim becomes user-visible
+        # prose rather than a number someone can sanity-check.
+        "price_basis": (
+            "Split- and dividend-adjusted daily OHLCV; as_reported_close is the "
+            "unadjusted close and is the correct basis for any per-share valuation"
+            if stock_adjusted_ok else
+            "As-reported (UNADJUSTED) daily OHLCV — the adjusted basis was unavailable, "
+            "so levels and returns spanning a split or dividend may be wrong"
+        ),
+        # The price that actually printed at the cutoff. technical.metrics.price is on
+        # the adjusted basis and can be a level that never traded (NVDA reads ~$83 for
+        # 2024-05-01, when it traded ~$830), so an as-reported EPS must be divided by
+        # THIS, never by that. Pre-cutoff data: emitting it does not touch the seal.
+        "as_reported_close": raw_close_at_cutoff,
         "technical": technical,
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
+            # Surfaced because a fall-through to the raw basis is otherwise invisible:
+            # every downstream number stays plausible and nothing raises.
+            "adjusted_price_basis": bool(stock_adjusted_ok),
+            "benchmark_adjusted_price_basis": bool(spy_adjusted_ok),
             "historical_news": False, "historical_options_flow": False,
             "historical_analyst_estimates": False, "historical_index_membership": False,
         },

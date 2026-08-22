@@ -85,22 +85,87 @@ class HistoricalAnalyzerTests(unittest.TestCase):
             "adjclose": [50.0, 51.0, 52.0], "volume": [1000, 1000, 1000],
         }, index=index)
 
-        adjusted = backtester.adjusted_frame(frame)
+        adjusted, ok = backtester.adjusted_frame(frame)
 
+        self.assertTrue(ok)
         # every bar halves, because adjclose is half of close throughout
         self.assertAlmostEqual(adjusted["close"].iloc[0], 50.0)
         self.assertAlmostEqual(adjusted["open"].iloc[1], 51.0)
         self.assertAlmostEqual(adjusted["high"].iloc[2], 52.5)
+        self.assertAlmostEqual(adjusted["low"].iloc[1], 50.5)
         # volume is never scaled
         self.assertEqual(adjusted["volume"].iloc[0], 1000)
+        # the caller's frame is untouched
+        self.assertAlmostEqual(frame["close"].iloc[0], 100.0)
 
     def test_adjusted_frame_falls_back_to_raw_without_adjclose(self):
         index = pd.date_range("2023-01-02", periods=2, freq="B")
         frame = pd.DataFrame({"open": [10.0, 11.0], "high": [10.5, 11.5],
                               "low": [9.5, 10.5], "close": [10.0, 11.0],
                               "volume": [5, 5]}, index=index)
-        adjusted = backtester.adjusted_frame(frame)
+        adjusted, ok = backtester.adjusted_frame(frame)
         self.assertAlmostEqual(adjusted["close"].iloc[1], 11.0)
+        # The fall-through must be reported. It used to be indistinguishable from a
+        # successful adjustment, which let a raw frame reach the returns calculation.
+        self.assertFalse(ok)
+
+    def test_adjusted_frame_reports_an_adjclose_column_that_is_all_null(self):
+        # A column that exists but is entirely null is the same no-op as a missing
+        # one, and the column lookup cannot tell the difference.
+        index = pd.date_range("2023-01-02", periods=2, freq="B")
+        frame = pd.DataFrame({"open": [10.0, 11.0], "high": [10.5, 11.5],
+                              "low": [9.5, 10.5], "close": [10.0, 11.0],
+                              "adjclose": [float("nan"), float("nan")],
+                              "volume": [5, 5]}, index=index)
+        adjusted, ok = backtester.adjusted_frame(frame)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(adjusted["close"].iloc[1], 11.0)
+
+    def test_adjusted_frame_carries_the_factor_across_a_null_bar(self):
+        # A single null adjclose must not become ratio 1.0, which would drop one raw
+        # bar into an adjusted series - a 10x spike that becomes the 52-week high.
+        index = pd.date_range("2023-01-02", periods=3, freq="B")
+        frame = pd.DataFrame({
+            "open": [100.0, 100.0, 100.0], "high": [100.0, 100.0, 100.0],
+            "low": [100.0, 100.0, 100.0], "close": [100.0, 100.0, 100.0],
+            "adjclose": [10.0, float("nan"), 10.0], "volume": [1, 1, 1],
+        }, index=index)
+        adjusted, ok = backtester.adjusted_frame(frame)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(adjusted["close"].iloc[1], 10.0)
+
+    def test_a_split_inside_the_window_breaks_raw_returns_but_not_adjusted(self):
+        """
+        The regression the whole task exists for, and the one case the other tests
+        cannot express: a ratio that STEPS partway through the window. When the
+        ratio is constant it cancels out of every return, so a constant-ratio
+        fixture cannot tell a working implementation from one that collapses the
+        ratio to a scalar. Here a 10:1 split lands on bar 11.
+        """
+        index = pd.date_range("2024-01-01", periods=32, freq="B")
+        # Pre-split the stock prints ~900; post-split it prints ~95. adjclose is
+        # stated on today's basis throughout, so the ratio steps 0.1 -> 1.0.
+        close = [900.0] * 11 + [95.0] * 21
+        adjclose = [90.0] * 11 + [95.0] * 21
+        frame = pd.DataFrame({"open": close, "high": close, "low": close,
+                              "close": close, "adjclose": adjclose,
+                              "volume": [1] * 32}, index=index)
+        # Cutoff on bar 0, so entry is bar 1 (still pre-split at 900) and the 1m
+        # exit is bar 21 (post-split at 95). The split has to straddle the entry;
+        # putting the cutoff after it would make both bases agree and prove nothing.
+        cutoff = index[0].date()
+
+        raw = backtester.forward_outcomes(frame, cutoff)
+        adjusted, ok = backtester.adjusted_frame(frame)
+        adj = backtester.forward_outcomes(adjusted, cutoff)
+
+        self.assertTrue(ok)
+        # Raw: entry at the pre-split 900 open, measured against a post-split 95.
+        self.assertAlmostEqual(raw["returns"]["1m"], 95.0 / 900.0 - 1, places=6)
+        self.assertLess(raw["returns"]["1m"], -0.85)
+        # Adjusted: entry at 90, measured against 95. The real move.
+        self.assertAlmostEqual(adj["returns"]["1m"], 95.0 / 90.0 - 1, places=6)
+        self.assertGreater(adj["returns"]["1m"], 0.0)
 
 
 if __name__ == "__main__":
