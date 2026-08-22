@@ -410,6 +410,66 @@ def derived_signals(before, price):
     return out
 
 
+RS_WINDOWS = {"rs_1m": 21, "rs_3m": 63, "rs_6m": 126, "rs_1y": 252}
+
+
+def relative_context(before, spy_before):
+    """
+    Where the stock sat against the tape at the cutoff.
+
+    SPY bars were already downloaded to score outcomes and were otherwise discarded.
+    Relative strength here is stock_return - spy_return over the same window, so a
+    positive number means the stock outran the index over that stretch.
+    """
+    if not isinstance(before, pd.DataFrame) or before.empty:
+        return {}
+    if not isinstance(spy_before, pd.DataFrame) or spy_before.empty:
+        return {}
+    stock_col, spy_col = _column(before, "close"), _column(spy_before, "close")
+    if stock_col is None or spy_col is None:
+        return {}
+
+    stock = pd.to_numeric(before[stock_col], errors="coerce").dropna()
+    spy = pd.to_numeric(spy_before[spy_col], errors="coerce").dropna()
+    aligned = pd.DataFrame({"stock": stock, "spy": spy}).dropna()
+    if len(aligned) < 65:
+        return {}
+
+    out = {}
+    returns = aligned.pct_change().dropna()
+    if len(returns) > 30:
+        variance = finite(returns["spy"].var())
+        if variance:
+            out["beta_1y"] = finite(returns["stock"].cov(returns["spy"]) / variance)
+        out["correlation_1y"] = finite(returns["stock"].corr(returns["spy"]))
+
+    def window_return(series, sessions):
+        if len(series) < 2:
+            return None
+        start = series.iloc[-min(sessions + 1, len(series))]
+        end = series.iloc[-1]
+        return finite(end / start - 1) if start else None
+
+    for key, sessions in RS_WINDOWS.items():
+        stock_ret = window_return(aligned["stock"], sessions)
+        spy_ret = window_return(aligned["spy"], sessions)
+        out[key] = finite(stock_ret - spy_ret) if stock_ret is not None and spy_ret is not None else None
+
+    out["spy_return_1y"] = window_return(aligned["spy"], 252)
+    cumulative = (1 + returns["spy"]).cumprod()
+    out["spy_drawdown_1y"] = finite((cumulative / cumulative.cummax() - 1).min())
+
+    spy_signals = derived_signals(spy_before, finite(spy.iloc[-1]))
+    # classify_market_regime returns its verdict under "label". The plan called for
+    # "regime", which is not a key that function has ever set: the lookup would have
+    # returned None on every run and spy_regime would simply never have appeared,
+    # with no warning and no failing test.
+    regime = (spy_signals.get("market_regime") or {}).get("label")
+    if regime:
+        out["spy_regime"] = regime
+    return out
+
+
 def build_ai_prompt(snapshot):
     return "\n".join([
         f"You are performing a historical stock analysis as if today were {snapshot['as_of']}.",
@@ -455,6 +515,10 @@ def main():
     progress(48, "Calculating signals using pre-cutoff bars only")
     technical = technical_snapshot(before)
     signals = derived_signals(before, (technical.get("metrics") or {}).get("price"))
+    # spy_adjusted is already the adjusted SPY frame from above; re-deriving it here
+    # would re-run the adjustment and, since Task 7, discard the adjusted_ok flag.
+    spy_before, _ = split_at_date(spy_adjusted, as_of)
+    relative = relative_context(before, spy_before)
     # Both of these MUST be adjusted: a post-cutoff split in a raw frame would report a
     # 10:1 splitter's realized return as roughly -90% and raise nothing.
     stock_outcome = forward_outcomes(adjusted, as_of)
@@ -491,6 +555,7 @@ def main():
         "split_adjusted_close": split_adj_close_at_cutoff,
         "technical": technical,
         **signals,
+        "relative": relative,
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
@@ -501,6 +566,7 @@ def main():
             "chart_patterns": "chart_patterns" in signals,
             "price_action": "price_action" in signals,
             "market_regime": "market_regime" in signals,
+            "relative": bool(relative),
             "historical_news": False, "historical_options_flow": False,
             "historical_analyst_estimates": False, "historical_index_membership": False,
         },

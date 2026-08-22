@@ -212,6 +212,47 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertNotIn("market_regime", signals)
         self.assertEqual(signals["price_action"]["trend"], "UPTREND")
 
+    @staticmethod
+    def _tape(periods=300, base=100.0, rise=30.0, seed=7):
+        rng = np.random.default_rng(seed)
+        index = pd.date_range("2023-01-02", periods=periods, freq="B")
+        close = base + np.linspace(0.0, rise, periods) + rng.normal(0, base * 0.01, periods)
+        return pd.DataFrame({"open": close - 0.2, "high": close + 0.8, "low": close - 0.8,
+                             "close": close, "volume": 1_000_000}, index=index)
+
+    def test_relative_context_measures_the_stock_against_the_tape(self):
+        stock = self._tape(base=100.0, rise=30.0, seed=7)     # roughly +30%
+        spy = self._tape(base=400.0, rise=40.0, seed=11)      # roughly +10%
+
+        rel = backtester.relative_context(stock, spy)
+
+        closes, spy_closes = stock["close"], spy["close"]
+        expected = ((closes.iloc[-1] / closes.iloc[-253] - 1)
+                    - (spy_closes.iloc[-1] / spy_closes.iloc[-253] - 1))
+        self.assertAlmostEqual(rel["rs_1y"], expected, places=9)
+        self.assertGreater(rel["rs_1y"], 0.0)
+        self.assertAlmostEqual(rel["spy_return_1y"], spy_closes.iloc[-1] / spy_closes.iloc[-253] - 1, places=9)
+        self.assertLessEqual(rel["spy_drawdown_1y"], 0.0)
+        self.assertGreaterEqual(rel["correlation_1y"], -1.0)
+        self.assertLessEqual(rel["correlation_1y"], 1.0)
+        self.assertIsNotNone(rel["beta_1y"])
+        for key in ("rs_1m", "rs_3m", "rs_6m"):
+            self.assertIsNotNone(rel[key])
+        # classify_market_regime returns its verdict under "label", not "regime".
+        # Reading the wrong key here fails silently: spy_regime just never appears.
+        self.assertTrue(rel["spy_regime"])
+        # The block lands in the snapshot, which is serialized with allow_nan=False.
+        json.dumps(rel, allow_nan=False)
+
+    def test_relative_context_needs_both_legs_and_enough_overlap(self):
+        stock = self._tape()
+        self.assertEqual(backtester.relative_context(stock, pd.DataFrame()), {})
+        self.assertEqual(backtester.relative_context(stock, None), {})
+        self.assertEqual(backtester.relative_context(pd.DataFrame(), stock), {})
+        # Under 65 aligned sessions there is not enough tape to say anything.
+        short = self._tape(periods=64)
+        self.assertEqual(backtester.relative_context(short, self._tape(periods=64, seed=11)), {})
+
 
 if __name__ == "__main__":
     unittest.main()
