@@ -33,6 +33,14 @@ FACTS = {
     "cash": (["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"], "USD"),
     "diluted_eps": (["EarningsPerShareDiluted"], "USD/shares"),
     "shares_outstanding": (["CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"], "shares"),
+    "gross_profit": (["GrossProfit"], "USD"),
+    "cost_of_revenue": (["CostOfRevenue", "CostOfGoodsAndServicesSold"], "USD"),
+    "current_assets": (["AssetsCurrent"], "USD"),
+    "current_liabilities": (["LiabilitiesCurrent"], "USD"),
+    "long_term_debt": (["LongTermDebtNoncurrent", "LongTermDebt"], "USD"),
+    "short_term_debt": (["DebtCurrent", "ShortTermBorrowings"], "USD"),
+    "depreciation": (["DepreciationDepletionAndAmortization", "DepreciationAndAmortization"], "USD"),
+    "capex": (["PaymentsToAcquirePropertyPlantAndEquipment"], "USD"),
 }
 
 
@@ -262,7 +270,10 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
             "spyOpen": spy_opens, "spyClose": spy_closes}
 
 
-def fact_series(companyfacts, concepts, unit, as_of, limit=5):
+# 10 rather than the plan's 8. A quarter-end typically contributes two rows (the
+# discrete quarter and the year-to-date period), so 8 stops one row short of the
+# prior-year comparative the year-to-date roll forward in ttm_value needs.
+def fact_series(companyfacts, concepts, unit, as_of, limit=10):
     cutoff = as_of.isoformat()
     for concept in concepts:
         fact = ((companyfacts or {}).get("facts") or {}).get("us-gaap", {}).get(concept)
@@ -292,6 +303,116 @@ def fact_series(companyfacts, concepts, unit, as_of, limit=5):
             latest_by_period.setdefault(key, row)
         series = sorted(latest_by_period.values(), key=lambda row: (row["period_end"], row["filed"]), reverse=True)[:limit]
         return {"concept": concept, "label": fact.get("label") or concept, "series": series}
+    return None
+
+
+def _parse_day(value):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _period(row):
+    """(start, end, span_days) for a flow row, or None if it carries no usable period."""
+    start, end = _parse_day(row.get("period_start")), _parse_day(row.get("period_end"))
+    if start is None or end is None:
+        return None
+    return start, end, (end - start).days
+
+
+def _four_contiguous_quarters(quarters):
+    """Sum the four most recent discrete quarters, but only if they abut."""
+    by_end = {}
+    for row in sorted(quarters, key=lambda r: r["end"], reverse=True):
+        by_end.setdefault(row["end"], row)
+    chosen = [by_end[end] for end in sorted(by_end, reverse=True)[:4]]
+    if len(chosen) < 4:
+        return None
+    # Four quarter-length spans are not a trailing year unless they are consecutive:
+    # four consecutive Q1 rows are four quarter spans and a four-year total.
+    if not 330 <= (chosen[0]["end"] - chosen[-1]["start"]).days <= 400:
+        return None
+    return {"value": sum(row["value"] for row in chosen), "basis": "quarters",
+            "period_end": chosen[0]["end"].isoformat()}
+
+
+def _rolled_forward_ttm(partials, annuals):
+    """
+    Prior full year + current year-to-date - prior-year year-to-date.
+
+    The case that dominates in practice: 10-Q cash-flow and comprehensive-income rows
+    are cumulative from the fiscal year start, so a filer can go years without ever
+    tagging a discrete quarter. Without this, every such concept falls back to an
+    annual figure up to four quarters stale.
+    """
+    if not partials or not annuals:
+        return None
+    current = max(partials, key=lambda row: (row["end"], row["span"]))
+    year_start_eve = current["start"] - timedelta(days=1)
+    prior_year = next((row for row in annuals
+                       if abs((row["end"] - year_start_eve).days) <= 5), None)
+    if prior_year is None:
+        return None
+    target_end = current["end"] - timedelta(days=365)
+    prior = next((row for row in partials
+                  if abs((row["end"] - target_end).days) <= 20
+                  and abs(row["span"] - current["span"]) <= 20), None)
+    if prior is None:
+        return None
+    return {"value": prior_year["value"] + current["value"] - prior["value"],
+            "basis": "derived", "period_end": current["end"].isoformat()}
+
+
+# Preference when two aggregations end on the same day. Freshness wins first; this
+# only breaks the tie.
+_TTM_PREFERENCE = {"quarters": 0, "derived": 1, "annual": 2}
+
+
+def ttm_value(fact):
+    """
+    Trailing twelve months from a fact series, or None.
+
+    XBRL rows are not comparable as they arrive: 10-K rows carry full-year spans,
+    10-Q rows carry quarter spans, and plenty of filers report year-to-date rather
+    than discrete quarters. Summing them blind double-counts. Prefer four abutting
+    discrete quarters, then a year-to-date roll forward, then the latest annual
+    figure, and refuse otherwise -- a silently wrong multiple is worse than a
+    missing one. Among those, the one covering the most recent period wins.
+    """
+    quarters, annuals, partials = [], [], []
+    for row in (fact or {}).get("series") or []:
+        period, value = _period(row), finite(row.get("value"))
+        if period is None or value is None:
+            continue
+        start, end, span = period
+        entry = {"value": value, "start": start, "end": end, "span": span}
+        if 350 <= span <= 380:
+            annuals.append(entry)
+        elif 20 <= span < 350:
+            partials.append(entry)
+            if 80 <= span <= 100:
+                quarters.append(entry)
+
+    candidates = [candidate for candidate in
+                  (_four_contiguous_quarters(quarters), _rolled_forward_ttm(partials, annuals))
+                  if candidate]
+    if annuals:
+        latest = max(annuals, key=lambda row: row["end"])
+        candidates.append({"value": latest["value"], "basis": "annual",
+                           "period_end": latest["end"].isoformat()})
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (c["period_end"], -_TTM_PREFERENCE[c["basis"]]), reverse=True)
+    return candidates[0]
+
+
+def point_in_time_value(fact):
+    """Latest instantaneous value (balance-sheet items carry no period span)."""
+    for row in (fact or {}).get("series") or []:
+        value = finite(row.get("value"))
+        if value is not None:
+            return {"value": value, "period_end": row.get("period_end")}
     return None
 
 

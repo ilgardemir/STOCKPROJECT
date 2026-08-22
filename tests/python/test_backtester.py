@@ -90,6 +90,78 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertEqual(rows[0]["filed"], "2019-02-01")
         self.assertEqual(rows[0]["entity_name"], "Original Corp")
 
+    def _fact(self, rows):
+        return {"concept": "Revenues", "label": "Revenues", "series": rows}
+
+    @staticmethod
+    def _flow_row(value, start, end, filed=None, form="10-Q"):
+        return {"value": value, "period_start": start, "period_end": end,
+                "filed": filed or end, "form": form}
+
+    def test_ttm_sums_four_discrete_quarters(self):
+        rows = [
+            self._flow_row(40, "2022-10-01", "2022-12-31", "2023-02-01"),
+            self._flow_row(30, "2022-07-01", "2022-09-30", "2022-11-01"),
+            self._flow_row(20, "2022-04-01", "2022-06-30", "2022-08-01"),
+            self._flow_row(10, "2022-01-01", "2022-03-31", "2022-05-01"),
+        ]
+        result = backtester.ttm_value(self._fact(rows))
+        self.assertEqual(result["value"], 100)
+        self.assertEqual(result["basis"], "quarters")
+        self.assertEqual(result["period_end"], "2022-12-31")
+
+    def test_ttm_refuses_four_quarters_that_do_not_abut(self):
+        # Four Q1 rows from four different years are four quarter-length spans and
+        # nothing else. Summing them is a four-year total wearing a TTM label.
+        rows = [self._flow_row(v, f"{y}-01-01", f"{y}-03-31", f"{y}-05-01")
+                for v, y in ((40, 2022), (30, 2021), (20, 2020), (10, 2019))]
+        self.assertIsNone(backtester.ttm_value(self._fact(rows)))
+
+    def test_ttm_rolls_a_year_to_date_period_forward_off_the_prior_year(self):
+        # The case that actually dominates: 10-Q cash-flow rows are cumulative from
+        # the fiscal year start, so no discrete quarter is ever reported. The roll
+        # forward is prior FY + current YTD - prior-year YTD, and it must beat the
+        # annual fallback, which here is a full quarter staler.
+        rows = [
+            self._flow_row(60, "2022-01-01", "2022-09-30", "2022-11-01"),
+            self._flow_row(100, "2021-01-01", "2021-12-31", "2022-02-01", form="10-K"),
+            self._flow_row(55, "2021-01-01", "2021-09-30", "2021-11-01"),
+        ]
+        result = backtester.ttm_value(self._fact(rows))
+        self.assertEqual(result["value"], 105)
+        self.assertEqual(result["basis"], "derived")
+        self.assertEqual(result["period_end"], "2022-09-30")
+
+    def test_ttm_falls_back_to_the_latest_annual_figure(self):
+        # A full year plus a YTD stub of the SAME year cannot be rolled forward --
+        # there is no prior annual to roll off -- and the full year is also the
+        # fresher period, so the annual figure is the answer.
+        rows = [
+            self._flow_row(100, "2022-01-01", "2022-12-31", "2023-02-01", form="10-K"),
+            self._flow_row(60, "2022-01-01", "2022-09-30", "2022-11-01"),
+        ]
+        result = backtester.ttm_value(self._fact(rows))
+        self.assertEqual(result["value"], 100)
+        self.assertEqual(result["basis"], "annual")
+        self.assertEqual(result["period_end"], "2022-12-31")
+
+    def test_ttm_refuses_when_nothing_usable_exists(self):
+        self.assertIsNone(backtester.ttm_value(None))
+        self.assertIsNone(backtester.ttm_value(self._fact([])))
+        self.assertIsNone(backtester.ttm_value(self._fact([
+            self._flow_row(5, None, "2022-12-31", "2023-02-01"),
+        ])))
+
+    def test_point_in_time_value_takes_the_latest_instant(self):
+        fact = self._fact([
+            {"value": 500.0, "period_end": "2022-12-31", "filed": "2023-02-01", "form": "10-K"},
+            {"value": 400.0, "period_end": "2021-12-31", "filed": "2022-02-01", "form": "10-K"},
+        ])
+        self.assertEqual(backtester.point_in_time_value(fact),
+                         {"value": 500.0, "period_end": "2022-12-31"})
+        self.assertIsNone(backtester.point_in_time_value(None))
+        self.assertIsNone(backtester.point_in_time_value(self._fact([])))
+
     def test_ai_prompt_excludes_realized_outcomes_and_raw_bars(self):
         snapshot = {
             "ticker": "AAA", "as_of": "2023-03-15",
