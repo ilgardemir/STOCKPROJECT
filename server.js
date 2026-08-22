@@ -1135,6 +1135,11 @@ function simulateTrade(decision, bars) {
 
   return {
     curve,
+    // The value every line is indexed to. Sent rather than duplicated as a literal
+    // in backtester.js, which draws the break-even reference line from it: a copy
+    // there would go silently wrong the day this constant changes, and a reference
+    // line at the wrong level is indistinguishable from a right one on a chart.
+    base: BT_START_EQUITY,
     entry: { date: dates[0], price: entry },
     exit: trading ? { date: dates[exitIdx], price: exitPrice, reason: exitReason } : null,
     stats

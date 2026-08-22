@@ -5,6 +5,7 @@ const tests = [];
 global.test = (name, fn) => tests.push({ name, fn });
 
 require("./server.test");
+require("./backtester.test");
 
 let failed = 0;
 for (const { name, fn } of tests) {

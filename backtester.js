@@ -288,6 +288,89 @@ function btVar(name, fallback) {
   return value || fallback;
 }
 
+/**
+ * Gridline values at round numbers INSIDE [lo, hi].
+ *
+ * The usual nice-scale move is to snap the RANGE outward to a whole step, which
+ * would push an equity curve spanning 9.5k–13.2k out to 9k–14k and spend a
+ * seventh of the plot height on empty axis. Here the range stays exactly as
+ * measured and only the tick POSITIONS are rounded, so the labels read as numbers
+ * a person would say out loud without the series losing any vertical room.
+ *
+ * This replaces an even four-way split of the range, which produced ticks like
+ * $9,510 / $10,428 / $11,346 — unreadable, and on the equity curve it left
+ * break-even at $10,000 off the axis entirely, which is the one value that chart
+ * exists to answer against.
+ */
+const BT_TICK_STEPS = [1, 2, 2.5, 5];
+
+function btNiceTicks(lo, hi, target = 5) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) return [];
+  const magnitude = Math.pow(10, Math.floor(Math.log10((hi - lo) / target)));
+  let best = null, widest = null;
+  // Two decades of candidates, so a span sitting just under a power of ten can
+  // still reach the coarser step that its own magnitude does not offer.
+  for (const decade of [magnitude, magnitude * 10]) {
+    for (const multiple of BT_TICK_STEPS) {
+      const step = multiple * decade;
+      if (!(step > 0)) continue;
+      const ticks = [];
+      for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9 && ticks.length <= 40; v += step)
+        // Re-derived from the step each time rather than accumulated: 0.5 + 0.1
+        // is 0.6000000000000001, and that renders as a label.
+        ticks.push(Number((Math.round(v / step) * step).toPrecision(12)));
+      if (!widest || ticks.length > widest.length) widest = ticks;
+      if (ticks.length < 3) continue;
+      const score = Math.abs(ticks.length - target);
+      if (!best || score < best.score) best = { score, ticks };
+    }
+  }
+  return best ? best.ticks : (widest || []);
+}
+
+const BT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Date ticks spread across the window rather than only at its two ends.
+ *
+ * Labelling just the first and last bar means nothing on the chart can be placed
+ * in time — a stop-out four fifths of the way along is simply "somewhere in these
+ * six months". app.js's drawChart already lays down five date ticks; this brings
+ * the /ilgar renderer to the same idiom.
+ */
+function btDateTicks(dates, target = 5) {
+  const n = Array.isArray(dates) ? dates.length : 0;
+  if (n < 2) return [];
+  const wanted = Math.min(target, n);
+  const indices = [];
+  for (let g = 0; g < wanted; g++) {
+    const i = Math.round((g / (wanted - 1)) * (n - 1));
+    if (indices[indices.length - 1] !== i) indices.push(i);
+  }
+  /*
+   * Three formats, coarsest first; the first one that labels every tick
+   * distinctly wins.
+   *
+   * Month-and-year repeats once the window is short enough that two ticks land in
+   * the same month, and month-and-day repeats once it is long enough to cross a
+   * year. Two identical labels on an axis locate nothing, so the full date is kept
+   * as the format that cannot collide.
+   */
+  const FORMATS = [
+    parts => `${BT_MONTHS[Number(parts[2]) - 1] || parts[2]} ’${parts[1].slice(2)}`,
+    parts => `${BT_MONTHS[Number(parts[2]) - 1] || parts[2]} ${Number(parts[3])}`,
+    parts => parts[0]
+  ];
+  for (const format of FORMATS) {
+    const ticks = indices.map(i => {
+      const parts = String(dates[i] || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      return { index:i, label:parts ? format(parts) : String(dates[i] || "") };
+    });
+    if (new Set(ticks.map(t => t.label)).size === ticks.length) return ticks;
+  }
+  return indices.map(i => ({ index:i, label:String(dates[i] || "") }));
+}
+
 function drawLineChart(canvas, series, marks) {
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
@@ -309,7 +392,7 @@ function drawLineChart(canvas, series, marks) {
   const pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.02 || 1;
   lo -= pad; hi += pad;
 
-  const padL = 58, padR = 14, padT = 14, padB = 26;
+  const padL = 58, padR = marks.yRight ? 54 : 14, padT = 14, padB = 26;
   const X = i => padL + (i / (n - 1)) * (W - padL - padR);
   const Y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
 
@@ -317,14 +400,39 @@ function drawLineChart(canvas, series, marks) {
   const inkDim = btVar("--ink-dim", "#8b959e");
   const fmt = marks.yFormat || (v => Math.round(v).toLocaleString());
 
-  ctx.font = "10px ui-monospace, monospace";
+  // Matches the page's own type. ui-monospace resolves to a different family than
+  // the IBM Plex Mono everything around the canvas is set in, and the mismatch is
+  // visible in the axis labels.
+  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textBaseline = "middle";
-  for (let g = 0; g <= 4; g++) {
-    const v = lo + (hi - lo) * (g / 4), y = Y(v);
+  for (const v of btNiceTicks(lo, hi)) {
+    const y = Y(v);
     ctx.strokeStyle = rule; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(padL, y + 0.5); ctx.lineTo(W - padR, y + 0.5); ctx.stroke();
     ctx.fillStyle = inkDim; ctx.textAlign = "right";
     ctx.fillText(fmt(v), padL - 8, y);
+    if (marks.yRight) {
+      ctx.textAlign = "left";
+      ctx.fillText(marks.yRight(v), W - padR + 8, y);
+    }
+  }
+
+  /*
+   * The reference line, drawn after the grid and brighter than it.
+   *
+   * On the equity curve every series starts at exactly the same value, so "above
+   * or below this line" is the whole question. A gridline of equal weight would
+   * hide the answer among four others.
+   */
+  if (marks.baseline && Number.isFinite(marks.baseline.value)
+      && marks.baseline.value > lo && marks.baseline.value < hi) {
+    const y = Y(marks.baseline.value);
+    ctx.strokeStyle = btVar("--ink-dim", "#8b959e"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y + 0.5); ctx.lineTo(W - padR, y + 0.5); ctx.stroke();
+    if (marks.baseline.label) {
+      ctx.fillStyle = inkDim; ctx.textAlign = "left";
+      ctx.fillText(marks.baseline.label, padL + 6, y - 8);
+    }
   }
 
   for (const r of marks.rules || []) {
@@ -366,14 +474,26 @@ function drawLineChart(canvas, series, marks) {
       ctx.fillStyle = dot.color;
       const right = X(dot.index) > W - padR - 60;
       ctx.textAlign = right ? "right" : "left";
-      ctx.fillText(dot.title, X(dot.index) + (right ? -7 : 7), Y(v) - 9);
+      // Cleared far enough above the marker that the label does not sit on the
+      // line it annotates — the cash tail runs flat out of this dot, so a tighter
+      // offset put the text directly on top of a stroke.
+      ctx.fillText(dot.title, X(dot.index) + (right ? -7 : 7), Y(v) - 14);
     }
   }
 
-  ctx.fillStyle = inkDim; ctx.textAlign = "left";
-  ctx.fillText(labels[0], padL, H - padB + 12);
-  ctx.textAlign = "right";
-  ctx.fillText(labels[n - 1], W - padR, H - padB + 12);
+  ctx.fillStyle = inkDim; ctx.textBaseline = "middle";
+  // How many date labels fit, rather than a fixed five: on a 340px canvas five
+  // "Mmm ’23" labels overlap into a smear, measured at three colliding pairs.
+  // Half a label again between neighbours is what keeps them legibly apart.
+  const labelW = ctx.measureText("Mmm ’00").width || 42;
+  const dateTicks = btDateTicks(labels,
+    Math.max(2, Math.min(5, Math.floor((W - padL - padR) / (labelW * 1.7)))));
+  dateTicks.forEach((tick, i) => {
+    // The end labels are anchored inward so neither runs off the plot; the ones
+    // between are centred on their own bar.
+    ctx.textAlign = i === 0 ? "left" : i === dateTicks.length - 1 ? "right" : "center";
+    ctx.fillText(tick.label, X(tick.index), H - padB + 12);
+  });
 }
 
 /**
@@ -391,6 +511,26 @@ function btLegend(series) {
       : `background:${s.color};height:${Math.max(2, Math.round(s.width))}px`;
     return `<span><i style="${swatch}"></i>${btEsc(s.label)}</span>`;
   }).join("");
+}
+
+/**
+ * Splits a trade line into the live position and the cash held after the exit.
+ *
+ * simulateTrade holds the trade flat to the end of the window by design, so every
+ * run shares one x-axis. Stroked as a single line that made the boldest, widest
+ * mark on the chart a position that no longer existed — a stop-out on day 8 of a
+ * 126-session window drew 118 sessions of accent-coloured nothing.
+ *
+ * Both halves keep the exit point, so the two strokes meet rather than leaving a
+ * gap. Returns null when there is no tail worth separating.
+ */
+function btSplitAtExit(points, exitIndex) {
+  if (!Array.isArray(points)) return null;
+  if (!Number.isInteger(exitIndex) || exitIndex <= 0 || exitIndex >= points.length - 1) return null;
+  return {
+    live: points.map((v, i) => (i <= exitIndex ? v : null)),
+    cash: points.map((v, i) => (i >= exitIndex ? v : null))
+  };
 }
 
 /** Registers a chart so it survives theme swaps and resizes. */
@@ -555,6 +695,11 @@ function renderBacktestCurve(simulation) {
   }
   const curve = simulation.curve;
   const hasTrade = curve.some(p => Number.isFinite(p.trade));
+  // The level every line is indexed to, and therefore where break-even sits. Note
+  // it is NOT curve[0]: entry fills at the first post-cutoff OPEN while the curve
+  // is stamped from each session's CLOSE, so the first point already carries a
+  // day's move. Reading the base off curve[0] would tilt the reference line by it.
+  const base = btNum(simulation.base) ?? 10000;
   // Weight and dash carry the distinction, not hue. Measured across all six themes,
   // --ink against --ink-dim is only 1.11:1 (Daylight) to 1.45:1 (Noir), and --accent
   // against --ink bottoms out at 1.25:1 — so on colour alone these three lines are one
@@ -566,9 +711,6 @@ function renderBacktestCurve(simulation) {
     { key:"stock", label:"Stock, buy & hold", color:btVar("--ink", "#b9c2ca"),
       points:curve.map(p => p.stock), width:1.5, dash:[5, 4] }
   ];
-  if (hasTrade) series.push({ key:"trade", label:"Squall's trade",
-    color:btVar("--accent", "#e0a33a"), points:curve.map(p => p.trade), width:2.2 });
-
   // The exit reason decides the colour. Painting a target hit in loss-red because
   // "the trade ended" reads as a stop-out and inverts the result at a glance.
   const EXIT_LOOK = {
@@ -578,15 +720,26 @@ function renderBacktestCurve(simulation) {
     end:     { token:"--ink-dim", fallback:"#8b959e", label:"window ended" }
   };
   const exitLook = simulation.exit ? (EXIT_LOOK[simulation.exit.reason] || EXIT_LOOK.end) : null;
+  const exitIndex = hasTrade && simulation.exit
+    ? curve.findIndex(p => p.d === simulation.exit.date) : -1;
 
-  const dots = [];
-  if (hasTrade && simulation.exit) {
-    const exitIndex = curve.findIndex(p => p.d === simulation.exit.date);
-    if (exitIndex >= 0) dots.push({ index:exitIndex, series:"trade",
-      color:btVar(exitLook.token, exitLook.fallback), title:exitLook.label });
+  if (hasTrade) {
+    const tradePoints = curve.map(p => p.trade);
+    const split = btSplitAtExit(tradePoints, exitIndex);
+    series.push({ key:"trade", label:split ? "Squall's trade, in position" : "Squall's trade",
+      color:btVar("--accent", "#e0a33a"), points:split ? split.live : tradePoints, width:2.2 });
+    // Held flat in cash: same colour, so it still reads as the same account, but
+    // thin and dashed so it stops competing with the live position for attention.
+    if (split) series.push({ key:"cash", label:"Closed, held in cash",
+      color:btVar("--accent", "#e0a33a"), points:split.cash, width:1, dash:[2, 4] });
   }
 
+  const dots = [];
+  if (exitIndex >= 0) dots.push({ index:exitIndex, series:"trade",
+    color:btVar(exitLook.token, exitLook.fallback), title:exitLook.label });
+
   host.innerHTML = `
+    <h3>The call against the stock and the market</h3>
     <div class="backtest-chart-wrap"><canvas id="backtestCurveCanvas"></canvas></div>
     <div class="backtest-legend">${btLegend(series)}</div>
     ${btCurveStats(simulation, hasTrade, exitLook)}`;
@@ -596,7 +749,15 @@ function renderBacktestCurve(simulation) {
     document.getElementById("backtestCurveCanvas"), series, {
       labels: curve.map(p => p.d),
       dots,
-      yFormat: v => `$${Math.round(v).toLocaleString()}`
+      // Every line starts at $10,000, so the dollar axis is really a percentage
+      // one. Both are labelled: the left says what the account is worth, the right
+      // says what the stats row below says, which is how the two get connected.
+      baseline: { value: base, label:"break-even" },
+      yFormat: v => `$${Math.round(v).toLocaleString()}`,
+      yRight: v => {
+        const pct = (v / base - 1) * 100;
+        return `${pct > 0 ? "+" : ""}${pct.toFixed(0)}%`;
+      }
     }));
 }
 
