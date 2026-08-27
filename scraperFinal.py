@@ -1011,6 +1011,29 @@ def build_price_bar_block(hist: pd.DataFrame, intraday_5m: list, latest=None) ->
     if last is None:
         return "\n### 6b. RECENT PRICE BARS — price history unavailable.\n"
 
+    # yahooquery hands back plain datetime.date keys once the symbol level is dropped, so
+    # the index is object dtype: .year raises and .resample refuses. Both were inside
+    # try/except and simply produced nothing, so the returns row silently lost YTD and the
+    # weekly line vanished entirely — in production only, since a test frame built from
+    # bdate_range already has a DatetimeIndex. Coerce once, here.
+    dated = closes
+    if not isinstance(closes.index, pd.DatetimeIndex):
+        try:
+            dated = closes.copy()
+            # Mixed/unparseable keys make pandas warn and fall back to per-element dateutil.
+            # The warning goes to stderr, which is the progress channel, and the fallback is
+            # slow over ~1250 rows. Try the one format the providers actually use first.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                idx = pd.to_datetime(closes.index, format="%Y-%m-%d", errors="coerce")
+                if idx.isna().all():
+                    idx = pd.to_datetime(closes.index, errors="coerce")
+            dated.index = idx
+            dated = dated[dated.index.notna()]
+            if dated.empty: dated = None
+        except Exception:
+            dated = None
+
     block = "\n### 6b. RECENT PRICE BARS (actual bars — use these for structure, not the summary stats above)\n"
 
     # ── returns row ───────────────────────────────────────────────────────────
@@ -1021,12 +1044,12 @@ def build_price_bar_block(hist: pd.DataFrame, intraday_5m: list, latest=None) ->
         if prior:
             parts.append(f"{label} {fmt(safe_divide(last - prior, prior), 'pct')}")
     # YTD is anchored to the first session of the calendar year, not a fixed offset.
-    try:
-        year = closes.index[-1].year
-        ytd = closes[closes.index.year == year]
-        first = safe_float(ytd.iloc[0]) if len(ytd) else None
-        if first: parts.append(f"YTD {fmt(safe_divide(last - first, first), 'pct')}")
-    except Exception: pass
+    if dated is not None and len(dated):
+        try:
+            ytd = dated[dated.index.year == dated.index[-1].year]
+            first = safe_float(ytd.iloc[0]) if len(ytd) else None
+            if first: parts.append(f"YTD {fmt(safe_divide(last - first, first), 'pct')}")
+        except Exception: pass
     block += "Returns: " + (" | ".join(parts) if parts else "N/A") + "\n"
 
     # ── last 10 sessions ──────────────────────────────────────────────────────
@@ -1047,14 +1070,14 @@ def build_price_bar_block(hist: pd.DataFrame, intraday_5m: list, latest=None) ->
     if not rows: block += "- No complete daily bars.\n"
 
     # ── weekly closes ─────────────────────────────────────────────────────────
-    try:
-        weekly = closes.resample("W-FRI").last().dropna().tail(12)
-        vals = [safe_float(v) for v in weekly]
-        vals = [v for v in vals if v is not None]
-        if vals:
-            block += ("\nWeekly closes (last " + str(len(vals)) + "w, oldest first): "
-                      + ", ".join(f"{v:.2f}" for v in vals) + "\n")
-    except Exception: pass
+    if dated is not None and len(dated):
+        try:
+            weekly = dated.resample("W-FRI").last().dropna().tail(12)
+            vals = [v for v in (safe_float(x) for x in weekly) if v is not None]
+            if vals:
+                block += ("\nWeekly closes (last " + str(len(vals)) + "w, oldest first): "
+                          + ", ".join(f"{v:.2f}" for v in vals) + "\n")
+        except Exception: pass
 
     # ── last intraday session ─────────────────────────────────────────────────
     # Omitted outright when 5m data is missing. Substituting the daily bar would look like

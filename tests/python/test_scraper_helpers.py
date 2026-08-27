@@ -130,6 +130,38 @@ class PriceBarBlockTests(unittest.TestCase):
         self.assertIn("Latest session 2024-05-01 (78 5-min bars)", block)
         self.assertNotIn("999.00", block)
 
+    def test_object_dtype_date_index_still_yields_ytd_and_weekly_closes(self):
+        """The shape yahooquery actually returns, and the one that shipped broken.
+
+        Dropping the symbol level leaves plain datetime.date keys, so the index is object
+        dtype: .year raises and .resample refuses. Both call sites were inside try/except,
+        so production silently lost YTD from the returns row and the weekly line entirely,
+        while a bdate_range test frame — which already has a DatetimeIndex — passed.
+        """
+        frame = _daily_frame()
+        frame.index = pd.Index([ts.date() for ts in frame.index], dtype=object)
+        self.assertEqual(frame.index.dtype, object)          # guard the premise
+        block = scraper.build_price_bar_block(frame, None)
+        self.assertIn("YTD ", block)
+        self.assertIn("Weekly closes", block)
+        self.assertNotIn("nan", block.lower())
+
+    def test_string_date_index_is_also_coerced(self):
+        frame = _daily_frame()
+        frame.index = pd.Index([ts.strftime("%Y-%m-%d") for ts in frame.index], dtype=object)
+        block = scraper.build_price_bar_block(frame, None)
+        self.assertIn("YTD ", block)
+        self.assertIn("Weekly closes", block)
+
+    def test_an_uncoercible_index_drops_only_the_dated_lines(self):
+        # The returns row and the session table do not need dates and must survive.
+        frame = _daily_frame()
+        frame.index = pd.Index([f"row-{i}" for i in range(len(frame))], dtype=object)
+        block = scraper.build_price_bar_block(frame, None)
+        self.assertIn("Returns:", block)
+        self.assertIn("1M ", block)
+        self.assertNotIn("nan", block.lower())
+
     def test_missing_price_history_degrades_instead_of_raising(self):
         self.assertIn("unavailable", scraper.build_price_bar_block(None, None))
         self.assertIn("unavailable", scraper.build_price_bar_block(pd.DataFrame(), None))
