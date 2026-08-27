@@ -786,7 +786,7 @@ function finalizePartialStream() {
   if (_stream && !_stream.done) {
     const s = sessions[_stream.ticker];
     if (s) { s.data.aiSummary = _stream.answer; s.data.aiReasoning = _stream.thinking; s.data.model = _stream.model; touchSession(s); persistSessions(); }
-    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    setAnalysisStreaming(false);
     document.getElementById("aiModelTag")?.classList.remove("live");
   }
   _stream = null;
@@ -924,7 +924,7 @@ function runAnalysis() {
     _stream = { ticker: key, model: d.model, thinking: "", answer: "", answerStarted: false, done: false, sticky: true, raf: null };
     setModelTag(d.model);
     document.getElementById("aiModelTag")?.classList.add("live");
-    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.add("streaming");
+    setAnalysisStreaming(true);
     if (active === key) buildStreamShell();
     showProgressPercent(76, "Reviewing the compiled evidence");
   });
@@ -938,7 +938,7 @@ function runAnalysis() {
     if (sess) { sess.data.aiSummary = d.aiSummary; sess.data.aiReasoning = d.aiReasoning; sess.data.model = d.model; touchSession(sess); persistSessions(); }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
-    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    setAnalysisStreaming(false);
     if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
     showProgressPercent(100, "Analysis complete");
@@ -958,7 +958,7 @@ function runAnalysis() {
     }
     if (_stream) _stream.done = true;
     document.getElementById("aiModelTag")?.classList.remove("live");
-    document.getElementById("mobileTabs").querySelector('[data-pane="aiPane"]')?.classList.remove("streaming");
+    setAnalysisStreaming(false);
     if (active === key && sess) finalizeAiRender(sess.data);
     _stream = null;
     showProgressPercent(100, "Dashboard ready · written analysis unavailable");
@@ -1083,14 +1083,14 @@ function gotoAnalyzer(ticker) { location.href = ticker ? `/?t=${encodeURICompone
 
 function goHome() {
   if (!IS_ANALYZER_PAGE) return gotoAnalyzer();   // the wordmark is a link home from secondary pages
-  const ws = document.getElementById("workspace"), hero = document.getElementById("hero"), strip = document.getElementById("summaryStrip");
+  const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
   const screen = document.getElementById("screenerView");
   if (!ws.classList.contains("show") && !screen?.classList.contains("show")) return;
   ws.classList.add("leaving");
   setTimeout(() => {
     ws.classList.remove("show", "leaving");
     screen?.classList.remove("show"); activeScreen = null;
-    strip.classList.remove("show");
+    clearTickerBar();
     hero.style.display = "";
     hero.style.animation = "none"; void hero.offsetWidth; hero.style.animation = "";   // replay entrance
     document.getElementById("resumeChip").classList.toggle("show", Object.keys(sessions).length + Object.keys(screeners).length > 0);
@@ -1441,11 +1441,55 @@ function renderTickerPills() {
     </div>`;
   }).join("");
   el.querySelectorAll(".analysis-tab").forEach(tab => {
-    tab.querySelector(".analysis-tab-main").onclick = () => tab.dataset.kind === "screen" ? openSavedScreener(tab.dataset.key) : switchTicker(tab.dataset.key);
+    tab.querySelector(".analysis-tab-main").onclick = () => { closeSavedMenu(false);
+      return tab.dataset.kind === "screen" ? openSavedScreener(tab.dataset.key) : switchTicker(tab.dataset.key); };
     tab.querySelector(".analysis-tab-close").onclick = () => tab.dataset.kind === "screen" ? deleteScreener(tab.dataset.key) : deleteSession(tab.dataset.key);
   });
   document.getElementById("resumeChip")?.classList.toggle("show", items.length > 0);
+  // The rail button carries the count so the popover does not have to be opened to learn
+  // there is nothing in it. Both button and its divider go when the store is empty.
+  const savedBtn = document.getElementById("savedBtn"), savedCount = document.getElementById("savedCount");
+  if (savedCount) savedCount.textContent = items.length ? String(items.length) : "";
+  if (savedBtn) savedBtn.hidden = items.length === 0;
+  const savedDiv = document.getElementById("savedDiv");
+  if (savedDiv) savedDiv.hidden = items.length === 0;
+  if (!items.length) closeSavedMenu(false);
 }
+
+/* Saved-work popover — the same open/close/roving-focus contract as #themeMenu, because a
+   second popover that behaves differently from the first is a second thing to learn. Both
+   elements ship in partials/chrome-top.html, so they exist on every page and a top-level
+   listener here is safe; `on` is used anyway so that stays true if a page ever drops the
+   partial. */
+const savedMenuOpen = () => document.getElementById("savedMenu")?.classList.contains("open") || false;
+function openSavedMenu() {
+  const menu = document.getElementById("savedMenu"), btn = document.getElementById("savedBtn");
+  if (!menu || !btn) return;
+  menu.classList.add("open");
+  btn.setAttribute("aria-expanded", "true");
+  menu.querySelector(".analysis-tab.active .analysis-tab-main, .analysis-tab-main")?.focus();
+}
+function closeSavedMenu(refocus) {
+  const menu = document.getElementById("savedMenu"), btn = document.getElementById("savedBtn");
+  if (!menu || !menu.classList.contains("open")) return;
+  menu.classList.remove("open");
+  btn?.setAttribute("aria-expanded", "false");
+  if (refocus && btn && !btn.hidden) btn.focus();
+}
+on("savedBtn", "click", () => savedMenuOpen() ? closeSavedMenu(false) : openSavedMenu());
+on("savedMenu", "keydown", e => {
+  const opts = [...document.querySelectorAll("#savedMenu .analysis-tab-main")];
+  const from = opts.indexOf(document.activeElement);
+  if (e.key === "ArrowDown") { e.preventDefault(); opts[(from + 1 + opts.length) % opts.length]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); opts[(from - 1 + opts.length) % opts.length]?.focus(); }
+  else if (e.key === "Tab") closeSavedMenu(false);
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && savedMenuOpen()) { e.stopPropagation(); closeSavedMenu(true); } }, true);
+document.addEventListener("pointerdown", e => {
+  if (!savedMenuOpen()) return;
+  const menu = document.getElementById("savedMenu"), btn = document.getElementById("savedBtn");
+  if (!menu.contains(e.target) && !btn?.contains(e.target)) closeSavedMenu(false);
+});
 function switchTicker(t) {
   if (!sessions[t]) return;
   if (IS_SCREENER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the other page
@@ -1464,29 +1508,45 @@ function deleteSession(t) {
   persistSessions(); renderTickerPills();
   if (active && sessions[active]) { renderAll(sessions[active].data); syncChatSendMode(); }
   else {
-    document.getElementById("summaryStrip").classList.remove("show");
+    clearTickerBar();
     const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
     ws.classList.remove("show", "leaving"); hero.style.display = "";
   }
 }
+/* The header reverts to its marketing state — tagline back, identity gone — whenever there
+   is no analysis on screen. Declared as a function so the two callers above it can hoist. */
+function clearTickerBar() {
+  const bar = document.getElementById("tickerBar");
+  if (bar) { bar.classList.remove("show"); bar.innerHTML = ""; }
+  document.body.classList.remove("has-analysis");
+}
 
-/* ════════════════ RENDER: SUMMARY STRIP ════════════════ */
+/* ════════════════ RENDER: HEADER IDENTITY ════════════════
+   This used to be #summaryStrip, a 100px band under the header. On a 720p display that was
+   a sixth of the viewport spent on one line of glance information and one line of metadata,
+   while the analysis it described read through a 228px slot. The glance half — name,
+   ticker, price, change, sector, regime — moves into the header bar, which was already
+   there; the metadata half (structure, market state, fetch time) moves into the Live
+   Snapshot card, which is where the rest of this analysis's provenance already lives.
+
+   The order here is the shed order: everything after #sPrice is dropped by the media
+   ladder as the bar narrows, right to left, before the wordmark or the search field give
+   up any width. */
 function renderStrip(d) {
   const q = d.live_quote || {}, t = (d.raw_data || {}).technicals || {};
   const company = d.company_profile || {}, regime = d.market_regime || {};
   const price = q.last_price ?? t.current_price, chg = t.daily_change;
-  const strip = document.getElementById("summaryStrip");
+  const strip = document.getElementById("tickerBar");
+  if (!strip) return;
   strip.innerHTML = `
-    <span id="sCompany">${esc(d.company_name)}</span>
-    <span id="sTicker">${esc(d.ticker)}${q.exchange ? " · " + esc(q.exchange) : ""}</span>
+    <span id="sTicker">${esc(d.ticker)}</span>
+    <span id="sCompany" title="${esc(d.company_name)}${q.exchange ? " · " + esc(q.exchange) : ""}">${esc(d.company_name)}</span>
     <span id="sPrice">${fUsd(price)}</span>
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
     ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
-    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.summary || "")}">${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}%` : ""}</span>` : ""}
-    ${(d.price_action && d.price_action.trend) ? `<span class="meta-dot">Structure <b>${esc(d.price_action.trend)}</b></span>` : ""}
-    ${q.market_state ? `<span class="meta-dot">Market <b>${esc(q.market_state)}</b></span>` : ""}
-    ${q.fetched_at ? `<span class="meta-dot">Fetched <b>${esc(q.fetched_at)}</b></span>` : ""}`;
+    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.summary || "")}">${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}%` : ""}</span>` : ""}`;
   strip.classList.add("show");
+  document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
 
   // price ticks up into place
   const pe = document.getElementById("sPrice");
@@ -1503,72 +1563,150 @@ function renderStrip(d) {
   }
 }
 
-/* ════════════════ DATA PANE SECTIONS ════════════════
-   Four groups instead of one eighteen-card scroll. This is a regrouping, not a reduction:
-   every card and every metric still renders, and each card's own open/collapsed default is
-   untouched. */
-const SECTIONS = [
-  { id: "overview",     label: "Overview" },
-  { id: "technicals",   label: "Technicals" },
-  { id: "fundamentals", label: "Fundamentals" },
-  { id: "filings",      label: "Filings & News" },
+/* ════════════════ WORKSPACE DESTINATIONS ════════════════
+   One list, rendered as one vertical rail, driving both layout modes. It replaces two
+   separate mechanisms that were the same idea at different breakpoints: the four horizontal
+   section tabs inside the data pane, and #mobileTabs' Data/AI pane switcher below 960px.
+
+   Vertical is the whole point. A horizontal tab row costs 34–40px of the axis this layout
+   has none of; a 96px rail costs none of it, and the display this is used on is 1280×720.
+
+   `pane` says which pane a destination lives in. In split mode both panes are on screen, so
+   the AI destinations are filtered out of the rail — selecting "AI Analysis" when the AI
+   pane is already beside you is not a navigation. In focus mode every destination is
+   listed and exactly one pane is mounted. */
+const VIEWS = [
+  { id: "chart",        label: "Chart",          pane: "data" },
+  { id: "overview",     label: "Overview",       pane: "data" },
+  { id: "technicals",   label: "Technicals",     pane: "data" },
+  { id: "fundamentals", label: "Fundamentals",   pane: "data" },
+  { id: "filings",      label: "Filings",        pane: "data" },
+  // "Analysis", not "AI Analysis": the longer label is the only one that wraps to two
+  // lines in the rail, and sitting directly above "Chat" under its own divider it is not
+  // ambiguous — the pane it opens carries the model tag.
+  { id: "analysis",     label: "Analysis",       pane: "ai", focusOnly: true },
+  { id: "chat",         label: "Chat",           pane: "ai", focusOnly: true },
 ];
+const DATA_VIEWS = VIEWS.filter(v => v.pane === "data");
 const SECTION_KEY = "squall-data-section";
-/* A view preference, not session state — which section you last read is about you, not
-   about the ticker. Kept off `sessions` deliberately so switching tabs never writes a
-   session or evicts a saved analysis to make room for the fact that you clicked a tab. */
-let activeDataSection = SECTIONS[0].id;
+
+/* Focus mode: one destination at a time, taking the whole workspace. Triggered by EITHER
+   axis. Width was the old sole trigger at 960px, which is why a 1280×720 laptop — wide
+   enough to pass, short enough that the split gave the analysis a 228px reading slot —
+   got the worst of both. 820px of viewport height is roughly where two stacked scroll
+   regions stop being worth their scrollbars. */
+const FOCUS_MQ = matchMedia("(max-width: 1100px), (max-height: 820px)");
+const isFocusMode = () => FOCUS_MQ.matches;
+/* The class is what CSS keys off. Set here rather than in a media query so that JS and CSS
+   cannot disagree about which mode is live — one condition, one source. */
+const syncFocusModeClass = () => document.body.classList.toggle("focus-mode", FOCUS_MQ.matches);
+syncFocusModeClass();
+FOCUS_MQ.addEventListener("change", syncFocusModeClass);
+
+/* A view preference, not session state — which destination you last read is about you, not
+   about the ticker. Kept off `sessions` deliberately so switching never writes a session or
+   evicts a saved analysis to make room for the fact that you clicked a tab. */
+let activeView = VIEWS[0].id;
 try {
   const saved = localStorage.getItem(SECTION_KEY);
-  if (SECTIONS.some(s => s.id === saved)) activeDataSection = saved;
+  if (VIEWS.some(v => v.id === saved)) activeView = saved;
 } catch (e) {}
 
-function renderDataSections(bucket) {
-  // A section with no cards gets no button. Without a filings-capable ticker the
-  // "Filings & News" tab would open onto nothing, which reads as a broken tab.
-  const filled = SECTIONS.filter(s => (bucket[s.id] || "").trim());
-  if (!filled.length) return "";
-  if (!filled.some(s => s.id === activeDataSection)) activeDataSection = filled[0].id;
-  const tabs = filled.map(s =>
-    `<button type="button" role="tab" data-section-tab="${s.id}" aria-selected="${s.id === activeDataSection}"
-      class="${s.id === activeDataSection ? "active" : ""}">${esc(s.label)}</button>`).join("");
-  const panels = filled.map(s =>
-    `<div class="data-section ${s.id === activeDataSection ? "show" : ""}" data-section="${s.id}"
-      role="tabpanel">${bucket[s.id]}</div>`).join("");
-  return `<nav id="dataSections" role="tablist" aria-label="Dashboard sections">${tabs}</nav>${panels}`;
+/* Which destinations exist for this render. A data destination earns its place by having
+   cards; the AI ones exist whenever the AI pane does, and only in focus mode. */
+function availableViews(bucket) {
+  return VIEWS.filter(v => {
+    if (v.pane === "data") return Boolean((bucket[v.id] || "").trim());
+    return isFocusMode() && Boolean(document.getElementById("aiPane"));
+  });
 }
 
-function showDataSection(id) {
-  const nav = document.getElementById("dataSections");
-  if (!nav) return;
-  activeDataSection = id;
+function renderViewRail(bucket) {
+  const filled = availableViews(bucket);
+  if (!filled.length) return "";
+  if (!filled.some(v => v.id === activeView)) activeView = filled[0].id;
+  const rail = document.getElementById("viewRail");
+  if (rail) {
+    let lastPane = null;
+    rail.innerHTML = filled.map(v => {
+      // A hairline between the panes' destinations, so the rail reads as two groups rather
+      // than one list of seven unrelated words.
+      const rule = lastPane && v.pane !== lastPane ? ' data-group-start="1"' : "";
+      lastPane = v.pane;
+      return `<button type="button" role="tab" data-view="${v.id}"${rule} aria-selected="${v.id === activeView}"
+        class="${v.id === activeView ? "active" : ""}">${esc(v.label)}<i class="tab-dot" aria-hidden="true"></i></button>`;
+    }).join("");
+  }
+  // Only the data destinations produce panels; the AI ones are a whole pane already.
+  return filled.filter(v => v.pane === "data").map(v =>
+    `<div class="data-section ${v.id === activeView ? "show" : ""} ${v.id === "chart" ? "chart-section" : ""}"
+      data-section="${v.id}" role="tabpanel">${bucket[v.id]}</div>`).join("");
+}
+
+function showView(id) {
+  const view = VIEWS.find(v => v.id === id);
+  if (!view) return;
+  activeView = id;
   try { localStorage.setItem(SECTION_KEY, id); } catch (e) {}
-  nav.querySelectorAll("[data-section-tab]").forEach(b => {
-    const on = b.dataset.sectionTab === id;
+  document.querySelectorAll("#viewRail [data-view]").forEach(b => {
+    const on = b.dataset.view === id;
     b.classList.toggle("active", on);
     b.setAttribute("aria-selected", String(on));
   });
   document.querySelectorAll("#dataBody .data-section").forEach(p =>
     p.classList.toggle("show", p.dataset.section === id));
-  document.getElementById("dataBody").scrollTop = 0;
-  // A hidden panel is display:none, so its canvas measures 0×0 and drawChart bails early.
-  // Same trap the mobile pane tabs handle — the chart has to be told to repaint on the way
-  // back in, or Overview returns showing an empty box.
-  if (id === "overview" && active) requestAnimationFrame(drawChart);
+  const body = document.getElementById("dataBody");
+  if (body) body.scrollTop = 0;
+  syncPaneVisibility();
+  // A hidden panel is display:none, so its canvas measures 0×0 and drawChart bails at its
+  // own guard — the chart comes back as an empty box unless it is told to repaint on the
+  // way in. This is why Chart is checked here and not just on first render.
+  if (id === "chart" && active) requestAnimationFrame(drawChart);
+  if (id === "chat") document.getElementById("chatInput")?.focus();
 }
 
-/* Delegated, and wired from inside renderAll rather than at the top level: #dataSections
-   is built by renderAll and does not exist in any served page, so a bare
-   getElementById("dataSections").addEventListener would throw at load and silently kill
-   every listener declared below it — on the screener as well as here. */
-function wireDataSections() {
-  const nav = document.getElementById("dataSections");
-  if (!nav) return;
-  nav.onclick = e => {
-    const btn = e.target.closest("[data-section-tab]");
-    if (btn) showDataSection(btn.dataset.sectionTab);
+/* Which panes are mounted. In split mode: both, always — leaving a stale [data-hidden]
+   behind after a resize is how one pane silently disappears on a wide screen. */
+function syncPaneVisibility() {
+  const dataPane = document.getElementById("dataPane"), aiPane = document.getElementById("aiPane");
+  if (!dataPane || !aiPane) return;
+  if (!isFocusMode()) { dataPane.removeAttribute("data-hidden"); aiPane.removeAttribute("data-hidden"); return; }
+  const view = VIEWS.find(v => v.id === activeView) || VIEWS[0];
+  dataPane.toggleAttribute("data-hidden", view.pane !== "data");
+  aiPane.toggleAttribute("data-hidden", view.pane !== "ai");
+  document.body.classList.toggle("chat-view", view.id === "chat");
+}
+
+/* The only signal that the write-up is still generating while you are looking at numbers.
+   It rode #mobileTabs' AI tab, which no longer exists; it now rides the rail's AI Analysis
+   entry, and in split mode where that entry is filtered out, the model tag beside the prose
+   is already pulsing. */
+function setAnalysisStreaming(on) {
+  document.querySelector('#viewRail [data-view="analysis"]')?.classList.toggle("streaming", on);
+}
+
+/* Delegated, and wired from inside renderAll rather than at the top level: #viewRail is
+   filled by renderAll, so a bare getElementById("viewRail").addEventListener at the top
+   level would throw on /screener and /ilgar — which have no workspace — and silently kill
+   every listener declared below it. */
+function wireViewRail() {
+  const rail = document.getElementById("viewRail");
+  if (!rail) return;
+  rail.onclick = e => {
+    const btn = e.target.closest("[data-view]");
+    if (btn) showView(btn.dataset.view);
   };
 }
+
+/* Crossing the focus-mode boundary re-filters the rail (the AI destinations appear and
+   disappear) and has to re-mount whichever pane the other mode hid. Re-rendering the whole
+   dashboard would be wasteful and would lose scroll position, so only the rail is rebuilt. */
+FOCUS_MQ.addEventListener("change", () => {
+  if (!active || !sessions[active]) { syncPaneVisibility(); return; }
+  const rail = document.getElementById("viewRail");
+  if (!rail || !rail.children.length) return;
+  renderAll(sessions[active].data);
+});
 
 /* ════════════════ RENDER: EVERYTHING ════════════════ */
 function renderAll(d) {
@@ -1578,11 +1716,11 @@ function renderAll(d) {
         t = r.technicals || {}, rr = r.risk_return || {}, s = r.sentiment || {}, kl = r.key_levels || {};
   const q = d.live_quote || {}, pa = d.price_action || {}, inst = d.institutional || {}, company = d.company_profile || {}, regime = d.market_regime || {};
 
-  /* Cards accumulate per section rather than into one string. Eighteen of them, fifteen
+  /* Cards accumulate per destination rather than into one string. Eighteen of them, fifteen
      open by default, was ~90 metrics in a single scroll — every card defensible, the sum
-     unreadable. Nothing is removed or collapsed here; it is regrouped, and the section a
+     unreadable. Nothing is removed or collapsed here; it is regrouped, and the destination a
      card belongs to is stated at the card rather than inferred from its position. */
-  const bucket = { overview: "", technicals: "", fundamentals: "", filings: "" };
+  const bucket = Object.fromEntries(DATA_VIEWS.map(v => [v.id, ""]));
   const add = (section, markup) => { bucket[section] += markup; };
 
   /* Snapshot */
@@ -1599,14 +1737,25 @@ function renderAll(d) {
     ${metric("Industry", esc(company.industry || "N/A"))}
     ${metric("Quote Source", esc(q.source || d.data_sources?.quote || "N/A"))}
     ${metric("Chart Source", esc(d.data_sources?.history || "N/A"))}
+    ${/* Followed the identity block out of the deleted summary strip. These are provenance
+          rather than glance information — you check them once to know how fresh and how
+          well-founded the numbers are — so the card that already states where every figure
+          came from is where they belong. */""}
+    ${pa.trend ? metric("Market Structure", esc(pa.trend)) : ""}
+    ${q.market_state ? metric("Market State", esc(q.market_state)) : ""}
+    ${q.fetched_at ? metric("Data Fetched", esc(q.fetched_at)) : ""}
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
   add("overview", card("snapshot", "Live Snapshot", snap));
 
-  /* Candlestick chart + controls */
+  /* Candlestick chart — its own destination, not a card in a scroll list.
+     As a card it was a fixed 565px inside a 312px window, so the controls and the candles
+     could never be on screen together. Alone in its panel it takes the region's full
+     height, and a <details> wrapper would only add a 44px summary row whose collapse
+     affordance controls the one thing already there. */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
-    add("overview", card("chart", "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) }));
+    add("chart", chartCardBody());
   }
 
   /* Deterministic market regime — explains the current price/volume environment. */
@@ -1808,9 +1957,10 @@ function renderAll(d) {
   }
 
   const body = document.getElementById("dataBody");
-  body.innerHTML = renderDataSections(bucket);
+  body.innerHTML = renderViewRail(bucket);
   body.scrollTop = 0;
-  wireDataSections();
+  wireViewRail();
+  syncPaneVisibility();
   wireChartControls();
 
   /* AI summary — live stream shell if this ticker is mid-generation, else the final render */
@@ -1864,15 +2014,32 @@ function chartCardBody() {
     `<label class="toggle ${chartOpts[id] ? "on" : ""}" style="--swatch:${swatch}">
       <input type="checkbox" data-opt="${id}" ${chartOpts[id] ? "checked" : ""}>
       ${dash ? `<span class="dash ${dotted ? "dotted" : ""}"></span>` : ""}${label}</label>`;
+  /* Eight toggles laid out inline wrapped to two rows and, with the range selector, spent
+     93px above a chart that had 312px of window to live in — more than a quarter of the
+     view was the controls for the view. They are settings, not readings: they change
+     rarely, they belong behind a disclosure. What stays on the row is what you act on
+     while looking at the chart, plus the two labels that say what you are looking at. */
+  const overlayMenu = `<div id="overlayMenu" role="menu" aria-label="Chart overlays">
+      <div class="menu-head">Overlays</div>
+      ${tog("ma20", "MA 20", "var(--accent)", true)}
+      ${tog("ma50", "MA 50", "var(--warn)", true)}
+      ${tog("ma200", "MA 200", "var(--ink-dim)", true)}
+      ${tog("bb", "Bollinger", "var(--ink)", true, true)}
+      ${tog("fib", "Auto Fib", "var(--ink-dim)", true, true)}
+      ${tog("sr", "Support / Resistance", "var(--down)", true, true)}
+      <div class="menu-head">Scale</div>
+      ${tog("pct", "% scale", "var(--accent)", false)}
+      ${tog("vol", "Volume", "var(--ink-dim)", false)}
+      <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>
+    </div>`;
   return `<div id="chartControls">
-    ${tog("ma20", "MA 20", "var(--accent)", true)}
-    ${tog("ma50", "MA 50", "var(--warn)", true)}
-    ${tog("ma200", "MA 200", "var(--ink-dim)", true)}
-    ${tog("bb", "Bollinger", "var(--ink)", true, true)}
-    ${tog("fib", "Auto Fib", "var(--ink-dim)", true, true)}
-    ${tog("sr", "Support / Resistance", "var(--down)", true, true)}
-    ${tog("pct", "% scale", "var(--accent)", false)}
-    ${tog("vol", "Volume", "var(--ink-dim)", false)}
+    <div class="overlay-wrap">
+      <button class="chart-tool-btn quiet" type="button" id="overlayBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="overlayMenu">
+        Overlays<b class="overlay-count" data-overlay-count></b>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      ${overlayMenu}
+    </div>
     <button class="chart-tool-btn" type="button" data-chart-action="draw-fib">Draw Fib</button>
     <button class="chart-tool-btn quiet" type="button" data-chart-action="clear-fib">Clear Fib</button>
     <span class="fib-status" data-fib-status></span>
@@ -1883,8 +2050,7 @@ function chartCardBody() {
       <button class="chart-expand-btn" title="Expand chart">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
-    </div>
-    <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>`;
+    </div>`;
 }
 const fibInteraction = { ticker: null, mode: false, pending: null, dragging: null };
 
@@ -1955,15 +2121,63 @@ function buildRangeSel(container) {
   });
 }
 
+/* The button names how many overlays are on, so the row still reports the chart's state
+   now that the toggles themselves are behind a disclosure. Without it, turning the whole
+   set off and closing the menu leaves nothing on screen saying so. */
+const OVERLAY_OPTS = ["ma20", "ma50", "ma200", "bb", "fib", "sr", "pct", "vol"];
+function syncOverlayCount() {
+  const n = OVERLAY_OPTS.filter(k => chartOpts[k]).length;
+  document.querySelectorAll("[data-overlay-count]").forEach(el => { el.textContent = n ? String(n) : ""; });
+}
+const overlayMenuOpen = () => document.getElementById("overlayMenu")?.classList.contains("open") || false;
+function closeOverlayMenu() {
+  document.getElementById("overlayMenu")?.classList.remove("open");
+  document.getElementById("overlayBtn")?.setAttribute("aria-expanded", "false");
+}
 function wireChartControls() {
   document.querySelectorAll('#chartControls input[data-opt]').forEach(cb => {
-    cb.onchange = () => { chartOpts[cb.dataset.opt] = cb.checked; cb.closest(".toggle").classList.toggle("on", cb.checked); drawChart(); };
+    cb.onchange = () => { chartOpts[cb.dataset.opt] = cb.checked; cb.closest(".toggle").classList.toggle("on", cb.checked);
+      syncOverlayCount(); drawChart(); };
   });
+  const oBtn = document.getElementById("overlayBtn"), oMenu = document.getElementById("overlayMenu");
+  if (oBtn && oMenu) {
+    oBtn.onclick = () => {
+      const open = !oMenu.classList.contains("open");
+      oMenu.classList.toggle("open", open);
+      oBtn.setAttribute("aria-expanded", String(open));
+    };
+  }
+  syncOverlayCount();
   buildRangeSel(document.getElementById("rangeSel"));
   buildRangeSel(document.getElementById("chartModalRangeSel"));
   syncFibControls();
   const expandBtn = document.querySelector('.chart-expand-btn');
   if (expandBtn) expandBtn.onclick = () => window.expandChart(active);
+  observeChartBox();
+}
+document.addEventListener("pointerdown", e => {
+  if (!overlayMenuOpen()) return;
+  if (!e.target.closest("#overlayMenu") && !e.target.closest("#overlayBtn")) closeOverlayMenu();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && overlayMenuOpen()) { e.stopPropagation(); closeOverlayMenu(); } }, true);
+
+/* The canvas is sized by its container now instead of by a constant, so anything that
+   changes the container's height — the split drag, entering the Chart destination, the
+   focus-mode switch — has to repaint. The window resize handler below covers the window;
+   this covers everything else. One observer, re-pointed at each render's fresh #chartBox. */
+let _chartBoxRO = null;
+function observeChartBox() {
+  const box = document.getElementById("chartBox");
+  if (!box) return;
+  if (!_chartBoxRO) {
+    let raf = null;
+    _chartBoxRO = new ResizeObserver(() => {
+      if (raf) return;                       // coalesce a drag's worth of callbacks into one paint
+      raf = requestAnimationFrame(() => { raf = null; if (active) drawChart(); });
+    });
+  }
+  _chartBoxRO.disconnect();
+  _chartBoxRO.observe(box);
 }
 function movingAvg(arr, n) { const out = new Array(arr.length).fill(null); let sum = 0;
   for (let i = 0; i < arr.length; i++) { sum += arr[i]; if (i >= n) sum -= arr[i - n]; if (i >= n - 1) out[i] = sum / n; } return out; }
@@ -2068,8 +2282,15 @@ function drawChart() {
   }
   // x axis (dates)
   ctx.textAlign = "center"; ctx.fillStyle = cssVar("--ink-dim");
-  for (let g = 0; g <= 4; g++) { const i = Math.round(g / 4 * (data.length - 1));
-    ctx.fillText(axisLabel(data[i], spec.tf, g === 0 || g === 4), X(i), H - 8); }
+  for (let g = 0; g <= 4; g++) {
+    const i = Math.round(g / 4 * (data.length - 1));
+    const label = axisLabel(data[i], spec.tf, g === 0 || g === 4);
+    // Edge ticks carry the day as well as the clock, so they are the widest labels on the
+    // axis and the outermost — centred on their own tick they run off the canvas and get
+    // clipped mid-character. Nudge them inside instead of letting the edge eat them.
+    const half = ctx.measureText(label).width / 2;
+    ctx.fillText(label, Math.max(half + 2, Math.min(W - half - 2, X(i))), H - 8);
+  }
 
   // everything painted after the axes is clipped to the reveal front
   const frontX = reveal >= 1 ? W : padL + reveal * (W - padL - padR);
@@ -2367,6 +2588,7 @@ function chatMsgInner(msg) {
 
 function renderChat() {
   const m = document.getElementById("chatMessages"); const sess = sessions[active];
+  syncChatDock();   // an empty thread is an input row, not a 280px band
   if (!sess) { m.innerHTML = ""; return; }
   if (!sess.history.length) {
     m.innerHTML = `<div class="chat-empty">Ask anything about <b>${esc(active)}</b> — risks, peers, options ideas, or how institutions are positioned. Each ticker keeps its own thread.</div>`;
@@ -2544,7 +2766,12 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
     for (const s of SNAPS) if (Math.abs(pct - s) < 1.2) { pct = s; break; }
     pct = Math.max(30, Math.min(70, pct));
     split.style.setProperty("--left-w", pct.toFixed(2) + "%");
-    badge.textContent = Math.round(pct) + " / " + Math.round(100 - pct);
+    // --left-w is a share of the whole grid, which now includes the rail column, so the raw
+    // percentage is not the ratio between the two PANES — which is the only thing the
+    // reader is actually sizing. Report the panes.
+    const railPct = ((document.getElementById("viewRail")?.getBoundingClientRect().width || 0) / rect.width) * 100;
+    const left = Math.round((pct - railPct) / Math.max(1, 100 - railPct) * 100);
+    badge.textContent = left + " / " + (100 - left);
     syncMetricDensity();
     if (active) drawChart();          // chart follows the drag live
   }
@@ -2587,17 +2814,51 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
   });
 })();
 
+/* The dock is collapsed to its input row until there is something in the thread or the
+   reader is typing. Called from renderChat, from the input's focus, and from showView —
+   anywhere the answer could change. Never collapses mid-thread: losing the transcript
+   under you while a reply streams would be worse than the height it costs. */
+function syncChatDock(focused) {
+  const dock = document.getElementById("chatDock");
+  if (!dock) return;
+  const sess = sessions[active];
+  /* `focused` is passed explicitly by the focus handler rather than inferred from
+     document.activeElement: in a background tab activeElement reports <body> even
+     immediately inside a focus event, so inferring it makes the dock refuse to open in
+     exactly the case that is hardest to notice. */
+  const wanted = focused === true || Boolean(sess?.history?.length);
+  if (dock.classList.contains("expanded") === wanted) return;
+  dock.classList.add("animate");
+  dock.classList.toggle("expanded", wanted);
+  setTimeout(() => dock.classList.remove("animate"), 340);
+}
+on("chatInput", "focus", () => syncChatDock(true));
+// Leaving an empty field takes the height back; a dock with a thread in it stays open,
+// because `wanted` is already true from the history.
+on("chatInput", "blur", () => syncChatDock(false));
+
 (function () {
   const grip = document.getElementById("chatGrip"), dock = document.getElementById("chatDock");
   if (!grip || !dock) return;   // analyzer-only chrome; the screener page has no chat dock
-  try { const saved = localStorage.getItem("squall-chat-h"); if (saved) dock.style.setProperty("--chat-h", saved); } catch (e) {}
+  /* A stored height is clamped against the pane it has to live in rather than trusted.
+     The value in this browser was 124px — the old min-height, dragged there by hand to
+     claw reading space back off a 280px default — and restoring it verbatim would just
+     reproduce the cramped dock the collapse is meant to fix. */
+  try {
+    const saved = parseFloat(localStorage.getItem("squall-chat-h"));
+    if (Number.isFinite(saved)) {
+      const paneH = document.getElementById("aiPane")?.getBoundingClientRect().height || 0;
+      const cap = paneH ? paneH * 0.7 : saved;
+      dock.style.setProperty("--chat-h", Math.round(Math.max(150, Math.min(cap, saved))) + "px");
+    }
+  } catch (e) {}
   let dragging = false, pendingY = null, raf = null;
 
   function apply() {
     raf = null;
     if (pendingY == null) return;
     const aiPane = document.getElementById("aiPane").getBoundingClientRect();
-    const h = Math.max(120, Math.min(aiPane.height * 0.8, aiPane.bottom - pendingY));
+    const h = Math.max(150, Math.min(aiPane.height * 0.7, aiPane.bottom - pendingY));
     dock.style.setProperty("--chat-h", Math.round(h) + "px");
   }
   grip.addEventListener("pointerdown", e => {
@@ -2619,7 +2880,9 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
   grip.addEventListener("pointerup", stop); grip.addEventListener("pointercancel", stop);
   grip.addEventListener("dblclick", () => {
     dock.classList.add("animate");
-    dock.style.setProperty("--chat-h", "280px");
+    // Back to the stylesheet's default (46% of the pane), not to a pixel constant — a
+    // constant is what stopped scaling with the window in the first place.
+    dock.style.removeProperty("--chat-h");
     try { localStorage.removeItem("squall-chat-h"); } catch (e) {}
     setTimeout(() => dock.classList.remove("animate"), 350);
   });
@@ -2629,28 +2892,18 @@ if (window.ResizeObserver) { const p = document.getElementById("dataPane");
     const dir = e.key === "ArrowUp" ? 1 : e.key === "ArrowDown" ? -1 : 0;
     if (!dir) return;
     e.preventDefault();
-    const cur = parseFloat(dock.style.getPropertyValue("--chat-h")) || 280;
     const aiPane = document.getElementById("aiPane").getBoundingClientRect();
-    const h = Math.max(120, Math.min(aiPane.height * 0.8, cur + dir * 24));
+    const cur = parseFloat(dock.style.getPropertyValue("--chat-h")) || dock.getBoundingClientRect().height;
+    const h = Math.max(150, Math.min(aiPane.height * 0.7, cur + dir * 24));
     dock.style.setProperty("--chat-h", Math.round(h) + "px");
     try { localStorage.setItem("squall-chat-h", Math.round(h) + "px"); } catch (err) {}
   });
 })();
 
-/* ════════════════ MOBILE TABS ════════════════ */
-document.querySelectorAll("#mobileTabs button").forEach(btn => {
-  btn.onclick = () => { document.querySelectorAll("#mobileTabs button").forEach(b => b.classList.toggle("active", b === btn));
-    if (matchMedia("(max-width: 960px)").matches) {
-      document.getElementById("dataPane")?.toggleAttribute("data-hidden", btn.dataset.pane !== "dataPane");
-      document.getElementById("aiPane")?.toggleAttribute("data-hidden", btn.dataset.pane !== "aiPane");
-      if (btn.dataset.pane === "dataPane" && active) drawChart(); } };
-});
-matchMedia("(max-width: 960px)").addEventListener("change", ev => {
-  if (!ev.matches) { document.getElementById("dataPane")?.removeAttribute("data-hidden"); document.getElementById("aiPane")?.removeAttribute("data-hidden"); }
-  else document.querySelector("#mobileTabs button.active")?.click();
-  if (active) drawChart();
-});
-if (matchMedia("(max-width: 960px)").matches) document.getElementById("aiPane")?.setAttribute("data-hidden", "");
+/* #mobileTabs is gone. It was a Data/AI pane switcher below 960px — the same idea as the
+   rail, at one breakpoint, with its own markup, CSS and wiring. VIEWS/showView/
+   syncPaneVisibility subsume it, and FOCUS_MQ (which watches height as well as width) is
+   what decides when one pane at a time applies. */
 
 /* ════════════════ MODAL OVERLAY TOGGLES (delegation — fires on cloned checkboxes) ════════════════ */
 on("chartModalControls", "change", function (e) {
@@ -2661,6 +2914,7 @@ on("chartModalControls", "change", function (e) {
   // Mirror state back to the source checkbox in #chartControls
   const src = document.querySelector(`#chartControls input[data-opt="${opt}"]`);
   if (src) { src.checked = e.target.checked; src.closest(".toggle")?.classList.toggle("on", e.target.checked); }
+  syncOverlayCount();   // the inline row's badge is the only state readout once the modal closes
   drawChart();
 });
 

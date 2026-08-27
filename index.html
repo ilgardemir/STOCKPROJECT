@@ -64,25 +64,25 @@
   </div>
 </div>
 
-<div id="summaryStrip"></div>
 <!--#include chrome-tabs-->
 
+<!-- The workspace is destinations, not bands. #viewRail is a VERTICAL list on purpose: a
+     horizontal tab row costs 34–40px of the only axis that is scarce here, and a 96px rail
+     costs none of it. It is rendered by renderAll (so wire it by delegation, never with a
+     top-level getElementById) and it drives both modes — in split mode it lists the data
+     destinations and both panes stay mounted; in focus mode it lists all of them and one
+     pane at a time takes the whole region. -->
 <div id="workspace">
-  <div id="mobileTabs">
-    <button class="active" data-pane="dataPane">Data</button>
-    <button data-pane="aiPane">AI Analysis<span class="tab-dot"></span></button>
-  </div>
   <div id="split">
+    <nav id="viewRail" role="tablist" aria-label="Workspace views" aria-orientation="vertical"></nav>
     <section class="pane" id="dataPane">
-      <div class="pane-head">Market &amp; Filing Data <span class="tag">SEC · Prices · Options</span></div>
       <div class="pane-body" id="dataBody"></div>
     </section>
     <div id="resizer" title="Drag to resize · double-click to reset" tabindex="0" role="separator" aria-orientation="vertical"
          aria-label="Resize panes — arrow keys to adjust, double-click or Enter to reset"><span class="rz-badge" id="rzBadge"></span></div>
     <section class="pane" id="aiPane">
-      <div class="pane-head">AI Analysis <span class="tag" id="aiModelTag">AI</span></div>
       <div class="pane-body">
-        <div id="aiScroll"><div id="aiSummary" class="prose"></div></div>
+        <div id="aiScroll"><div class="ai-modelbar"><span class="tag" id="aiModelTag">AI</span></div><div id="aiSummary" class="prose"></div></div>
         <div id="chatDock">
           <div id="chatGrip" title="Drag to resize chat" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Resize chat panel — arrow keys to adjust"></div>
           <div id="chatMessages"></div>
@@ -162,14 +162,24 @@
     // update title
     if (ticker) document.getElementById('chartModalTitle').textContent = ticker + ' — Price Chart';
 
-    // clone overlay toggles (MA, BB, Volume…) into modal controls bar,
-    // excluding #rangeSel which has its own mirrored version inside the modal head
+    // Rebuild the modal's control bar. The expanded chart has width the inline row does
+    // not, so the overlay toggles come back OUT of their popover and sit inline here.
+    // Cloning .overlay-wrap wholesale instead would put a second #overlayBtn/#overlayMenu
+    // in the document — duplicate ids, and the copy would be dead because its click
+    // handler is bound by id in wireChartControls. The toggles themselves carry no id,
+    // only data-opt, which #chartModalControls already handles by delegation.
     var src = document.getElementById('chartControls');
     var dst = document.getElementById('chartModalControls');
     if (src && dst) {
       dst.innerHTML = '';
+      var menu = document.getElementById('overlayMenu');
+      if (menu) Array.from(menu.querySelectorAll('.toggle')).forEach(function (el) {
+        dst.appendChild(el.cloneNode(true));
+      });
       Array.from(src.children).forEach(function (el) {
-        if (el.id !== 'rangeSel') dst.appendChild(el.cloneNode(true));
+        // #rangeSel has its own mirrored copy in the modal head.
+        if (el.id === 'rangeSel' || el.classList.contains('overlay-wrap')) return;
+        dst.appendChild(el.cloneNode(true));
       });
     }
 

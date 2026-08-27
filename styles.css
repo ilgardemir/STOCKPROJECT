@@ -15,7 +15,12 @@
      color, which lightens in dark themes and darkens in light ones without a new literal
      per theme. --rule is too near --chrome-2 in the dark palettes to do the job. */
   --chrome-hi: color-mix(in srgb, var(--chrome-2) 84%, var(--ink));
-  --header-h: 58px; --ctl-h: 36px;
+  /* Every pixel here is spent three times over: the header is one of only two fixed bands
+     left above the workspace, and the machine this is used on has a 585px viewport. */
+  /* 130px is not arbitrary: "Fundamentals" is one unbreakable 94px word at this mono size,
+     and a rail narrower than its widest label breaks it across two lines. Width is the
+     axis this layout can afford — height is the one it cannot. */
+  --header-h: 52px; --ctl-h: 34px; --rail-w: 130px;
   --ease: cubic-bezier(.22,.9,.32,1);
   --ease-out: cubic-bezier(.16,1,.3,1);
   --ease-spring: cubic-bezier(.34,1.4,.44,1);
@@ -133,7 +138,7 @@ button { font-family: inherit; }
 }
 
 /* HEADER */
-header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 22px; height: var(--header-h);
+header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 16px; height: var(--header-h);
   background: var(--chrome-1); border-bottom: 1px solid var(--rule); position: relative; z-index: 30; transition: background .35s var(--ease); }
 .wordmark { display: flex; align-items: center; gap: 11px; user-select: none; cursor: pointer; background: none; border: none;
   padding: 4px 8px; margin-left: -8px; border-radius: var(--radius-sm); transition: background .2s var(--ease); }
@@ -218,6 +223,14 @@ body.hero-up .util-rail { margin-left: auto; }
 .util-rail > button svg { width: 15px; height: 15px; flex-shrink: 0; transition: transform .3s var(--ease-spring); }
 .util-rail > button:active svg { transform: scale(.85); }
 .rail-div { width: 1px; height: 17px; flex-shrink: 0; background: var(--rule); transition: background .22s var(--ease); }
+/* `hidden` is a UA display:none, and the rules above set display:inline-flex on these —
+   which wins. Without restating it the Saved button would sit in the rail with an empty
+   label whenever there is nothing saved. */
+.util-rail > button[hidden], .rail-div[hidden] { display: none; }
+/* :first-of-type is positional and still resolves to #savedBtn while it is hidden, so the
+   rail's left cap has to be handed over explicitly rather than inferred. */
+#savedBtn[hidden] ~ #screenerNav { border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); }
+#savedBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
 #screenerNav:hover svg { transform: translateX(2px); }
 #themeBtn { width: 38px; padding: 0; }
 #themeBtn svg { width: 16px; height: 16px; }
@@ -362,24 +375,55 @@ body.hero-up .util-rail { margin-left: auto; }
 .chip.resume { display: none; color: var(--accent); border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 .chip.resume.show { display: inline-flex; align-items: center; gap: 6px; animation: heroIn .4s var(--ease-out); }
 
-/* SUMMARY STRIP */
-#summaryStrip { flex-shrink: 0; display: none; align-items: baseline; gap: 18px; flex-wrap: wrap; padding: 14px 22px 12px;
-  background: var(--chrome-1); border-bottom: 1px solid var(--rule); }
-#summaryStrip.show { display: flex; animation: heroIn .45s var(--ease); }
-#sCompany { font-size: 19px; font-weight: 700; color: var(--ink-bright); letter-spacing: -.01em; }
-#sTicker { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .08em; background: var(--accent-soft);
-  color: var(--accent); border-radius: var(--radius-xs); padding: 3px 8px; transform: translateY(-2px); display: inline-block; }
-#sPrice { font-family: var(--mono); font-size: 24px; font-weight: 600; color: var(--ink-bright); }
-.pill { font-family: var(--mono); font-size: 12px; font-weight: 600; border-radius: 99px; padding: 3px 11px; }
+/* TICKER BAR — identity, inside the header.
+   Replaces #summaryStrip, which was a 100px band. Sizes are the header's register, not a
+   banner's: the price is the largest thing in the bar but it still sits inside 52px. */
+#tickerBar { display: none; align-items: baseline; gap: 10px; min-width: 0; flex-shrink: 1; overflow: hidden;
+  margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--rule); }
+#tickerBar.show { display: flex; animation: heroIn .35s var(--ease); }
+#sTicker { flex-shrink: 0; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .08em; background: var(--accent-soft);
+  color: var(--accent); border-radius: var(--radius-xs); padding: 3px 8px; transform: translateY(-1px); }
+#sCompany { min-width: 0; flex: 0 1 auto; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--t-data); font-weight: 500; color: var(--ink-dim); letter-spacing: 0; }
+#sPrice { flex-shrink: 0; font-family: var(--mono); font-size: var(--t-lead); font-weight: 600; color: var(--ink-bright); }
+.pill { flex-shrink: 0; font-family: var(--mono); font-size: 11px; font-weight: 600; border-radius: 99px; padding: 2px 9px; white-space: nowrap; }
 .pill.up { color: var(--up); background: var(--up-soft); } .pill.down { color: var(--down); background: var(--down-soft); }
 .meta-dot { font-size: 12px; color: var(--ink-dim); } .meta-dot b { color: var(--ink); font-weight: 600; }
-.sector-badge, .regime-badge { font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .04em; border-radius: 99px; padding: 4px 9px; white-space: nowrap; }
+.sector-badge, .regime-badge { flex-shrink: 0; font-family: var(--mono); font-size: var(--t-micro); font-weight: 650; letter-spacing: .04em; border-radius: 99px; padding: 3px 8px; white-space: nowrap; }
 .sector-badge { color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .regime-badge { color: var(--warn); background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
+/* The shed ladder. The bar gives up its own content — right to left, least glanceable
+   first — before the wordmark or the search field lose any width, because searching and
+   getting home are what the header is FOR. The tagline goes as soon as identity arrives. */
+body.has-analysis .wordmark small { display: none; }
+/* The field still holds a ticker and a placeholder at 280px; the bar's identity block
+   does not fit at all if the search keeps its full 420px landing-page width. */
+body.has-analysis #searchForm { max-width: 280px; }
+/* The company name goes FIRST, not last. It is the widest variable item in the bar and
+   the most redundant one — the ticker is already there, the full name is on the chip's
+   title and in the Live Snapshot card. Kept to the end of the ladder it did not disappear,
+   it ellipsed: at 1280px it rendered as 32px of "AAP…", which is worse than absent and
+   costs the sector and regime badges the room they need. */
+@media (max-width: 1400px) { #sCompany { display: none; } }
+@media (max-width: 1180px) { #tickerBar .regime-badge { display: none; } }
+@media (max-width: 1060px) { #tickerBar .sector-badge { display: none; } }
+@media (max-width:  620px) { #tickerBar { margin-left: 10px; padding-left: 10px; gap: 7px; } #sTicker { display: none; } }
 
-/* Saved analyses behave like lightweight browser tabs and persist locally. */
-#analysisTabs { display: flex; flex-shrink: 0; min-height: 0; gap: 5px; padding: 0 14px; overflow-x: auto; background: var(--chrome-0); border-bottom: 1px solid var(--rule); }
-#analysisTabs:empty { display: none; }
+/* Saved analyses persist locally and live in a popover off the utility rail. They were a
+   permanent 37px strip under the header; switching between saved work is on-demand, so it
+   is on-demand chrome. The rows keep their markup (renderTickerPills is unchanged) — only
+   the axis changed, from a row of browser-style tabs to a vertical menu. */
+#savedMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 70; display: none;
+  width: min(320px, calc(100vw - 24px)); max-height: calc(100dvh - var(--header-h) - 24px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 6px; }
+#savedMenu.open { display: block; animation: sugIn .14s var(--ease-out); }
+.menu-head { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-dim); padding: 6px 8px 8px; }
+#savedCount { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--radius-xs); padding: 1px 5px; margin-left: 1px; }
+#savedCount:empty { display: none; }
+#analysisTabs { display: flex; flex-direction: column; gap: 2px; }
+#analysisTabs:empty::after { content: "Nothing saved yet."; display: block; padding: 4px 8px 10px; font-size: var(--t-data); color: var(--ink-dim); }
 /* Saved tabs can fail for one reason the user can act on — a full origin storage budget —
    and that failure used to be entirely silent. Warn role, not a new hue: --warn already
    means "state you should look at" and is declared per [data-mode], so this reads the same
@@ -393,12 +437,16 @@ body.hero-up .util-rail { margin-left: auto; }
   flex-shrink: 0; font-family: var(--mono); font-size: var(--t-body); line-height: 1;
   padding: 3px 6px; border-radius: var(--radius-xs); }
 #storageNotice button:hover { background: var(--chrome-hi); }
-.analysis-tab { display: flex; align-items: stretch; min-width: 140px; max-width: 210px; margin-top: 5px; border: 1px solid var(--rule); border-bottom: 0; border-radius: 11px 11px 0 0; background: var(--chrome-2); color: var(--ink-dim); }
-.analysis-tab.active { background: var(--chrome-1); color: var(--ink-bright); border-color: var(--rule); box-shadow: inset 0 2px 0 var(--accent); }
+/* A menu row, not a tab. The selected one is carried by an accent inset rule and bright
+   ink — never by a fill alone, because in Daylight --chrome-1 and --chrome-2 sit close
+   enough that a tint reads as nothing at all. */
+.analysis-tab { display: flex; align-items: stretch; border: 0; border-radius: var(--radius-xs); background: none; color: var(--ink-dim); }
+.analysis-tab:hover { background: var(--chrome-hi); }
+.analysis-tab.active { color: var(--ink-bright); background: var(--chrome-2); box-shadow: inset 2px 0 0 var(--accent); }
 .analysis-tab-main, .analysis-tab-close { appearance: none; border: 0; background: none; color: inherit; cursor: pointer; }
-.analysis-tab-main { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: 7px; padding: 8px 5px 8px 11px; text-align: left; }
-.analysis-tab-main b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
-.analysis-tab-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-micro); color: var(--ink-dim); }
+.analysis-tab-main { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: 8px; padding: 8px 5px 8px 11px; text-align: left; }
+.analysis-tab-main b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
+.analysis-tab-main span { flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-micro); color: var(--ink-dim); }
 .analysis-tab-close { width: 30px; border-radius: var(--radius-sm); font-size: 17px; opacity: .65; }
 .analysis-tab-close:hover { opacity: 1; color: var(--down); background: var(--down-soft); }
 .analysis-tab.screener-tab:not(.active) .analysis-tab-main b { color: var(--ink); }
@@ -674,14 +722,42 @@ body[data-page="backtester"] header { flex: 0 0 auto; }
 @keyframes wsIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes wsOut { to { opacity: 0; transform: translateY(8px) scale(.997); } }
 #hero.leaving { animation: wsOut .28s var(--ease) forwards; }
-#split { display: grid; height: 100%; grid-template-columns: minmax(360px, var(--left-w, 50%)) 10px minmax(380px, 1fr); }
+/* The rail is a real grid column, so it costs width and no height. The old .pane-head
+   bands are gone entirely: the rail already names what the left pane is showing, and the
+   right pane's "AI ANALYSIS · <model>" is now a tag riding the top of the prose itself. */
+#split { display: grid; height: 100%; grid-template-columns: var(--rail-w) minmax(300px, var(--left-w, 50%)) 10px minmax(340px, 1fr); }
 .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.pane-head { flex-shrink: 0; display: flex; align-items: center; gap: 9px; padding: 10px 18px; font-family: var(--mono); font-size: 11px; font-weight: 600;
-  letter-spacing: .14em; text-transform: uppercase; color: var(--ink-dim); border-bottom: 1px solid var(--rule); background: var(--chrome-0); }
-.pane-head .tag { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: .04em; text-transform: none;
-  color: var(--accent); background: var(--accent-soft); border-radius: var(--radius-xs); padding: 1px 7px; transition: all .3s var(--ease); }
-.pane-head .tag.live { color: var(--accent); background: var(--accent-soft); }
 .pane-body { flex: 1; overflow-y: auto; padding: 16px 18px 40px; scroll-behavior: smooth; }
+
+/* WORKSPACE RAIL */
+#viewRail { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 10px 8px; background: var(--chrome-1); border-right: 1px solid var(--rule); }
+#viewRail::-webkit-scrollbar { display: none; }
+#viewRail button { position: relative; flex: 0 0 auto; text-align: left; background: none; border: 0; cursor: pointer;
+  padding: 8px 10px; border-radius: var(--radius-xs); font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; line-height: 1.35; overflow-wrap: break-word; color: var(--ink-dim);
+  transition: color .15s var(--ease), background .15s var(--ease); }
+#viewRail button:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+/* Selected state is the accent rule plus bright ink, never a fill on its own: in Daylight
+   --chrome-1 and --chrome-2 sit within ~1.2:1 and a tint carries no affordance at all. */
+#viewRail button.active { color: var(--ink-bright); background: var(--chrome-2); box-shadow: inset 2px 0 0 var(--accent); }
+#viewRail button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#viewRail button[data-group-start] { margin-top: 9px; padding-top: 15px; border-top: 1px solid var(--rule); }
+/* Kept from #mobileTabs: while the write-up streams and you are reading numbers, this is
+   the only thing that says so. */
+#viewRail .tab-dot { display: none; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--accent); animation: dotPulse 1.2s ease-in-out infinite; vertical-align: middle; }
+#viewRail button.streaming .tab-dot { display: inline-block; }
+
+/* FOCUS MODE — one destination, whole workspace. Triggered by either axis, because a wide
+   but short window (1280×720 is the common one) was the case the old width-only breakpoint
+   missed: it kept the split and handed the analysis a 228px reading slot. */
+body.focus-mode #split { grid-template-columns: var(--rail-w) 1fr; }
+body.focus-mode #resizer { display: none; }
+body.focus-mode .pane { grid-column: 2; grid-row: 1; height: 100%; }
+body.focus-mode .pane[data-hidden] { display: none; }
+body.focus-mode .pane:not([data-hidden]) { animation: paneIn .24s var(--ease-out); }
+@keyframes paneIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* Split resizer — wide hit area, rAF-driven, live % badge, touch-friendly */
 #resizer { cursor: col-resize; position: relative; background: transparent; touch-action: none;
@@ -699,35 +775,28 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select: none !important; }
 body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important; }
 
-#mobileTabs { display: none; flex-shrink: 0; border-bottom: 1px solid var(--rule); background: var(--chrome-1); }
-#mobileTabs button { flex: 1; background: none; border: none; cursor: pointer; padding: 13px 11px; min-height: 46px; font-family: var(--mono); font-size: 12px; font-weight: 600;
-  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim); border-bottom: 2px solid transparent; transition: color .2s, border-color .25s var(--ease); position: relative; }
-#mobileTabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
-#mobileTabs button .tab-dot { display: none; position: absolute; top: 12px; margin-left: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: dotPulse 1.2s ease-in-out infinite; }
-#mobileTabs button.streaming .tab-dot { display: inline-block; }
 @keyframes dotPulse { 0%,100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
 @media (max-width: 960px) {
-  #mobileTabs { display: flex; } #split { display: block; } #resizer { display: none; }
-  .pane { height: 100%; } .pane[data-hidden] { display: none; }
-  .pane:not([data-hidden]) { animation: paneIn .28s var(--ease-out); }
-  @keyframes paneIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-  #summaryStrip { gap: 12px; padding: 12px 16px 10px; } #sPrice { font-size: 20px; }
+  /* Pane switching is no longer a breakpoint concern — body.focus-mode owns it, and it
+     watches height too. What is left here is genuinely about a narrow window. */
   header { padding: 0 14px; } #ticker { font-size: 16px; } .wordmark small { display: none; }
   #chatInput { font-size: 16px; }
   #chatRow { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
   #chatGrip { height: 20px; } #chatGrip::before { width: 56px; height: 5px; }
-  #chatDock { max-height: 60dvh; }
   .pane-body { padding: 14px 14px 40px; }
   #rangeSel button { padding: 6px 11px; }
   .toggle { padding: 6px 12px 6px 10px; }
 }
+/* The rail is the last thing that should eat width on a phone, so it sheds to a compact
+   strip rather than disappearing — losing it would leave no way to change destination. */
+@media (max-width: 560px) { :root { --rail-w: 74px; } #viewRail { padding: 8px 5px; } #viewRail button { padding: 8px 7px; font-size: var(--t-micro); } }
 /* The header sheds labels one at a time as it narrows, rather than all at once. Each
    step hands its width to the search field, which is the bar's real job — dropping them
    together left a band around 560px where the field collapsed to ~120px. */
 @media (max-width: 900px) { #analyzeBtn { width: 30px; padding: 0; justify-content: center; } #analyzeBtn .btn-label { display: none; } }
 @media (max-width: 720px) {
   /* Rail collapses to icons — the labels go, the controls stay. */
-  #profileBtn span, #screenerNav span { display: none; }
+  #profileBtn span, #screenerNav span, #savedBtn span { display: none; }
   .util-rail > button { width: 38px; padding: 0; }
   /* The search box sits far right in a crowded header, so a dropdown anchored to it
      overhangs the left edge of the screen. Anchor to the viewport instead. */
@@ -759,26 +828,21 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 }
 
 /* CARDS */
-/* DATA PANE SECTIONS — four groups instead of one eighteen-card scroll.
-   Sticky because the pane body is what scrolls: a nav that scrolls away is a nav you have
-   to hunt for. The backdrop is --chrome-0 (the page the cards are transparent over), so
-   card content passing underneath does not show through. */
-#dataSections { position: sticky; top: 0; z-index: 6; display: flex; gap: 2px; margin: -16px -18px 0;
-  padding: 8px 18px 0; background: var(--chrome-0); border-bottom: 1px solid var(--rule); overflow-x: auto;
-  scrollbar-width: none; }
-#dataSections::-webkit-scrollbar { display: none; }
-#dataSections button { flex: 0 0 auto; background: none; border: 0; border-bottom: 2px solid transparent;
-  margin-bottom: -1px; cursor: pointer; padding: 7px 12px 8px; font-family: var(--mono);
-  font-size: var(--t-data); font-weight: 500; letter-spacing: 0; text-transform: lowercase;
-  color: var(--ink-dim); white-space: nowrap; transition: color .15s, border-color .15s, background .15s; }
-#dataSections button:hover { color: var(--ink-bright); background: var(--chrome-hi); }
-/* The selected tab is carried by the accent rule and the ink weight, NOT by the fill.
-   Daylight's --chrome-0 and --chrome-2 sit within ~1.2:1, so a background tint alone is
-   invisible there and the pane reads as having no selection at all. */
-#dataSections button.active { color: var(--ink-bright); border-bottom-color: var(--accent); }
-#dataSections button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The horizontal #dataSections tablist is gone — its job moved to #viewRail, which is
+   vertical and therefore free on the axis this layout has none of. What remains is the
+   panel itself. */
 .data-section { display: none; }
-.data-section.show { display: block; }
+/* A metric row is a label and a value sharing an axis; at the ~1150px a focus-mode pane
+   now offers, that axis is far enough apart that the eye stops connecting the two. The
+   extra width is a gain for the chart and for prose, and a loss here, so the cards keep a
+   measure. Left-aligned, not centred: the rail is the left edge of the reading column. */
+.data-section.show { display: block; max-width: 960px; }
+/* The chart destination is alone in its panel and takes the region's height rather than a
+   constant. #dataBody has to stop being a scroll container for it, or the fluid #chartBox
+   inside resolves against a scrollHeight that grows to fit it — a feedback loop. */
+#dataBody:has(> .chart-section.show) { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 16px; }
+/* The chart is the exception — it is a picture, and a picture wants the width. */
+.data-section.chart-section.show { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
 
 .card { background: none; border: 0; border-top: 1px solid var(--rule); border-radius: 0; box-shadow: none;
   margin-bottom: 0; overflow: hidden; transition: none; }
@@ -908,8 +972,37 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .copy-btn:hover { color: var(--accent); border-color: var(--accent); }
 
 /* CHART */
-#chartControls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
-.chart-tool-btn { border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 5px 11px; cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 650; }
+/* One row, never two. `flex-wrap: wrap` plus eight inline toggles is what turned this into
+   93px above a 360px canvas; the toggles moved into #overlayMenu and the row is now the
+   things you act on while reading the chart, plus the two labels that say what it is. */
+/* No overflow on the row itself: a scroll container on x forces y to compute to auto as
+   well, which would clip #overlayMenu — a popover anchored inside it. The elastic part is
+   the range selector, so that is where the sideways scroll goes. */
+#chartControls { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin-bottom: 10px; flex-shrink: 0; min-width: 0; }
+.overlay-wrap { position: relative; flex-shrink: 0; }
+#overlayBtn { display: inline-flex; align-items: center; gap: 5px; }
+#overlayBtn .chev { width: 11px; height: 11px; transition: transform .25s var(--ease); }
+#overlayBtn[aria-expanded="true"] { color: var(--ink-bright); border-color: var(--ink-dim); }
+#overlayBtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+/* Reports the chart's state now that the switches are behind a door. */
+.overlay-count { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--radius-xs); padding: 0 5px; }
+.overlay-count:empty { display: none; }
+#overlayMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; display: none;
+  width: 232px; max-width: calc(100vw - 24px); max-height: 62dvh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 6px; }
+#overlayMenu.open { display: flex; flex-direction: column; align-items: stretch; gap: 3px; animation: sugIn .14s var(--ease-out); }
+/* Inside the menu the toggles are rows, not pills — a stack of pill-shaped chips reads as
+   a filter bar rather than a settings list. */
+#overlayMenu .toggle { justify-content: flex-start; border: 0; background: none; border-radius: var(--radius-xs); padding: 6px 9px; }
+#overlayMenu .toggle:hover { background: var(--chrome-hi); }
+#overlayMenu .toggle.on { background: var(--chrome-2); }
+#overlayMenu .menu-head { padding: 7px 9px 3px; }
+#overlayMenu .chart-guide { margin-top: 6px; padding: 8px 9px 4px; }
+/* nowrap: in a nowrap row a button that wraps its own label is what turns a 28px control
+   strip back into a 44px one. */
+.chart-tool-btn { flex-shrink: 0; white-space: nowrap; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 5px 11px; cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 650; }
 .chart-tool-btn:hover, .chart-tool-btn.active { background: var(--accent); color: var(--accent-ink); }
 .chart-tool-btn.quiet { border-color: var(--rule); background: var(--chrome-2); color: var(--ink-dim); }
 .chart-tool-btn.quiet:hover { border-color: var(--down); color: var(--down); }
@@ -919,7 +1012,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
    and a zoomed daily chart are indistinguishable by eye, so without this the short tiers
    read as the same view at a different scale. It takes the auto margin so it sits with the
    range selector it describes; #rangeSel then follows immediately rather than drifting. */
-.interval-chip { margin-left: auto; color: var(--ink-dim); font-family: var(--mono);
+.interval-chip { flex-shrink: 0; margin-left: auto; color: var(--ink-dim); font-family: var(--mono);
   font-size: var(--t-micro); letter-spacing: .03em; white-space: nowrap; }
 .interval-chip:empty { display: none; }
 .interval-chip + #rangeSel { margin-left: 8px; }
@@ -933,11 +1026,26 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .toggle.on { color: var(--ink-bright); border-color: var(--swatch, var(--accent)); }
 .toggle .dash { width: 13px; height: 0; border-top: 2px solid var(--swatch, var(--accent)); border-radius: 2px; }
 .toggle .dash.dotted { border-top-style: dashed; }
-#rangeSel { display: inline-flex; margin-left: auto; background: var(--chrome-2); border: 1px solid var(--rule); border-radius: 99px; padding: 2px; }
+#rangeSel { display: inline-flex; margin-left: auto; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  background: var(--chrome-2); border: 1px solid var(--rule); border-radius: 99px; padding: 2px; }
+#rangeSel::-webkit-scrollbar { display: none; }
+#rangeSel button { flex: 0 0 auto; }
+/* The interval chip explains the range selector; when the pane is too narrow for both, the
+   selector is the one you act on. */
+.fib-status { flex-shrink: 1; overflow: hidden; }
+@media (max-width: 1180px) { body:not(.focus-mode) .interval-chip { display: none; } }
 #rangeSel button { background: none; border: none; cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--ink-dim); padding: 4px 10px; border-radius: 99px; transition: all .15s; }
 #rangeSel button.active { background: var(--accent); color: var(--accent-ink); }
-#chartBox { position: relative; }
-#priceChart { width: 100%; height: 360px; display: block; cursor: crosshair; }
+/* The canvas takes the region rather than a constant. 360px was a number chosen against a
+   pane that has 312px of window on a 720p display, so the chart and its controls could
+   never be on screen together no matter how much room the browser actually had. drawChart
+   already measures clientWidth/clientHeight and bails on zero, so nothing there changes —
+   observeChartBox() just has to tell it when the box resizes. */
+#chartBox { position: relative; flex: 1; min-height: 240px; }
+#priceChart { width: 100%; height: 100%; display: block; cursor: crosshair; }
+/* Outside the chart destination (the expand modal reuses these ids) the box still needs a
+   height to resolve against, since there is no flex parent to stretch it. */
+.card #chartBox { flex: none; height: clamp(240px, 42vh, 460px); }
 #chartTip { position: absolute; pointer-events: none; display: none; background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-sm);
   font-family: var(--mono); font-size: 11px; line-height: 1.7; padding: 8px 11px; color: var(--ink-bright); box-shadow: var(--shadow); z-index: 5; white-space: nowrap; }
 #chartTip .tg { color: var(--up); } #chartTip .tr { color: var(--down); } #chartTip b { color: var(--accent); }
@@ -1025,7 +1133,13 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 
 /* AI PANE */
 #aiPane .pane-body { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-#aiScroll { flex: 1; overflow-y: auto; padding: 18px 20px 24px; min-height: 0; }
+#aiScroll { flex: 1; overflow-y: auto; padding: 14px 20px 24px; min-height: 0; }
+/* What is left of the deleted .pane-head. The band said "AI ANALYSIS" beside a pane that
+   was obviously the AI analysis; only the model name was information, so only the model
+   name survived — and it scrolls with the prose instead of costing a fixed 38px. */
+.ai-modelbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ai-modelbar .tag { font-family: var(--mono); font-size: var(--t-micro); font-weight: 500; letter-spacing: .04em;
+  color: var(--accent); background: var(--accent-soft); border-radius: var(--radius-xs); padding: 2px 8px; }
 #aiSummary.thinking { display: flex; align-items: center; gap: 10px; color: var(--ink-dim); font-size: 13px; }
 .ai-warn { background: var(--warn-soft); color: var(--warn); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 12px; margin-bottom: 12px; font-family: var(--mono); }
 /* VERDICT + COLLAPSIBLE ANALYSIS SECTIONS
@@ -1101,9 +1215,23 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #thinkingPanel .tk-label { display: block; font-size: var(--t-micro); font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
   color: var(--accent); margin-bottom: 7px; }
 
-/* CHAT — resizable, per-ticker */
-#chatDock { flex-shrink: 0; border-top: 1px solid var(--rule); background: var(--chrome-1); display: flex; flex-direction: column;
-  height: var(--chat-h, 280px); min-height: 120px; max-height: 70vh; }
+/* CHAT — collapsed until used, resizable, per-ticker.
+   It used to hold a fixed 280px band (min 120) inside a pane that has 390px in total, so
+   the written analysis was read through 72px on a first visit. Empty, it is now just its
+   input row: the affordance is still visible and still says what it is for, and it costs
+   44px instead of 280. It opens on the first message or when the field takes focus. */
+#chatDock { flex: 0 0 auto; border-top: 1px solid var(--rule); background: var(--chrome-1); display: flex; flex-direction: column;
+  height: auto; }
+#chatDock > #chatGrip, #chatDock > #chatMessages { display: none; }
+#chatDock.expanded { height: var(--chat-h, 46%); min-height: 150px; max-height: 70%; }
+#chatDock.expanded > #chatGrip { display: grid; }
+#chatDock.expanded > #chatMessages { display: flex; }
+/* Chat as a focus-mode destination — it is the whole region, so there is nothing to
+   resize against and the grip would be a control with no meaning. */
+body.chat-view #chatDock { height: 100%; min-height: 0; max-height: none; }
+body.chat-view #chatDock > #chatGrip { display: none; }
+body.chat-view #chatDock > #chatMessages { display: flex; }
+body.chat-view #aiScroll { display: none; }
 #chatDock.animate { transition: height .3s var(--ease-out); }
 #chatGrip { height: 14px; flex-shrink: 0; cursor: row-resize; display: grid; place-items: center; position: relative; touch-action: none; }
 #chatGrip::before { content: ""; width: 44px; height: 4px; border-radius: 99px; background: var(--rule); transition: background .2s, width .25s var(--ease-spring); }
@@ -1115,7 +1243,11 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-ink); font-weight: 500; border-bottom-right-radius: 4px; }
 .msg.ai { align-self: flex-start; background: var(--chrome-2); color: var(--ink); border: 1px solid var(--rule); border-bottom-left-radius: 4px; }
 .msg.ai .prose { font-size: 13px; }
-#chatRow { display: flex; gap: 8px; padding: 10px 16px 14px; flex-shrink: 0; }
+/* Collapsed, this row IS the dock, so its padding is a fixed band rather than breathing
+   room inside one. Tightened from 10/14 — eight pixels that the analysis above it needs
+   more than the input does. It reopens to comfortable spacing once the dock expands. */
+#chatRow { display: flex; gap: 8px; padding: 7px 16px 10px; flex-shrink: 0; }
+#chatDock.expanded > #chatRow, body.chat-view #chatRow { padding: 10px 16px 14px; }
 #chatInput { flex: 1; background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-sm); color: var(--ink-bright);
   font-family: var(--mono); font-size: 13px; padding: 9px 13px; outline: none; transition: border-color .2s, box-shadow .2s; }
 #chatInput:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -1230,7 +1362,7 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 .card > summary .chev { transition: transform .4s var(--ease-spring); }
 
 /* Live model tag pulses while streaming */
-.pane-head .tag.live { animation: livePulse 1.8s ease-in-out infinite; }
+.ai-modelbar .tag.live { animation: livePulse 1.8s ease-in-out infinite; }
 @keyframes livePulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); } 55% { box-shadow: 0 0 0 6px transparent; } }
 
 /* Chat — wind-dot typing indicator + empty-state entrance */

@@ -41,7 +41,10 @@ function makeEl(id) {
   return el;
 }
 
-function loadApp() {
+/* `focus` drives matchMedia, which is what FOCUS_MQ reads. The rail filters its own
+   contents by mode — the AI destinations only exist when one pane at a time is mounted —
+   so a harness that can only produce one mode cannot see half the behaviour. */
+function loadApp({ focus = false } = {}) {
   const noopEl = {
     dataset: {}, style: { setProperty() {}, getPropertyValue: () => "" },
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -74,7 +77,8 @@ function loadApp() {
     console: { log() {}, warn() {}, error() {}, info() {} },
     setTimeout, clearTimeout, setInterval, clearInterval,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {},
-    matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+    matchMedia: q => ({ matches: /max-height|max-width: 1100px/.test(String(q)) ? focus : false,
+      addEventListener() {}, addListener() {} }),
     getComputedStyle: () => ({ getPropertyValue: () => "#000", fontSize: "13px", display: "block" }),
     EventSource: function () { return { addEventListener() {}, close() {}, onerror: null }; },
     fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
@@ -102,6 +106,9 @@ function loadApp() {
 
 const read = loadApp();
 const APP = new Proxy({}, { get: (_t, name) => read(String(name)) });
+// A second realm in focus mode. Separate because app.js reads the media query at load.
+const readFocus = loadApp({ focus: true });
+const FOCUS = new Proxy({}, { get: (_t, name) => readFocus(String(name)) });
 
 // Sandbox-allocated arrays carry that realm's prototype, and strict deepEqual compares
 // prototypes — round-trip anything structural before comparing it.
@@ -251,45 +258,88 @@ test("an axis label never throws on a malformed or missing bar", () => {
   assert.equal(typeof APP.axisLabel(bar("2024-05-01"), "5m", false), "string");
 });
 
-/* ── Data pane sections ─────────────────────────────────────────────────────── */
+/* ── Workspace destinations and the rail ────────────────────────────────────── */
 
 const fullBucket = () => ({
+  chart: "<div id='chartControls'></div>",
   overview: "<details id='card-snapshot'></details>",
   technicals: "<details id='card-tech'></details>",
   fundamentals: "<details id='card-valuation'></details>",
   filings: "<details id='card-news'></details>",
 });
+const emptyBucket = () => ({ chart: "", overview: "", technicals: "", fundamentals: "", filings: "" });
+// renderViewRail writes the rail into #viewRail and returns only the panels, so the two
+// halves are read from two places.
+const railHtml = (r = read) => r('document.getElementById("viewRail").innerHTML');
 
-test("a filled bucket renders one tab and one panel per section", () => {
-  const out = APP.renderDataSections(fullBucket());
-  for (const s of APP.SECTIONS) {
-    assert.ok(out.includes(`data-section-tab="${s.id}"`), `no tab for ${s.id}`);
-    assert.ok(out.includes(`data-section="${s.id}"`), `no panel for ${s.id}`);
+test("a filled bucket renders one rail entry and one panel per data destination", () => {
+  const out = APP.renderViewRail(fullBucket());
+  const rail = railHtml();
+  for (const v of APP.DATA_VIEWS) {
+    assert.ok(rail.includes(`data-view="${v.id}"`), `no rail entry for ${v.id}`);
+    assert.ok(out.includes(`data-section="${v.id}"`), `no panel for ${v.id}`);
   }
-  assert.equal((out.match(/class="data-section show"/g) || []).length, 1,
+  assert.equal((out.match(/class="data-section show/g) || []).length, 1,
     "exactly one panel may be visible at a time");
 });
 
-test("every card still reaches the DOM — sectioning must not drop content", () => {
+test("every card still reaches the DOM — regrouping must not drop content", () => {
   // The whole premise of the change is that this is a regrouping, not a reduction.
   const bucket = fullBucket();
-  const out = APP.renderDataSections(bucket);
+  const out = APP.renderViewRail(bucket);
   for (const markup of Object.values(bucket)) {
-    assert.ok(out.includes(markup), `section content went missing: ${markup}`);
+    assert.ok(out.includes(markup), `destination content went missing: ${markup}`);
   }
 });
 
-test("a section with no cards gets no tab", () => {
-  // A ticker with no filings or news would otherwise open a tab onto an empty panel.
-  const bucket = { ...fullBucket(), filings: "", technicals: "   " };
-  const out = APP.renderDataSections(bucket);
-  assert.ok(!out.includes('data-section-tab="filings"'));
-  assert.ok(!out.includes('data-section-tab="technicals"'), "whitespace is not content");
-  assert.ok(out.includes('data-section-tab="overview"'));
+test("a destination with no cards gets no rail entry", () => {
+  // A ticker with no filings or news would otherwise offer a destination onto nothing.
+  APP.renderViewRail({ ...fullBucket(), filings: "", technicals: "   " });
+  const rail = railHtml();
+  assert.ok(!rail.includes('data-view="filings"'));
+  assert.ok(!rail.includes('data-view="technicals"'), "whitespace is not content");
+  assert.ok(rail.includes('data-view="overview"'));
 });
 
-test("an entirely empty bucket renders nothing rather than a bare tablist", () => {
-  assert.equal(APP.renderDataSections({ overview: "", technicals: "", fundamentals: "", filings: "" }), "");
+test("an entirely empty bucket renders nothing rather than a bare rail", () => {
+  assert.equal(APP.renderViewRail(emptyBucket()), "");
+});
+
+test("the chart is its own destination, not a card inside Overview", () => {
+  // As a card it was a fixed 565px inside a 312px window: the controls and the candles
+  // could never be on screen together whatever the pane's height.
+  assert.equal(APP.VIEWS[0].id, "chart");
+  const out = APP.renderViewRail(fullBucket());
+  assert.ok(/class="data-section [^"]*chart-section/.test(out),
+    "the chart panel must be marked so it can take the region's height");
+});
+
+test("split mode hides the AI destinations; focus mode lists them", () => {
+  // In split mode the AI pane is already beside you — selecting it is not a navigation.
+  APP.renderViewRail(fullBucket());
+  const split = railHtml();
+  assert.ok(!split.includes('data-view="analysis"'), "split mode must not offer AI Analysis");
+  assert.ok(!split.includes('data-view="chat"'));
+
+  FOCUS.renderViewRail(fullBucket());
+  const focus = railHtml(readFocus);
+  assert.ok(focus.includes('data-view="analysis"'), "focus mode must offer AI Analysis");
+  assert.ok(focus.includes('data-view="chat"'));
+  assert.ok(focus.includes("data-group-start"), "the two panes' destinations need a divider");
+});
+
+test("focus mode renders panels only for the data destinations", () => {
+  // The AI destinations are whole panes; a panel for them would be an empty div.
+  const out = FOCUS.renderViewRail(fullBucket());
+  assert.ok(!out.includes('data-section="analysis"'));
+  assert.ok(!out.includes('data-section="chat"'));
+});
+
+test("the streaming dot rides an AI destination that only focus mode renders", () => {
+  // It was on #mobileTabs' AI tab. Losing it would remove the only signal that the
+  // write-up is still generating while you are reading numbers.
+  FOCUS.renderViewRail(fullBucket());
+  assert.ok(railHtml(readFocus).includes("tab-dot"));
 });
 
 /* ── Analysis body: verdict block + collapsible sections ────────────────────── */
@@ -394,10 +444,9 @@ test("a ### subheading does not start a new collapsible section", () => {
   assert.ok(out.includes("Sub"));
 });
 
-test("a remembered section that this ticker cannot fill falls back to the first", () => {
-  const out = APP.renderDataSections({ overview: "<i>x</i>", technicals: "", fundamentals: "", filings: "" });
-  assert.ok(out.includes('data-section-tab="overview" aria-selected="true"')
-         || /data-section-tab="overview"[^>]*aria-selected="true"/.test(out),
-    "the surviving section must be the selected one");
-  assert.ok(out.includes('class="data-section show"'));
+test("a remembered destination this ticker cannot fill falls back to the first", () => {
+  const out = APP.renderViewRail({ ...emptyBucket(), overview: "<i>x</i>" });
+  assert.ok(/data-view="overview"[^>]*aria-selected="true"/.test(railHtml()),
+    "the surviving destination must be the selected one");
+  assert.ok(/class="data-section show/.test(out));
 });

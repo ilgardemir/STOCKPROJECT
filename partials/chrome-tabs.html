@@ -1,4 +1,7 @@
-<div id="analysisTabs" aria-label="Saved analyses"></div>
+<!-- #analysisTabs moved into the Saved popover in chrome-top.html. What is left is a
+     notice that is [hidden] until localStorage actually evicts something, so this partial
+     costs no vertical space in the normal case — which was the whole problem with the
+     band it replaced. -->
 <div id="storageNotice" role="status" aria-live="polite" hidden>
   <span id="storageNoticeText"></span>
   <button type="button" aria-label="Dismiss this message">×</button>

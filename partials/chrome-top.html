@@ -3,6 +3,12 @@
     <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
     <span class="wm-title">Squall</span><small>Quant + AI equity analysis</small>
   </button>
+  <!-- Identity lives in the bar, not in a band below it. This used to be #summaryStrip, a
+       100px stripe carrying one line of glance information and one line of metadata — a
+       third of a 720p viewport went to chrome before a single number rendered. Filled by
+       renderStrip(); empty (and display:none) until an analysis is on screen. The badges
+       shed right-to-left as the bar narrows, ahead of the wordmark and the search field. -->
+  <div id="tickerBar" aria-live="polite"></div>
   <form id="searchForm" onsubmit="event.preventDefault(); runAnalysis();">
     <div class="ticker-wrap">
       <svg class="search-ico" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
@@ -16,6 +22,19 @@
     </div>
   </form>
   <div class="util-rail">
+    <!-- Saved work was a permanent 37px tab strip under the header. It is on-demand
+         information — you look at it when you want to switch — so it costs nothing here
+         and 37px there. Same popover idiom as #themeMenu below; #analysisTabs keeps its
+         id so renderTickerPills() is unchanged, only its parent moved. -->
+    <button id="savedBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="savedMenu" title="Saved analyses and screens" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/></svg>
+      <span>Saved</span><b id="savedCount" aria-hidden="true"></b>
+    </button>
+    <span class="rail-div" id="savedDiv" aria-hidden="true" hidden></span>
+    <div id="savedMenu" role="menu" aria-label="Saved work">
+      <div class="menu-head">Saved work</div>
+      <div id="analysisTabs" aria-label="Saved analyses"></div>
+    </div>
     <button id="screenerNav" type="button" onclick="openScreener()" title="Screen supported market indexes in plain English">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4"/></svg><span>Screener</span>
     </button>
