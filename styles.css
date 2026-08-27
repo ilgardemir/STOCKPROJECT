@@ -390,6 +390,10 @@ body.hero-up .util-rail { margin-left: auto; }
 .pill.up { color: var(--up); background: var(--up-soft); } .pill.down { color: var(--down); background: var(--down-soft); }
 .meta-dot { font-size: 12px; color: var(--ink-dim); } .meta-dot b { color: var(--ink); font-weight: 600; }
 .sector-badge, .regime-badge { flex-shrink: 0; font-family: var(--mono); font-size: var(--t-micro); font-weight: 650; letter-spacing: .04em; border-radius: 99px; padding: 3px 8px; white-space: nowrap; }
+/* Regime labels vary from "RANGE" to "RANGE / TRANSITION", so the bar cannot be tuned to
+   one width. These two shrink and ellipse — legibly, with the full text on the title —
+   rather than being sliced mid-character by #tickerBar's overflow. */
+#tickerBar .sector-badge, #tickerBar .regime-badge { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sector-badge { color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .regime-badge { color: var(--warn); background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
 /* The shed ladder. The bar gives up its own content — right to left, least glanceable

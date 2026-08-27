@@ -1552,7 +1552,11 @@ function renderStrip(d) {
     <span id="sPrice">${fUsd(price)}</span>
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
     ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
-    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.summary || "")}">${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}%` : ""}</span>` : ""}`;
+    ${/* Label only. The confidence used to ride along here, and "DISTRIBUTION · 86%" is
+          wide enough that the bar clipped it mid-character at 1280px — while the Market
+          Regime card already shows the same number with a bar beside it. The title keeps
+          both for anyone who wants them without opening the card. */""}
+    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}% confidence` : ""}${regime.summary ? " — " + esc(regime.summary) : ""}">${esc(regime.label)}</span>` : ""}`;
   strip.classList.add("show");
   document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
 
