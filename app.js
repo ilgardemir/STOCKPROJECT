@@ -21,6 +21,37 @@ function on(id, ev, fn, opts) {
 const sessions = {};   // { TICKER: { data, context, history, range } }
 let active = null;     // active ticker for the chat/AI/data panes
 const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false, sr: true, pct: false, vol: true, instWindow: false };
+
+/* Chart ranges are timeframe descriptors, not bar counts. They used to be
+   [label, dailyBars], which is why "1W" drew five candles and "1M" drew twenty-one — a
+   week of daily bars is a week of daily bars however you slice it. The short tiers now
+   read intraday series, so the same wall clock buys ~78/65/150 candles instead of 5/21.
+   `tf` names the series: "1d" is price_history, "5m"/"60m" come straight from the payload,
+   and "30m" is rolled up from "5m" in the browser because the scraper deliberately does
+   not ship data the client can derive exactly.
+   These live up here, not down beside drawChart, because hydrateSavedSessions() runs at
+   load and calls normalizeRange — a `const` declared below that call site is in the
+   temporal dead zone, and the ReferenceError takes the whole script down on both pages. */
+const RANGES = [
+  { id: "1D", label: "1D", tf: "5m",  bars: 78,   note: "5-min bars"  },
+  { id: "1W", label: "1W", tf: "30m", bars: 65,   note: "30-min bars" },
+  { id: "1M", label: "1M", tf: "60m", bars: 150,  note: "1-hour bars" },
+  { id: "3M", label: "3M", tf: "1d",  bars: 63,   note: "daily bars"  },
+  { id: "6M", label: "6M", tf: "1d",  bars: 126,  note: "daily bars"  },
+  { id: "1Y", label: "1Y", tf: "1d",  bars: 252,  note: "daily bars"  },
+  { id: "2Y", label: "2Y", tf: "1d",  bars: 504,  note: "daily bars"  },
+  { id: "5Y", label: "5Y", tf: "1d",  bars: 1260, note: "daily bars"  },
+];
+const DEFAULT_RANGE = "1Y";
+/* Every saved tab in every existing browser stores the old bar count. Without this map
+   `RANGES.find(r => r.id === 252)` is undefined and drawChart throws on the first render
+   of restored work — a silent, total loss of the saved-tab feature on upgrade. */
+const LEGACY_RANGE_BARS = { 5: "1W", 21: "1M", 63: "3M", 126: "6M", 252: "1Y", 504: "2Y", 1260: "5Y" };
+function normalizeRange(raw) {
+  if (typeof raw === "string" && RANGES.some(r => r.id === raw)) return raw;
+  return LEGACY_RANGE_BARS[Number(raw)] || DEFAULT_RANGE;
+}
+const rangeSpec = id => RANGES.find(r => r.id === id) || RANGES.find(r => r.id === DEFAULT_RANGE);
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
 const SCREENER_STORAGE_KEY = "squall-saved-screeners-v1";
@@ -49,7 +80,7 @@ function hydrateSavedSessions() {
       data: raw.data,
       context: String(raw.context || raw.data.ai_prompt || ""),
       history: cleanHistory(raw.history),
-      range: Number(raw.range) || 252,
+      range: normalizeRange(raw.range),   // migrates the pre-timeframe bar counts
       profile: raw.profile || null,
       profileKey: String(raw.profileKey || "none"),
       createdAt: Number(raw.createdAt) || Date.now(),
@@ -85,6 +116,14 @@ function persistableSession(s) {
   if (Array.isArray(data.price_history) && data.price_history.length) {
     data.price_history = trimBars(data.price_history);
     delete data.price_history_1y;   // only ever dropped when the series it aliases survived
+  }
+  // Intraday tiers get the same 6dp treatment. The 30-minute series 1W draws is not here
+  // and must never be added: seriesFor derives it from "5m" on demand, and storing it
+  // would be the same duplication price_history_1y is dropped for.
+  if (data.intraday_history && typeof data.intraday_history === "object") {
+    const intra = {};
+    for (const tf in data.intraday_history) intra[tf] = trimBars(data.intraday_history[tf]);
+    data.intraday_history = intra;
   }
   const out = {
     data, history: cleanHistory(s.history), range: s.range,
@@ -813,7 +852,7 @@ function runAnalysis() {
     gotResult = true;
     key = data.ticker;   // resolved symbol — re-key so the AI-stream handlers below find the session
     const now = Date.now();
-    sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: 252,
+    sessions[data.ticker] = { data, context: data.ai_prompt || "", history: [], range: DEFAULT_RANGE,
       profile: profileSnapshot, profileKey, createdAt: now, updatedAt: now, fibAnchors: null };
     recordAnalysisRun(data.ticker);
     persistSessions();
@@ -1707,6 +1746,7 @@ function chartCardBody() {
     <button class="chart-tool-btn" type="button" data-chart-action="draw-fib">Draw Fib</button>
     <button class="chart-tool-btn quiet" type="button" data-chart-action="clear-fib">Clear Fib</button>
     <span class="fib-status" data-fib-status></span>
+    <span class="interval-chip" data-interval-chip title="Bar interval for the selected range"></span>
     <div id="rangeSel"></div></div>
     <div id="chartBox">
       <canvas id="priceChart" role="img" aria-label="Candlestick price chart with volume"></canvas><div id="chartTip"></div>
@@ -1716,7 +1756,6 @@ function chartCardBody() {
     </div>
     <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>`;
 }
-const RANGES = [["1W", 5], ["1M", 21], ["3M", 63], ["6M", 126], ["1Y", 252], ["2Y", 504], ["5Y", 1260]];
 const fibInteraction = { ticker: null, mode: false, pending: null, dragging: null };
 
 function manualFibLevels(anchors) {
@@ -1755,18 +1794,32 @@ document.addEventListener("click", e => {
   if (btn.dataset.chartAction === "clear-fib") clearManualFib();
 });
 
+/* The interval a range actually draws is not inferable from the candles — a 78-bar 1D view
+   and a zoomed daily one look identical. Name it. */
+function syncIntervalChip(id) {
+  const spec = rangeSpec(id);
+  document.querySelectorAll("[data-interval-chip]").forEach(el => { el.textContent = spec.note; });
+}
 function buildRangeSel(container) {
   if (!container) return;
-  const cur = sessions[active]?.range || 252;
-  container.innerHTML = RANGES.map(([l, n]) =>
-    `<button data-range="${n}" class="${cur === n ? "active" : ""}">${l}</button>`).join("");
+  const sess = sessions[active];
+  const d = sess?.data;
+  // Only offer a tier the payload can actually draw. A fund, a thin name or a Yahoo miss
+  // leaves intraday_history empty, and a button that renders nothing is worse than absent.
+  const tiers = RANGES.filter(r => !d || rangeAvailable(d, r));
+  let cur = normalizeRange(sess?.range);
+  if (!tiers.some(r => r.id === cur)) cur = DEFAULT_RANGE;
+  container.innerHTML = tiers.map(r =>
+    `<button data-range="${r.id}" class="${cur === r.id ? "active" : ""}" title="${esc(r.note)}">${r.label}</button>`).join("");
+  syncIntervalChip(cur);
   container.querySelectorAll("button").forEach(b => {
     b.onclick = () => {
-      const n = Number(b.dataset.range);
-      if (sessions[active]) { sessions[active].range = n; touchSession(sessions[active]); scheduleSessionSave(); }
+      const id = b.dataset.range;
+      if (sessions[active]) { sessions[active].range = id; touchSession(sessions[active]); scheduleSessionSave(); }
       // keep both selectors in sync
       ["#rangeSel", "#chartModalRangeSel"].forEach(sel =>
-        document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", Number(x.dataset.range) === n)));
+        document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", x.dataset.range === id)));
+      syncIntervalChip(id);
       drawChart();
     };
   });
@@ -1784,6 +1837,61 @@ function wireChartControls() {
 }
 function movingAvg(arr, n) { const out = new Array(arr.length).fill(null); let sum = 0;
   for (let i = 0; i < arr.length; i++) { sum += arr[i]; if (i >= n) sum -= arr[i - n]; if (i >= n - 1) out[i] = sum / n; } return out; }
+
+/* ── Timeframe series resolution ──────────────────────────────────────────────
+   n→1 bar rollup. Anchored to the END of the series so the newest bar is always a
+   boundary: aggregating from the front would let a partial oldest group shift every
+   bucket by a bar or two each time new data arrives, and the most recent candle — the
+   one being read — is the one that must be right. */
+function aggregateBars(bars, factor) {
+  if (!Array.isArray(bars) || factor < 2) return Array.isArray(bars) ? bars : [];
+  const out = [];
+  const start = bars.length % factor;                    // leading remainder, dropped
+  for (let i = start; i + factor <= bars.length; i += factor) {
+    const win = bars.slice(i, i + factor);
+    const highs = win.map(b => b.high).filter(isNum);
+    const lows  = win.map(b => b.low).filter(isNum);
+    if (!highs.length || !lows.length) continue;
+    out.push({
+      date:   win[0].date,
+      open:   win[0].open,
+      high:   Math.max(...highs),
+      low:    Math.min(...lows),
+      close:  win[win.length - 1].close,
+      volume: win.reduce((s, b) => s + (Number(b.volume) || 0), 0),
+    });
+  }
+  return out;
+}
+/* The one place that knows which array backs a timeframe. Returns [] — never null — so
+   every caller can treat "no data for this tier" as an ordinary empty series. */
+const _agg30mCache = new WeakMap();
+function seriesFor(d, tf) {
+  if (!d) return [];
+  if (tf === "1d") return d.price_history || d.price_history_1y || [];
+  const intra = d.intraday_history || {};
+  if (tf === "30m") {
+    // Derived per payload, not per draw: drawChart runs on every hover, drag and repaint.
+    const src = intra["5m"];
+    if (!Array.isArray(src) || !src.length) return [];
+    if (!_agg30mCache.has(src)) _agg30mCache.set(src, aggregateBars(src, 6));
+    return _agg30mCache.get(src);
+  }
+  return Array.isArray(intra[tf]) ? intra[tf] : [];
+}
+// A tier only earns a button if it has enough bars to be a chart rather than a hint.
+const MIN_TIER_BARS = 12;
+const rangeAvailable = (d, r) => seriesFor(d, r.tf).length >= MIN_TIER_BARS;
+/* Intraday bars carry "YYYY-MM-DD HH:MM". Showing the date on every tick wastes the
+   width and repeats itself; showing only the time makes a multi-day window ambiguous.
+   Edges get the day, interior ticks get the clock. */
+function axisLabel(bar, tf, edge) {
+  const raw = String(bar?.date || "");
+  if (tf === "1d") return raw.slice(2);
+  const [day, time] = raw.split(" ");
+  if (!time) return raw.slice(2);
+  return edge ? `${day.slice(5)} ${time}` : time;
+}
 function bollinger(arr, n = 20, k = 2) {
   const mid = movingAvg(arr, n), up = new Array(arr.length).fill(null), lo = new Array(arr.length).fill(null);
   for (let i = n - 1; i < arr.length; i++) { const win = arr.slice(i - n + 1, i + 1); const m = mid[i];
@@ -1796,15 +1904,24 @@ function drawChart() {
   const d = sess.data;
   const canvas = window._chartCanvasEl ? window._chartCanvasEl() : document.getElementById("priceChart");
   const tipEl  = window._chartTipEl   ? window._chartTipEl()   : document.getElementById("chartTip");
-  const all = d.price_history || d.price_history_1y;
+  // Resolve the timeframe before the series. A saved session can name a tier this payload
+  // has no data for (an intraday range restored against a fund, or a provider miss on
+  // re-run), so fall back rather than render an empty canvas.
+  let spec = rangeSpec(normalizeRange(sess.range));
+  if (!rangeAvailable(d, spec)) spec = rangeSpec(DEFAULT_RANGE);
+  const all = seriesFor(d, spec.tf);
   if (!canvas || !Array.isArray(all) || all.length < 5) return;
 
   const full = all.filter(p => isNum(p.close) && isNum(p.open) && isNum(p.high) && isNum(p.low));
+  if (full.length < 5) return;
+  // MAs and bands are computed on the resolved series, so on a 5-minute chart "MA 20" is
+  // twenty five-minute periods — the conventional reading. MA 200 simply yields nulls on a
+  // 78-bar view and the line renderer already skips those.
   const closesFull = full.map(p => p.close);
   const ma20f = movingAvg(closesFull, 20), ma50f = movingAvg(closesFull, 50), ma200f = movingAvg(closesFull, 200);
   const bbF = bollinger(closesFull, 20, 2);
 
-  const N = Math.min(sess.range || 252, full.length);
+  const N = Math.min(spec.bars, full.length);
   const s0 = full.length - N;
   const data = full.slice(s0);
   const ma20 = ma20f.slice(s0), ma50 = ma50f.slice(s0), ma200 = ma200f.slice(s0);
@@ -1817,7 +1934,7 @@ function drawChart() {
 
   // Wind-front reveal — sweep the plot in on ticker / range / expand changes.
   // Key excludes canvas size so split-drags and window resizes don't retrigger it.
-  const revealKey = active + "|" + N + "|" + (window.chartExpanded ? "x" : "i");
+  const revealKey = active + "|" + spec.id + "|" + N + "|" + (window.chartExpanded ? "x" : "i");
   if (drawChart._revealKey !== revealKey) {
     drawChart._revealKey = revealKey;
     drawChart._revealT0 = REDUCED ? 0 : performance.now();
@@ -1861,7 +1978,8 @@ function drawChart() {
   }
   // x axis (dates)
   ctx.textAlign = "center"; ctx.fillStyle = cssVar("--ink-dim");
-  for (let g = 0; g <= 4; g++) { const i = Math.round(g / 4 * (data.length - 1)); ctx.fillText(data[i].date.slice(2), X(i), H - 8); }
+  for (let g = 0; g <= 4; g++) { const i = Math.round(g / 4 * (data.length - 1));
+    ctx.fillText(axisLabel(data[i], spec.tf, g === 0 || g === 4), X(i), H - 8); }
 
   // everything painted after the axes is clipped to the reveal front
   const frontX = reveal >= 1 ? W : padL + reveal * (W - padL - padR);
