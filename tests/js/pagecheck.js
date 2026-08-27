@@ -65,6 +65,44 @@ function makeEl(id) {
   };
 }
 
+/*
+ * An EMPTY localStorage is not the interesting case, and running only that hid a real
+ * load-time crash: app.js calls applyTheme() at load, applyTheme repaints the chart, and
+ * drawChart returns immediately when there is no active session. With a clean store every
+ * line past that guard is dead code here, so a `const` referenced inside drawChart but
+ * declared further down the file — a temporal dead zone that throws in any browser holding
+ * a saved tab — sailed through as a clean pass.
+ *
+ * So the store is seeded with a saved analysis. This is the returning-visitor path, which
+ * is most visitors, and it is the one where the load-time render actually executes.
+ * Deliberately shaped like a PRE-timeframe session: `range` is the old numeric bar count,
+ * so the legacy migration is exercised on every run rather than only when someone thinks
+ * to test an upgrade.
+ */
+const SEEDED_STORAGE = {
+  "squall-saved-analyses-v1": JSON.stringify({
+    AAA: {
+      data: {
+        ticker: "AAA", company_name: "Pagecheck Industries", aiSummary: "## Verdict\n**Hold** — flat.\n\n## A\nx\n\n## B\ny",
+        raw_data: { technicals: { current_price: 10 }, key_levels: { resistance: [11], support: [9] } },
+        live_quote: { last_price: 10 },
+        price_history: Array.from({ length: 300 }, (_, i) => ({
+          date: `2024-01-${String((i % 28) + 1).padStart(2, "0")}`,
+          open: 10 + i * 0.01, high: 10.5 + i * 0.01, low: 9.5 + i * 0.01, close: 10.2 + i * 0.01, volume: 1000 + i
+        })),
+        intraday_history: {
+          "5m": Array.from({ length: 78 }, (_, i) => ({
+            date: `2024-05-01 ${String(9 + Math.floor(i / 12)).padStart(2, "0")}:${String((i * 5) % 60).padStart(2, "0")}`,
+            open: 10, high: 10.2, low: 9.9, close: 10.1, volume: 500
+          }))
+        }
+      },
+      history: [], range: 252, createdAt: 1, updatedAt: 2
+    }
+  }),
+  "squall-theme": "dark"
+};
+
 function run(page, scripts, poisonId) {
   const html = assemble(page);
   const ids = idsOf(html);
@@ -87,7 +125,7 @@ function run(page, scripts, poisonId) {
     visibilityState: "visible", head: { appendChild(){} }
   };
   const storage = {
-    _d: {}, getItem(k) { return k in this._d ? this._d[k] : null; },
+    _d: { ...SEEDED_STORAGE }, getItem(k) { return k in this._d ? this._d[k] : null; },
     setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; },
     clear() { this._d = {}; }, key: () => null, get length() { return Object.keys(this._d).length; }
   };

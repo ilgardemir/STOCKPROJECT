@@ -52,6 +52,61 @@ function normalizeRange(raw) {
   return LEGACY_RANGE_BARS[Number(raw)] || DEFAULT_RANGE;
 }
 const rangeSpec = id => RANGES.find(r => r.id === id) || RANGES.find(r => r.id === DEFAULT_RANGE);
+
+/* ── Timeframe series resolution ──────────────────────────────────────────────
+   n→1 bar rollup. Anchored to the END of the series so the newest bar is always a
+   boundary: aggregating from the front would let a partial oldest group shift every
+   bucket by a bar or two each time new data arrives, and the most recent candle — the
+   one being read — is the one that must be right. */
+function aggregateBars(bars, factor) {
+  if (!Array.isArray(bars) || factor < 2) return Array.isArray(bars) ? bars : [];
+  const out = [];
+  const start = bars.length % factor;                    // leading remainder, dropped
+  for (let i = start; i + factor <= bars.length; i += factor) {
+    const win = bars.slice(i, i + factor);
+    const highs = win.map(b => b.high).filter(isNum);
+    const lows  = win.map(b => b.low).filter(isNum);
+    if (!highs.length || !lows.length) continue;
+    out.push({
+      date:   win[0].date,
+      open:   win[0].open,
+      high:   Math.max(...highs),
+      low:    Math.min(...lows),
+      close:  win[win.length - 1].close,
+      volume: win.reduce((s, b) => s + (Number(b.volume) || 0), 0),
+    });
+  }
+  return out;
+}
+/* The one place that knows which array backs a timeframe. Returns [] — never null — so
+   every caller can treat "no data for this tier" as an ordinary empty series. */
+const _agg30mCache = new WeakMap();
+function seriesFor(d, tf) {
+  if (!d) return [];
+  if (tf === "1d") return d.price_history || d.price_history_1y || [];
+  const intra = d.intraday_history || {};
+  if (tf === "30m") {
+    // Derived per payload, not per draw: drawChart runs on every hover, drag and repaint.
+    const src = intra["5m"];
+    if (!Array.isArray(src) || !src.length) return [];
+    if (!_agg30mCache.has(src)) _agg30mCache.set(src, aggregateBars(src, 6));
+    return _agg30mCache.get(src);
+  }
+  return Array.isArray(intra[tf]) ? intra[tf] : [];
+}
+// A tier only earns a button if it has enough bars to be a chart rather than a hint.
+const MIN_TIER_BARS = 12;
+const rangeAvailable = (d, r) => seriesFor(d, r.tf).length >= MIN_TIER_BARS;
+/* Intraday bars carry "YYYY-MM-DD HH:MM". Showing the date on every tick wastes the
+   width and repeats itself; showing only the time makes a multi-day window ambiguous.
+   Edges get the day, interior ticks get the clock. */
+function axisLabel(bar, tf, edge) {
+  const raw = String(bar?.date || "");
+  if (tf === "1d") return raw.slice(2);
+  const [day, time] = raw.split(" ");
+  if (!time) return raw.slice(2);
+  return edge ? `${day.slice(5)} ${time}` : time;
+}
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
 const SCREENER_STORAGE_KEY = "squall-saved-screeners-v1";
@@ -1913,60 +1968,6 @@ function wireChartControls() {
 function movingAvg(arr, n) { const out = new Array(arr.length).fill(null); let sum = 0;
   for (let i = 0; i < arr.length; i++) { sum += arr[i]; if (i >= n) sum -= arr[i - n]; if (i >= n - 1) out[i] = sum / n; } return out; }
 
-/* ── Timeframe series resolution ──────────────────────────────────────────────
-   n→1 bar rollup. Anchored to the END of the series so the newest bar is always a
-   boundary: aggregating from the front would let a partial oldest group shift every
-   bucket by a bar or two each time new data arrives, and the most recent candle — the
-   one being read — is the one that must be right. */
-function aggregateBars(bars, factor) {
-  if (!Array.isArray(bars) || factor < 2) return Array.isArray(bars) ? bars : [];
-  const out = [];
-  const start = bars.length % factor;                    // leading remainder, dropped
-  for (let i = start; i + factor <= bars.length; i += factor) {
-    const win = bars.slice(i, i + factor);
-    const highs = win.map(b => b.high).filter(isNum);
-    const lows  = win.map(b => b.low).filter(isNum);
-    if (!highs.length || !lows.length) continue;
-    out.push({
-      date:   win[0].date,
-      open:   win[0].open,
-      high:   Math.max(...highs),
-      low:    Math.min(...lows),
-      close:  win[win.length - 1].close,
-      volume: win.reduce((s, b) => s + (Number(b.volume) || 0), 0),
-    });
-  }
-  return out;
-}
-/* The one place that knows which array backs a timeframe. Returns [] — never null — so
-   every caller can treat "no data for this tier" as an ordinary empty series. */
-const _agg30mCache = new WeakMap();
-function seriesFor(d, tf) {
-  if (!d) return [];
-  if (tf === "1d") return d.price_history || d.price_history_1y || [];
-  const intra = d.intraday_history || {};
-  if (tf === "30m") {
-    // Derived per payload, not per draw: drawChart runs on every hover, drag and repaint.
-    const src = intra["5m"];
-    if (!Array.isArray(src) || !src.length) return [];
-    if (!_agg30mCache.has(src)) _agg30mCache.set(src, aggregateBars(src, 6));
-    return _agg30mCache.get(src);
-  }
-  return Array.isArray(intra[tf]) ? intra[tf] : [];
-}
-// A tier only earns a button if it has enough bars to be a chart rather than a hint.
-const MIN_TIER_BARS = 12;
-const rangeAvailable = (d, r) => seriesFor(d, r.tf).length >= MIN_TIER_BARS;
-/* Intraday bars carry "YYYY-MM-DD HH:MM". Showing the date on every tick wastes the
-   width and repeats itself; showing only the time makes a multi-day window ambiguous.
-   Edges get the day, interior ticks get the clock. */
-function axisLabel(bar, tf, edge) {
-  const raw = String(bar?.date || "");
-  if (tf === "1d") return raw.slice(2);
-  const [day, time] = raw.split(" ");
-  if (!time) return raw.slice(2);
-  return edge ? `${day.slice(5)} ${time}` : time;
-}
 function bollinger(arr, n = 20, k = 2) {
   const mid = movingAvg(arr, n), up = new Array(arr.length).fill(null), lo = new Array(arr.length).fill(null);
   for (let i = n - 1; i < arr.length; i++) { const win = arr.slice(i - n + 1, i + 1); const m = mid[i];
@@ -2021,18 +2022,32 @@ function drawChart() {
   }
 
   const kl = d.raw_data?.key_levels || {};
-  const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(isNum).map(x => [x, cssVar("--down")]),
-                                   ...(kl.support || []).filter(isNum).map(x => [x, cssVar("--up")])] : [];
   const manualAnchors = sess.fibAnchors;
-  const fib = chartOpts.fib ? (manualFibLevels(manualAnchors) || d.price_action?.fib || null) : null;
+  const fibAll = chartOpts.fib ? (manualFibLevels(manualAnchors) || d.price_action?.fib || null) : null;
 
-  // price bounds (include overlays so nothing clips)
-  let vals = [];
-  data.forEach(p => { vals.push(p.high, p.low); });
-  if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x)) vals.push(x, bb.lo[i]); });
+  /* Overlay levels are computed from the DAILY series and are the same prices on every
+     timeframe, but the window they have to fit into is not. One session of 5-minute bars
+     spans a couple of dollars; a support level 8% away then sets the y-axis on its own and
+     the candles collapse into a sliver at the edge of the plot. So the bars set the scale
+     and a level only participates if it lands near them. A level outside that band is not
+     drawn either — a line pinned to the top pixel of the chart is not information, and
+     silently rescaling around it loses the price action the reader came for. */
+  const barLo = Math.min(...data.map(p => p.low)), barHi = Math.max(...data.map(p => p.high));
+  const slack = Math.max((barHi - barLo) * 0.6, barHi * 0.005);
+  const inBand = x => isNum(x) && x >= barLo - slack && x <= barHi + slack;
+
+  const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(inBand).map(x => [x, cssVar("--down")]),
+                                   ...(kl.support || []).filter(inBand).map(x => [x, cssVar("--up")])] : [];
+  const fib = fibAll ? Object.fromEntries(Object.entries(fibAll).filter(([, x]) => inBand(x))) : null;
+  const fibVisible = fib && Object.keys(fib).length ? fib : null;
+
+  // price bounds (include the overlays that survived the band so nothing clips)
+  let vals = [barLo, barHi];
+  if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x) && inBand(x)) vals.push(x, bb.lo[i]); });
   srLevels.forEach(l => vals.push(l[0]));
-  if (fib) Object.values(fib).forEach(x => { if (isNum(x)) vals.push(x); });
+  if (fibVisible) Object.values(fibVisible).forEach(x => vals.push(x));
   if (fibInteraction.ticker === active && fibInteraction.pending) vals.push(fibInteraction.pending.price);
+  vals = vals.filter(isNum);
   const lo = Math.min(...vals) * 0.99, hi = Math.max(...vals) * 1.01;
 
   const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = 12, padB = 30;
@@ -2087,7 +2102,7 @@ function drawChart() {
     ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(fUsd(val), padL + 3, Y(val) - 3); });
 
   // Fibonacci
-  if (fib) { Object.entries(fib).forEach(([k, val]) => { if (!isNum(val)) return;
+  if (fibVisible) { Object.entries(fibVisible).forEach(([k, val]) => { if (!isNum(val)) return;
     ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .4; ctx.setLineDash([2, 3]);
     ctx.beginPath(); ctx.moveTo(padL, Y(val)); ctx.lineTo(W - padR, Y(val)); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     ctx.fillStyle = cssVar("--ink-dim"); ctx.textAlign = "right"; ctx.fillText(k, W - padR - 3, Y(val) - 3); }); }
