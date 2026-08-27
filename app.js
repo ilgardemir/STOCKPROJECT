@@ -1448,6 +1448,73 @@ function renderStrip(d) {
   }
 }
 
+/* ════════════════ DATA PANE SECTIONS ════════════════
+   Four groups instead of one eighteen-card scroll. This is a regrouping, not a reduction:
+   every card and every metric still renders, and each card's own open/collapsed default is
+   untouched. */
+const SECTIONS = [
+  { id: "overview",     label: "Overview" },
+  { id: "technicals",   label: "Technicals" },
+  { id: "fundamentals", label: "Fundamentals" },
+  { id: "filings",      label: "Filings & News" },
+];
+const SECTION_KEY = "squall-data-section";
+/* A view preference, not session state — which section you last read is about you, not
+   about the ticker. Kept off `sessions` deliberately so switching tabs never writes a
+   session or evicts a saved analysis to make room for the fact that you clicked a tab. */
+let activeDataSection = SECTIONS[0].id;
+try {
+  const saved = localStorage.getItem(SECTION_KEY);
+  if (SECTIONS.some(s => s.id === saved)) activeDataSection = saved;
+} catch (e) {}
+
+function renderDataSections(bucket) {
+  // A section with no cards gets no button. Without a filings-capable ticker the
+  // "Filings & News" tab would open onto nothing, which reads as a broken tab.
+  const filled = SECTIONS.filter(s => (bucket[s.id] || "").trim());
+  if (!filled.length) return "";
+  if (!filled.some(s => s.id === activeDataSection)) activeDataSection = filled[0].id;
+  const tabs = filled.map(s =>
+    `<button type="button" role="tab" data-section-tab="${s.id}" aria-selected="${s.id === activeDataSection}"
+      class="${s.id === activeDataSection ? "active" : ""}">${esc(s.label)}</button>`).join("");
+  const panels = filled.map(s =>
+    `<div class="data-section ${s.id === activeDataSection ? "show" : ""}" data-section="${s.id}"
+      role="tabpanel">${bucket[s.id]}</div>`).join("");
+  return `<nav id="dataSections" role="tablist" aria-label="Dashboard sections">${tabs}</nav>${panels}`;
+}
+
+function showDataSection(id) {
+  const nav = document.getElementById("dataSections");
+  if (!nav) return;
+  activeDataSection = id;
+  try { localStorage.setItem(SECTION_KEY, id); } catch (e) {}
+  nav.querySelectorAll("[data-section-tab]").forEach(b => {
+    const on = b.dataset.sectionTab === id;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+  });
+  document.querySelectorAll("#dataBody .data-section").forEach(p =>
+    p.classList.toggle("show", p.dataset.section === id));
+  document.getElementById("dataBody").scrollTop = 0;
+  // A hidden panel is display:none, so its canvas measures 0×0 and drawChart bails early.
+  // Same trap the mobile pane tabs handle — the chart has to be told to repaint on the way
+  // back in, or Overview returns showing an empty box.
+  if (id === "overview" && active) requestAnimationFrame(drawChart);
+}
+
+/* Delegated, and wired from inside renderAll rather than at the top level: #dataSections
+   is built by renderAll and does not exist in any served page, so a bare
+   getElementById("dataSections").addEventListener would throw at load and silently kill
+   every listener declared below it — on the screener as well as here. */
+function wireDataSections() {
+  const nav = document.getElementById("dataSections");
+  if (!nav) return;
+  nav.onclick = e => {
+    const btn = e.target.closest("[data-section-tab]");
+    if (btn) showDataSection(btn.dataset.sectionTab);
+  };
+}
+
 /* ════════════════ RENDER: EVERYTHING ════════════════ */
 function renderAll(d) {
   renderStrip(d);
@@ -1455,7 +1522,13 @@ function renderAll(d) {
   const v = r.valuation || {}, p = r.profitability || {}, fh = r.financial_health || {}, sec = r.sec_fundamentals || {},
         t = r.technicals || {}, rr = r.risk_return || {}, s = r.sentiment || {}, kl = r.key_levels || {};
   const q = d.live_quote || {}, pa = d.price_action || {}, inst = d.institutional || {}, company = d.company_profile || {}, regime = d.market_regime || {};
-  let html = "";
+
+  /* Cards accumulate per section rather than into one string. Eighteen of them, fifteen
+     open by default, was ~90 metrics in a single scroll — every card defensible, the sum
+     unreadable. Nothing is removed or collapsed here; it is regrouped, and the section a
+     card belongs to is stated at the card rather than inferred from its position. */
+  const bucket = { overview: "", technicals: "", fundamentals: "", filings: "" };
+  const add = (section, markup) => { bucket[section] += markup; };
 
   /* Snapshot */
   let snap = `<div class="mgrid">
@@ -1474,11 +1547,11 @@ function renderAll(d) {
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
-  html += card("snapshot", "Live Snapshot", snap);
+  add("overview", card("snapshot", "Live Snapshot", snap));
 
   /* Candlestick chart + controls */
   if (Array.isArray(d.price_history || d.price_history_1y) && (d.price_history || d.price_history_1y).length > 10) {
-    html += card("chart", "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) });
+    add("overview", card("chart", "Candlestick — Price Action", chartCardBody(), { source: histSrc(d) }));
   }
 
   /* Deterministic market regime — explains the current price/volume environment. */
@@ -1491,7 +1564,7 @@ function renderAll(d) {
     </div>`;
     if (Array.isArray(regime.evidence) && regime.evidence.length) body += `<div class="regime-evidence">${regime.evidence.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
     body += `<p class="learn-note"><b>How to use this:</b> regime describes the current environment; it does not predict the next move. Trend regimes favor continuation setups, while range or transition regimes reward patience and tighter risk controls.</p>`;
-    html += card("regime", "Market Regime", body, { count: regime.label, source: histSrc(d) });
+    add("overview", card("regime", "Market Regime", body, { count: regime.label, source: histSrc(d) }));
   }
 
   /* Price action / market structure */
@@ -1506,7 +1579,7 @@ function renderAll(d) {
       Object.entries(pa.fib).forEach(([k, val]) => body += `<span class="lvl" style="color:var(--ink-dim);background:var(--chrome-2)">${k} · ${fUsd(val)}</span>`);
       body += `</div>`;
     }
-    html += card("priceaction", "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) });
+    add("technicals", card("priceaction", "Price Action & Market Structure", body, { count: pa.trend, source: histSrc(d) }));
   }
 
   /* Institutional footprint */
@@ -1524,35 +1597,35 @@ function renderAll(d) {
       ${metric("Distrib. Days (25)", String(inst.distribution_days ?? 0), (inst.distribution_days || 0) >= 3 ? "red" : "")}
     </div>`;
     (inst.signals || []).forEach(sg => body += signalHtml(sg));
-    html += card("institutional", "Institutional Footprint", body, { source: histSrc(d) });
+    add("technicals", card("institutional", "Institutional Footprint", body, { source: histSrc(d) }));
   }
 
   /* Algorithmic signals */
   const flags = d.algorithmic_signals || [];
-  html += card("signals", "Algorithmic Signals", flags.length ? flags.map(signalHtml).join("") : signalHtml("NEUTRAL: No strong signals triggered."), { count: flags.length });
+  add("overview", card("signals", "Algorithmic Signals", flags.length ? flags.map(signalHtml).join("") : signalHtml("NEUTRAL: No strong signals triggered."), { count: flags.length }));
 
   /* Chart patterns */
   const pats = d.chart_patterns || [];
-  if (pats.length) html += card("patterns", "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length, source: histSrc(d) });
+  if (pats.length) add("overview", card("patterns", "Chart Patterns", pats.map(signalHtml).join(""), { count: pats.length, source: histSrc(d) }));
 
   /* Valuation */
-  html += card("valuation", "Valuation", `<div class="mgrid">
+  add("fundamentals", card("valuation", "Valuation", `<div class="mgrid">
     ${metric("P/E Trailing", fRatio(v.pe_trailing))}${metric("P/E Forward", fRatio(v.pe_forward))}
     ${metric("PEG", fRatio(v.peg_ratio), isNum(v.peg_ratio) ? (v.peg_ratio > 0 && v.peg_ratio < 1 ? "green" : v.peg_ratio > 3 ? "red" : "") : "")}
     ${metric("Price / Book", fRatio(v.price_to_book))}${metric("Price / Sales", fRatio(v.price_to_sales))}
-    ${metric("EV / EBITDA", fRatio(v.ev_ebitda))}${metric("FCF Yield", fPct(v.fcf_yield), signCls(v.fcf_yield))}</div>`);
+    ${metric("EV / EBITDA", fRatio(v.ev_ebitda))}${metric("FCF Yield", fPct(v.fcf_yield), signCls(v.fcf_yield))}</div>`));
 
   /* Profitability */
-  html += card("profit", "Profitability & Margins", `<div class="mgrid">
+  add("fundamentals", card("profit", "Profitability & Margins", `<div class="mgrid">
     ${metric("Gross Margin", fPct(p.gross_margin))}${metric("Operating Margin", fPct(p.operating_margin), signCls(p.operating_margin))}
     ${metric("Net Margin", fPct(p.net_margin), signCls(p.net_margin))}${metric("FCF Margin", fPct(p.fcf_margin), signCls(p.fcf_margin))}
-    ${metric("ROE", fPct(p.roe), signCls(p.roe))}${metric("ROA", fPct(p.roa), signCls(p.roa))}</div>`);
+    ${metric("ROE", fPct(p.roe), signCls(p.roe))}${metric("ROA", fPct(p.roa), signCls(p.roa))}</div>`));
 
   /* Health */
-  html += card("health", "Financial Health", `<div class="mgrid">
+  add("fundamentals", card("health", "Financial Health", `<div class="mgrid">
     ${metric("Current Ratio", fRatio(fh.current_ratio), isNum(fh.current_ratio) ? (fh.current_ratio >= 1.5 ? "green" : fh.current_ratio < 1 ? "red" : "amber") : "")}
     ${metric("Debt / Equity", fRatio(fh.debt_to_equity), isNum(fh.debt_to_equity) && fh.debt_to_equity > 200 ? "red" : "")}
-    ${metric("Earnings Quality <small>(OCF/NI)</small>", fRatio(fh.earnings_quality), isNum(fh.earnings_quality) ? (fh.earnings_quality >= 1 ? "green" : fh.earnings_quality < 0.5 ? "red" : "amber") : "")}</div>`);
+    ${metric("Earnings Quality <small>(OCF/NI)</small>", fRatio(fh.earnings_quality), isNum(fh.earnings_quality) ? (fh.earnings_quality >= 1 ? "green" : fh.earnings_quality < 0.5 ? "red" : "amber") : "")}</div>`));
 
   /* SEC fundamentals */
   let secBody = `<div class="mgrid">
@@ -1564,7 +1637,7 @@ function renderAll(d) {
     secBody += `<p style="margin-top:10px;font-size:12px;color:var(--ink-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
   if (d.sec_available === false)
     secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker — figures rely on the market-data provider only.</div>` + secBody;
-  html += card("sec", "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) });
+  add("fundamentals", card("sec", "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) }));
 
   /* Technicals */
   let tech = `<div class="mgrid">
@@ -1581,13 +1654,13 @@ function renderAll(d) {
   const resL = (kl.resistance || []).filter(isNum), supL = (kl.support || []).filter(isNum);
   if (resL.length || supL.length) tech += `<div class="lvl-label">Key price levels</div><div class="levels">
     ${resL.map(x => `<span class="lvl res">R ${fUsd(x)}</span>`).join("")}${supL.map(x => `<span class="lvl sup">S ${fUsd(x)}</span>`).join("")}</div>`;
-  html += card("tech", "Technicals & Key Levels", tech, { source: histSrc(d) });
+  add("technicals", card("tech", "Technicals & Key Levels", tech, { source: histSrc(d) }));
 
   /* Risk */
-  html += card("risk", "Risk & Return (5Y)", `<div class="mgrid">
+  add("technicals", card("risk", "Risk & Return (5Y)", `<div class="mgrid">
     ${metric("CAGR", fPct(rr.cagr), signCls(rr.cagr))}${metric("Annual Volatility", fPct(rr.annual_volatility))}
     ${metric("Sharpe Ratio", fRatio(rr.sharpe), signCls(rr.sharpe))}${metric("Max Drawdown", fPct(rr.max_drawdown), signCls(rr.max_drawdown, true))}
-    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`, { source: histSrc(d) });
+    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`, { source: histSrc(d) }));
 
   /* Sentiment */
   let sent = `<div class="mgrid">
@@ -1596,7 +1669,7 @@ function renderAll(d) {
     ${metric("Institutional Own.", fPct(s.inst_ownership))}
     ${metric("Short Interest", fPct(s.short_percent), isNum(s.short_percent) && s.short_percent > 0.10 ? "red" : "")}</div>`;
   sent += rangeBar("Analyst targets vs price (amber = mean target)", s.target_low, s.target_high, t.current_price, fUsd, s.target_mean, "Mean target");
-  html += card("sentiment", "Sentiment & Ownership", sent);
+  add("fundamentals", card("sentiment", "Sentiment & Ownership", sent));
 
   /* Earnings */
   const earn = r.earnings_surprises || [];
@@ -1604,8 +1677,8 @@ function renderAll(d) {
     const rows = earn.map(e => { const pos = e.surprise_pct >= 0;
       return `<tr><td class="hi">${esc(e.date)}</td><td>$${e.estimate.toFixed(2)}</td><td class="hi">$${e.reported.toFixed(2)}</td>
         <td class="${pos ? "pos" : "neg"}">${pos ? "+" : ""}${(e.surprise_pct * 100).toFixed(1)}%</td><td class="${pos ? "pos" : "neg"}">${pos ? "Beat" : "Miss"}</td></tr>`; }).join("");
-    html += card("earnings", "Recent Earnings Surprises",
-      `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length, source: YQ_SRC });
+    add("fundamentals", card("earnings", "Recent Earnings Surprises",
+      `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length, source: YQ_SRC }));
   }
 
   /* Filing activity */
@@ -1627,7 +1700,7 @@ function renderAll(d) {
       body += `<div style="font-size:var(--t-micro);color:var(--ink-dim);margin-top:8px">` +
               `Counts are a floor — this issuer files more frequently than one analysis reads.</div>`;
     }
-    html += card("filings", `SEC Filing Activity (${win} Days)`, body, { source: secSrc(d) });
+    add("filings", card("filings", `SEC Filing Activity (${win} Days)`, body, { source: secSrc(d) }));
   }
 
   /* Options */
@@ -1643,19 +1716,19 @@ function renderAll(d) {
       });
       body += `</div>`;
     });
-    html += card("options", "Live Options Chains", body, { open: false, count: od.chains.length + " exp", source: YQ_SRC });
+    add("filings", card("options", "Live Options Chains", body, { open: false, count: od.chains.length + " exp", source: YQ_SRC }));
   }
 
   /* MD&A */
   if (d.mda_excerpt && !/unavailable|Failed|not found/i.test(d.mda_excerpt))
-    html += card("mda", "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) });
+    add("filings", card("mda", "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) }));
 
   /* Raw prompt */
   if (d.ai_prompt)
-    html += card("prompt", "Exact Data Sent to the AI",
+    add("filings", card("prompt", "Exact Data Sent to the AI",
       `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
        <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
-       <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
+       <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false }));
 
   /* Sourced company news — last card, below the measurements. The model explains
      these records but does not search for them. */
@@ -1676,11 +1749,13 @@ function renderAll(d) {
         ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
       </article>`;
     }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
-    html += card("news", "Recent Company News", newsBody, { count: news.length });
+    add("filings", card("news", "Recent Company News", newsBody, { count: news.length }));
   }
 
-  document.getElementById("dataBody").innerHTML = html;
-  document.getElementById("dataBody").scrollTop = 0;
+  const body = document.getElementById("dataBody");
+  body.innerHTML = renderDataSections(bucket);
+  body.scrollTop = 0;
+  wireDataSections();
   wireChartControls();
 
   /* AI summary — live stream shell if this ticker is mid-generation, else the final render */

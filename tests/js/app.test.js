@@ -250,3 +250,52 @@ test("an axis label never throws on a malformed or missing bar", () => {
   assert.equal(typeof APP.axisLabel({}, "1d", true), "string");
   assert.equal(typeof APP.axisLabel(bar("2024-05-01"), "5m", false), "string");
 });
+
+/* ── Data pane sections ─────────────────────────────────────────────────────── */
+
+const fullBucket = () => ({
+  overview: "<details id='card-snapshot'></details>",
+  technicals: "<details id='card-tech'></details>",
+  fundamentals: "<details id='card-valuation'></details>",
+  filings: "<details id='card-news'></details>",
+});
+
+test("a filled bucket renders one tab and one panel per section", () => {
+  const out = APP.renderDataSections(fullBucket());
+  for (const s of APP.SECTIONS) {
+    assert.ok(out.includes(`data-section-tab="${s.id}"`), `no tab for ${s.id}`);
+    assert.ok(out.includes(`data-section="${s.id}"`), `no panel for ${s.id}`);
+  }
+  assert.equal((out.match(/class="data-section show"/g) || []).length, 1,
+    "exactly one panel may be visible at a time");
+});
+
+test("every card still reaches the DOM — sectioning must not drop content", () => {
+  // The whole premise of the change is that this is a regrouping, not a reduction.
+  const bucket = fullBucket();
+  const out = APP.renderDataSections(bucket);
+  for (const markup of Object.values(bucket)) {
+    assert.ok(out.includes(markup), `section content went missing: ${markup}`);
+  }
+});
+
+test("a section with no cards gets no tab", () => {
+  // A ticker with no filings or news would otherwise open a tab onto an empty panel.
+  const bucket = { ...fullBucket(), filings: "", technicals: "   " };
+  const out = APP.renderDataSections(bucket);
+  assert.ok(!out.includes('data-section-tab="filings"'));
+  assert.ok(!out.includes('data-section-tab="technicals"'), "whitespace is not content");
+  assert.ok(out.includes('data-section-tab="overview"'));
+});
+
+test("an entirely empty bucket renders nothing rather than a bare tablist", () => {
+  assert.equal(APP.renderDataSections({ overview: "", technicals: "", fundamentals: "", filings: "" }), "");
+});
+
+test("a remembered section that this ticker cannot fill falls back to the first", () => {
+  const out = APP.renderDataSections({ overview: "<i>x</i>", technicals: "", fundamentals: "", filings: "" });
+  assert.ok(out.includes('data-section-tab="overview" aria-selected="true"')
+         || /data-section-tab="overview"[^>]*aria-selected="true"/.test(out),
+    "the surviving section must be the selected one");
+  assert.ok(out.includes('class="data-section show"'));
+});

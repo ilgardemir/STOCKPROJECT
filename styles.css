@@ -759,6 +759,27 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 }
 
 /* CARDS */
+/* DATA PANE SECTIONS — four groups instead of one eighteen-card scroll.
+   Sticky because the pane body is what scrolls: a nav that scrolls away is a nav you have
+   to hunt for. The backdrop is --chrome-0 (the page the cards are transparent over), so
+   card content passing underneath does not show through. */
+#dataSections { position: sticky; top: 0; z-index: 6; display: flex; gap: 2px; margin: -16px -18px 0;
+  padding: 8px 18px 0; background: var(--chrome-0); border-bottom: 1px solid var(--rule); overflow-x: auto;
+  scrollbar-width: none; }
+#dataSections::-webkit-scrollbar { display: none; }
+#dataSections button { flex: 0 0 auto; background: none; border: 0; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; cursor: pointer; padding: 7px 12px 8px; font-family: var(--mono);
+  font-size: var(--t-data); font-weight: 500; letter-spacing: 0; text-transform: lowercase;
+  color: var(--ink-dim); white-space: nowrap; transition: color .15s, border-color .15s, background .15s; }
+#dataSections button:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+/* The selected tab is carried by the accent rule and the ink weight, NOT by the fill.
+   Daylight's --chrome-0 and --chrome-2 sit within ~1.2:1, so a background tint alone is
+   invisible there and the pane reads as having no selection at all. */
+#dataSections button.active { color: var(--ink-bright); border-bottom-color: var(--accent); }
+#dataSections button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.data-section { display: none; }
+.data-section.show { display: block; }
+
 .card { background: none; border: 0; border-top: 1px solid var(--rule); border-radius: 0; box-shadow: none;
   margin-bottom: 0; overflow: hidden; transition: none; }
 .card:first-of-type { border-top: 0; }
