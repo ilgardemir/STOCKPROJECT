@@ -1012,7 +1012,7 @@ function finalizeAiRender(d) {
   const scroll = document.getElementById("aiScroll");
   const keep = scroll.scrollTop;
   ai.className = "prose";
-  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "") + aiDisclaimerHtml(d);
+  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
   scroll.scrollTop = keep;
 }
 
@@ -1772,7 +1772,7 @@ function renderAll(d) {
   } else {
     const ai = document.getElementById("aiSummary");
     ai.className = "prose";
-    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderMarkdown(d.aiSummary || "") + aiDisclaimerHtml(d);
+    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
     document.getElementById("aiScroll").scrollTop = 0;
   }
 
@@ -2219,6 +2219,74 @@ function renderMarkdown(text) {
     .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>")
     .replace(/^-{3,}$/gm, "<hr>").replace(/\n{2,}/g, "</p><p>")
     .replace(/^(?!\s*<[hpuoldbt])(.+)$/gm, "<p>$1</p>").replace(/<p>\s*<\/p>/g, "");
+}
+
+/* ════════════════ ANALYSIS BODY (verdict + collapsible sections) ════════════════
+   The write-up is 900–1300 words under seven ## headers, and it rendered as one unbroken
+   column of prose — the verdict, which is the thing being looked for, indistinguishable
+   from the paragraph after it. This promotes the verdict and makes the rest navigable.
+   Not one word is dropped: the prompt is untouched and every section still renders. */
+const VERDICT_RATINGS = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"];
+// Green and red are direction. Hold is neither, so it is neutral ink — NOT --warn, which
+// is a distinct role and would read as a caution the model did not express.
+const RATING_TONE = { "strong buy": "up", "buy": "up", "hold": "flat", "sell": "down", "strong sell": "down" };
+// Opened by default: the two sections that carry the reasoning behind the call. The rest
+// are one click away rather than one scroll.
+const AI_OPEN_SECTIONS = /valuation|price action/i;
+
+function splitAnalysisSections(text) {
+  const lines = String(text).split("\n");
+  const out = []; let preamble = []; let cur = null;
+  for (const line of lines) {
+    const m = /^##\s+(.+?)\s*$/.exec(line);
+    if (m && !/^###/.test(line)) {
+      if (cur) out.push(cur);
+      cur = { heading: m[1], body: [] };
+    } else if (cur) cur.body.push(line);
+    else preamble.push(line);
+  }
+  if (cur) out.push(cur);
+  return { preamble: preamble.join("\n").trim(), sections: out.map(s => ({ heading: s.heading, body: s.body.join("\n").trim() })) };
+}
+
+function renderAnalysisBody(markdown) {
+  const text = String(markdown || "");
+  if (!text.trim()) return "";
+  const { preamble, sections } = splitAnalysisSections(text);
+  /* The single most important line here. The model can and does go off-format — a missing
+     header, a numbered list instead of headings, a truncated stream — and an analysis that
+     vanishes behind a parser is far worse than one that renders flat. Below two headers
+     there is nothing to section, so hand back exactly what the old renderer produced. */
+  if (sections.length < 2) return renderMarkdown(text);
+
+  let html = preamble ? renderMarkdown(preamble) : "";
+  let rest = sections;
+
+  if (/verdict/i.test(sections[0].heading)) {
+    const v = sections[0];
+    rest = sections.slice(1);
+    // Pull the rating out of its **bold** so it can be typeset as a rating rather than as
+    // an emphasised phrase in a sentence.
+    const found = VERDICT_RATINGS.find(r => new RegExp(`\\*\\*\\s*${r}\\s*\\*\\*`, "i").test(v.body));
+    let prose = v.body;
+    let head = "";
+    if (found) {
+      prose = prose.replace(new RegExp(`\\*\\*\\s*${found}\\s*\\*\\*[\\s.:—-]*`, "i"), "");
+      head = `<span class="verdict-rating" data-tone="${RATING_TONE[found.toLowerCase()]}">${esc(found)}</span>`;
+    }
+    // No rating matched? Still render the section — dropping the verdict because it was
+    // phrased unexpectedly is the one outcome worth avoiding.
+    html += `<div class="verdict-block"><div class="verdict-head">${head}
+      <span class="verdict-label">${esc(v.heading)}</span></div>
+      <div class="verdict-body">${renderMarkdown(prose.trim())}</div></div>`;
+  }
+
+  html += rest.map(s =>
+    `<details class="ai-section"${AI_OPEN_SECTIONS.test(s.heading) ? " open" : ""}>
+      <summary><span>${esc(s.heading)}</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </summary><div class="ai-section-body">${renderMarkdown(s.body)}</div></details>`).join("");
+  return html;
 }
 
 /* ════════════════ CHAT (per-ticker, streaming) ════════════════ */

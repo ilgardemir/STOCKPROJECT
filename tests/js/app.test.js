@@ -292,6 +292,108 @@ test("an entirely empty bucket renders nothing rather than a bare tablist", () =
   assert.equal(APP.renderDataSections({ overview: "", technicals: "", fundamentals: "", filings: "" }), "");
 });
 
+/* ── Analysis body: verdict block + collapsible sections ────────────────────── */
+
+const ANALYSIS = [
+  "## Verdict",
+  "**Buy** — the multiple prices flawless execution, but FCF yield carries it.",
+  "Invalidates below $198.40.",
+  "",
+  "## Valuation & Quality",
+  "Trading at 34x forward earnings against ~12% growth.",
+  "",
+  "## Fundamentals & Financial Health",
+  "Margins are widening.",
+  "",
+  "## Sentiment & Positioning",
+  "Consensus is ahead of the tape.",
+  "",
+  "## Price Action & Institutional Footprint",
+  "Higher highs and higher lows since March.",
+  "",
+  "## Catalysts & Risks",
+  "Two catalysts, two risks.",
+  "",
+  "## Trade Idea",
+  "A call spread.",
+].join("\n");
+
+test("the verdict is lifted out of the prose into its own block", () => {
+  const out = APP.renderAnalysisBody(ANALYSIS);
+  assert.ok(out.includes('class="verdict-block"'));
+  assert.ok(/<span class="verdict-rating" data-tone="up">Buy<\/span>/.test(out));
+  // The rating must not also remain as bold text in the sentence it was pulled from.
+  assert.ok(!out.includes("<strong>Buy</strong>"));
+  // ...but the reasoning that followed it must survive intact.
+  assert.ok(out.includes("FCF yield carries it"));
+  assert.ok(out.includes("198.40"));
+});
+
+test("every heading survives and the two reasoning sections open by default", () => {
+  const out = APP.renderAnalysisBody(ANALYSIS);
+  for (const h of ["Valuation &amp; Quality", "Fundamentals &amp; Financial Health",
+                   "Sentiment &amp; Positioning", "Price Action &amp; Institutional Footprint",
+                   "Catalysts &amp; Risks", "Trade Idea"]) {
+    assert.ok(out.includes(h), `heading went missing: ${h}`);
+  }
+  // Six sections after the verdict; exactly the two that carry the reasoning start open.
+  assert.equal((out.match(/<details class="ai-section"/g) || []).length, 6);
+  assert.equal((out.match(/<details class="ai-section" open>/g) || []).length, 2);
+});
+
+test("no section's prose is lost to the sectioning", () => {
+  const out = APP.renderAnalysisBody(ANALYSIS);
+  for (const body of ["34x forward earnings", "Margins are widening", "ahead of the tape",
+                      "Higher highs", "Two catalysts", "A call spread"]) {
+    assert.ok(out.includes(body), `body went missing: ${body}`);
+  }
+});
+
+test("an off-format answer falls back to plain prose rather than vanishing", () => {
+  // The single most important behaviour here: the model goes off-format, or a stream is
+  // cut short, and an analysis lost behind a parser is far worse than one rendered flat.
+  const flat = "No headers at all, just a paragraph of analysis about the company.";
+  assert.equal(APP.renderAnalysisBody(flat), APP.renderMarkdown(flat));
+  const oneHeader = "## Verdict\n**Hold** — nothing compelling either way.";
+  assert.equal(APP.renderAnalysisBody(oneHeader), APP.renderMarkdown(oneHeader));
+  assert.equal(APP.renderAnalysisBody(""), "");
+  assert.equal(APP.renderAnalysisBody(null), "");
+  assert.equal(APP.renderAnalysisBody(undefined), "");
+});
+
+test("a verdict whose rating is phrased unexpectedly still renders its prose", () => {
+  // Dropping the verdict because the wording surprised us is the one outcome to avoid.
+  const odd = "## Verdict\nWe would accumulate here.\n\n## Valuation\nCheap.\n\n## Risks\nMany.";
+  const out = APP.renderAnalysisBody(odd);
+  assert.ok(out.includes('class="verdict-block"'));
+  assert.ok(out.includes("We would accumulate here"));
+  assert.ok(!out.includes("verdict-rating"), "no rating chip without a matched rating");
+});
+
+test("every rating maps to a direction, and hold is neutral", () => {
+  const tone = label => {
+    const out = APP.renderAnalysisBody(`## Verdict\n**${label}** — reason.\n\n## A\nx\n\n## B\ny`);
+    return (out.match(/data-tone="([a-z]+)"/) || [])[1];
+  };
+  assert.equal(tone("Strong Buy"), "up");
+  assert.equal(tone("Buy"), "up");
+  assert.equal(tone("Sell"), "down");
+  assert.equal(tone("Strong Sell"), "down");
+  // Green and red are direction. Hold is neither, and must not borrow --warn.
+  assert.equal(tone("Hold"), "flat");
+});
+
+test("text before the first header is kept, not swallowed", () => {
+  const out = APP.renderAnalysisBody("An opening line.\n\n## Verdict\n**Buy** — go.\n\n## A\nx\n\n## B\ny");
+  assert.ok(out.includes("An opening line"));
+});
+
+test("a ### subheading does not start a new collapsible section", () => {
+  const out = APP.renderAnalysisBody("## Verdict\n**Buy** — go.\n\n## A\n### Sub\nx\n\n## B\ny");
+  assert.equal((out.match(/<details class="ai-section"/g) || []).length, 2);
+  assert.ok(out.includes("Sub"));
+});
+
 test("a remembered section that this ticker cannot fill falls back to the first", () => {
   const out = APP.renderDataSections({ overview: "<i>x</i>", technicals: "", fundamentals: "", filings: "" });
   assert.ok(out.includes('data-section-tab="overview" aria-selected="true"')
