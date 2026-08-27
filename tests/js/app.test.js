@@ -30,7 +30,8 @@ function makeEl(id) {
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
     insertBefore() {}, replaceChild() {},
-    setAttribute() {}, getAttribute: () => null, removeAttribute() {}, focus() {}, blur() {},
+    setAttribute() {}, getAttribute: () => null, removeAttribute() {},
+    toggleAttribute() { return false; }, hasAttribute: () => false, focus() {}, blur() {},
     click() {}, closest: () => null, scrollIntoView() {}, insertAdjacentHTML() {}, remove() {},
     dispatchEvent: () => true, contains: () => false,
     getBoundingClientRect: () => ({ top: 0, left: 0, width: 800, height: 600, bottom: 600, right: 800 }),
@@ -333,6 +334,39 @@ test("focus mode renders panels only for the data destinations", () => {
   const out = FOCUS.renderViewRail(fullBucket());
   assert.ok(!out.includes('data-section="analysis"'));
   assert.ok(!out.includes('data-section="chat"'));
+});
+
+test("the loading rail exists, so the streaming write-up is reachable during a first run", () => {
+  /* Caught in production, not here. In focus mode both panes occupy the same grid cell and
+     only [data-hidden] separates them, so before this the skeleton phase rendered the two
+     stacked on top of each other — for the thirty to sixty seconds of a first analysis,
+     with no rail entry to escape by. #mobileTabs used to cover this by being static
+     markup; a rail that renderAll builds does not exist yet at that point. */
+  FOCUS.renderLoadingRail();
+  const rail = railHtml(readFocus);
+  assert.ok(rail.includes('data-view="overview"'), "the skeleton needs a destination");
+  assert.ok(rail.includes('data-view="analysis"'), "the streaming pane must be reachable");
+  assert.ok(/aria-selected="true"/.test(rail), "exactly one entry is current");
+});
+
+test("the skeleton panel is named, so clicking the rail does not blank it", () => {
+  // showView toggles `.show` off every panel whose data-section does not match. An
+  // unnamed skeleton wrapper is therefore hidden the instant the reader uses the rail
+  // mid-load, and the pane goes blank until the payload arrives.
+  const sk = APP.dataSkeleton();
+  assert.ok(/class="data-section show"[^>]*data-section="overview"/.test(sk),
+    "the skeleton must sit in a named, shown panel");
+});
+
+test("the loading rail does not overwrite a remembered data destination", () => {
+  // It highlights a placeholder; renderAll restores the reader's real destination.
+  readFocus('activeView = "technicals"');
+  FOCUS.renderLoadingRail();
+  assert.equal(FOCUS.activeView, "technicals");
+  // Chat is the exception — there is nothing to ask about until the payload lands.
+  readFocus('activeView = "chat"');
+  FOCUS.renderLoadingRail();
+  assert.equal(FOCUS.activeView, "analysis");
 });
 
 test("the streaming dot rides an AI destination that only focus mode renders", () => {

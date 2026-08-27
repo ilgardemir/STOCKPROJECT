@@ -807,7 +807,13 @@ function skCard(n, { chart = false } = {}) {
     <div class="card-body">${body}</div></div>`;
 }
 function dataSkeleton() {
-  return skCard(8) + skCard(0, { chart: true }) + skCard(6) + skCard(6);
+  /* Wrapped in the same panel the real cards land in, so the skeleton takes the same
+     measure — unwrapped it spanned the full pane and every card jumped left on arrival.
+     data-section is not decoration: showView() toggles `.show` off every panel whose
+     data-section does not match, so an unnamed wrapper is hidden the moment the reader
+     clicks the rail and the pane goes blank mid-load. */
+  return `<div class="data-section show" data-section="overview">${
+    skCard(8) + skCard(0, { chart: true }) + skCard(6) + skCard(6)}</div>`;
 }
 function aiSkeleton() {
   const line = w => `<div class="skeleton sk-line" style="width:${w}"></div>`;
@@ -858,6 +864,7 @@ function runAnalysis() {
   showProgress(0, 7, "Starting analysis for " + query);
 
   document.getElementById("dataBody").innerHTML = dataSkeleton();
+  renderLoadingRail();
   const ai = document.getElementById("aiSummary");
   ai.className = "prose"; ai.innerHTML = aiSkeleton();
 
@@ -1100,6 +1107,7 @@ function goHome() {
 function showWorkspace(skipAnim) {
   const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
   document.getElementById("screenerView")?.classList.remove("show"); activeScreen = null;
+  syncPaneVisibility();   // the skeleton renders before any renderAll; unhidden panes overlap
   if (ws.classList.contains("show")) { if (hero.style.display !== "none") hero.style.display = "none"; return; }
   const reveal = () => { hero.style.display = "none"; hero.classList.remove("leaving"); ws.classList.add("show"); if (active) requestAnimationFrame(drawChart); };
   if (skipAnim || hero.style.display === "none") reveal();
@@ -1676,6 +1684,11 @@ function syncPaneVisibility() {
   aiPane.toggleAttribute("data-hidden", view.pane !== "ai");
   document.body.classList.toggle("chat-view", view.id === "chat");
 }
+/* Run it at load, not only from renderAll. In focus mode both panes occupy the same grid
+   cell, so until one of them is marked hidden they are stacked on top of each other — and
+   the window where that is true is exactly the skeleton-loading phase of a first analysis,
+   before any render has happened. */
+syncPaneVisibility();
 
 /* The only signal that the write-up is still generating while you are looking at numbers.
    It rode #mobileTabs' AI tab, which no longer exists; it now rides the rail's AI Analysis
@@ -1683,6 +1696,32 @@ function syncPaneVisibility() {
    is already pulsing. */
 function setAnalysisStreaming(on) {
   document.querySelector('#viewRail [data-view="analysis"]')?.classList.toggle("streaming", on);
+}
+
+/* The rail during the skeleton phase. Without it the rail is empty for the whole of a
+   first analysis — thirty to sixty seconds in which, in focus mode, there is no way to
+   reach the pane where the write-up is streaming. #mobileTabs used to cover this by
+   existing statically in the markup; a rail that renderAll builds does not.
+
+   Two entries, not seven: the dashboard has no destinations yet, so offering five that all
+   resolve to the same skeleton would be a lie. "Dashboard" holds the skeleton's place. */
+function renderLoadingRail() {
+  const rail = document.getElementById("viewRail");
+  if (!rail) return;
+  const entries = [{ id: "overview", label: "Dashboard", pane: "data" }]
+    .concat(isFocusMode() ? [{ id: "analysis", label: "Analysis", pane: "ai" }] : []);
+  // Chat is the one preference that cannot survive the wait — there is nothing to ask
+  // about yet. Everything else is left alone: activeView is NOT rewritten to whichever
+  // placeholder is highlighted here, so renderAll restores the reader's real destination
+  // (Chart, Technicals…) when the payload lands.
+  if (activeView === "chat") activeView = "analysis";
+  const current = VIEWS.find(v => v.id === activeView) || VIEWS[0];
+  const marked = current.pane === "ai" && isFocusMode() ? "analysis" : "overview";
+  rail.innerHTML = entries.map(e =>
+    `<button type="button" role="tab" data-view="${e.id}" aria-selected="${e.id === marked}"
+      class="${e.id === marked ? "active" : ""}">${esc(e.label)}<i class="tab-dot" aria-hidden="true"></i></button>`).join("");
+  wireViewRail();
+  syncPaneVisibility();
 }
 
 /* Delegated, and wired from inside renderAll rather than at the top level: #viewRail is
