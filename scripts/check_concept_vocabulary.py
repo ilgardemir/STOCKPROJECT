@@ -88,9 +88,12 @@ def difference(label: str, expected: set[str], actual: set[str]) -> list[str]:
 
 
 def main() -> int:
-    server_source = (ROOT / "server.js").read_text()
-    app_source = (ROOT / "app.js").read_text()
-    engine_source = (ROOT / "screener.py").read_text()
+    # Explicit encoding, as check_sse_contract.py already does: read_text() defaults to the
+    # system codepage, so on a Windows box (cp1252) every source file here fails to decode
+    # on the first em dash and the whole check dies before it compares anything.
+    server_source = (ROOT / "server.js").read_text(encoding="utf-8")
+    app_source = (ROOT / "app.js").read_text(encoding="utf-8")
+    engine_source = (ROOT / "screener.py").read_text(encoding="utf-8")
 
     catalog = js_object_keys(server_source, "const SCREENER_CATALOG")
     browser = js_object_keys(app_source, "const SCREEN_CONCEPT_LABELS")

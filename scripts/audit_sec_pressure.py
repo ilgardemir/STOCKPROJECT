@@ -60,7 +60,9 @@ def filing_loop_is_capped(fn: ast.FunctionDef) -> bool:
 
 
 def main() -> int:
-    source = SOURCE_PATH.read_text()
+    # read_text() without an encoding uses the system codepage; on Windows that is cp1252
+    # and the first em dash in the engine kills the audit before it inspects a single call.
+    source = SOURCE_PATH.read_text(encoding="utf-8")
     lines = source.splitlines()
     tree = ast.parse(source)
     errors = []

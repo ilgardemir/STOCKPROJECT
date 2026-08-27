@@ -962,6 +962,121 @@ def get_price_history_series(hist: pd.DataFrame, days: int = 1260) -> list:
     return out
 
 
+def get_intraday_series(hist: pd.DataFrame, max_bars: int) -> list:
+    """Trailing `max_bars` of intraday OHLCV, same bar shape as the daily serialiser.
+
+    The one difference is `date`, which carries a time: "YYYY-MM-DD HH:MM". Two callers
+    downstream depend on that width — the chart's Fibonacci anchors look a bar up by
+    findIndex on `date`, so a date-only key would collide 78 times over in a single
+    session, and the x-axis renderer slices the time out of it to label intraday ticks.
+    """
+    if hist is None or hist.empty or max_bars <= 0: return []
+    out = []
+    for idx, row in hist.tail(max_bars).iterrows():
+        if hasattr(idx, "strftime"):
+            stamp = idx.strftime("%Y-%m-%d %H:%M")
+        else:
+            # A provider that hands back a plain string still has to produce a unique,
+            # sortable key; pad a bare date rather than emitting a ragged series.
+            raw = str(idx)
+            stamp = (raw[:16] if len(raw) >= 16 else raw[:10] + " 00:00")
+        o, h, l, c = (safe_float(row.get("Open")), safe_float(row.get("High")),
+                      safe_float(row.get("Low")),  safe_float(row.get("Close")))
+        # The chart filters on all four being finite anyway; dropping them here keeps the
+        # bar count in intraday_meta honest about what actually ships.
+        if None in (o, h, l, c): continue
+        out.append({"date": stamp, "open": o, "high": h, "low": l, "close": c,
+                    "volume": safe_int(row.get("Volume"))})
+    return out
+
+
+# Trailing-session offsets behind the returns row. Approximate trading-day counts, which is
+# the convention every quote screen uses — not calendar arithmetic.
+RETURN_WINDOWS = [("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63), ("6M", 126), ("1Y", 252)]
+
+def build_price_bar_block(hist: pd.DataFrame, intraday_5m: list, latest=None) -> str:
+    """The §6b prompt block: the actual bars, not statistics computed from them.
+
+    The model is asked to classify trend structure and name the level a buyer defends, and
+    until now it was handed only aggregates (MA50/200, RSI, a 52-week range) and left to
+    infer the shape. Everything below is a small, bounded serialisation of the same daily
+    frame the dashboard charts, so the write-up and the chart can't disagree.
+    """
+    if hist is None or hist.empty or "Close" not in hist:
+        return "\n### 6b. RECENT PRICE BARS — price history unavailable.\n"
+
+    closes = hist["Close"]
+    last = safe_float(latest)
+    if last is None: last = safe_float(closes.iloc[-1])
+    if last is None:
+        return "\n### 6b. RECENT PRICE BARS — price history unavailable.\n"
+
+    block = "\n### 6b. RECENT PRICE BARS (actual bars — use these for structure, not the summary stats above)\n"
+
+    # ── returns row ───────────────────────────────────────────────────────────
+    parts = []
+    for label, back in RETURN_WINDOWS:
+        if len(closes) <= back: continue
+        prior = safe_float(closes.iloc[-(back + 1)])
+        if prior:
+            parts.append(f"{label} {fmt(safe_divide(last - prior, prior), 'pct')}")
+    # YTD is anchored to the first session of the calendar year, not a fixed offset.
+    try:
+        year = closes.index[-1].year
+        ytd = closes[closes.index.year == year]
+        first = safe_float(ytd.iloc[0]) if len(ytd) else None
+        if first: parts.append(f"YTD {fmt(safe_divide(last - first, first), 'pct')}")
+    except Exception: pass
+    block += "Returns: " + (" | ".join(parts) if parts else "N/A") + "\n"
+
+    # ── last 10 sessions ──────────────────────────────────────────────────────
+    avg_vol = None
+    if "Volume" in hist and len(hist) >= 20:
+        avg_vol = safe_float(hist["Volume"].rolling(20).mean().iloc[-1])
+    block += "\nLast 10 sessions (open/high/low/close, volume vs 20d avg):\n"
+    rows = 0
+    for idx, row in hist.tail(10).iterrows():
+        o, h, l, c = (safe_float(row.get("Open")), safe_float(row.get("High")),
+                      safe_float(row.get("Low")),  safe_float(row.get("Close")))
+        if None in (o, h, l, c): continue
+        day = idx.strftime("%m-%d") if hasattr(idx, "strftime") else str(idx)[5:10]
+        vol = safe_float(row.get("Volume"))
+        ratio = f"{safe_divide(vol, avg_vol):.2f}x" if (vol and avg_vol) else "N/A"
+        block += f"- {day}  {o:.2f}/{h:.2f}/{l:.2f}/{c:.2f}  vol {ratio}\n"
+        rows += 1
+    if not rows: block += "- No complete daily bars.\n"
+
+    # ── weekly closes ─────────────────────────────────────────────────────────
+    try:
+        weekly = closes.resample("W-FRI").last().dropna().tail(12)
+        vals = [safe_float(v) for v in weekly]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            block += ("\nWeekly closes (last " + str(len(vals)) + "w, oldest first): "
+                      + ", ".join(f"{v:.2f}" for v in vals) + "\n")
+    except Exception: pass
+
+    # ── last intraday session ─────────────────────────────────────────────────
+    # Omitted outright when 5m data is missing. Substituting the daily bar would look like
+    # an intraday read and be nothing of the kind.
+    if intraday_5m:
+        day_key = str(intraday_5m[-1].get("date", ""))[:10]
+        session = [b for b in intraday_5m if str(b.get("date", ""))[:10] == day_key]
+        if session:
+            o = safe_float(session[0].get("open"))
+            c = safe_float(session[-1].get("close"))
+            highs = [safe_float(b.get("high")) for b in session]
+            lows  = [safe_float(b.get("low"))  for b in session]
+            highs = [x for x in highs if x is not None]
+            lows  = [x for x in lows  if x is not None]
+            if o is not None and c is not None and highs and lows:
+                hi, lo = max(highs), min(lows)
+                block += (f"\nLatest session {day_key} ({len(session)} 5-min bars): "
+                          f"O {o:.2f} H {hi:.2f} L {lo:.2f} C {c:.2f} | "
+                          f"range {fmt(safe_divide(hi - lo, lo), 'pct')}\n")
+    return block
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. CHART PATTERN DETECTION  (logic unchanged from v1)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1214,15 +1329,29 @@ def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. INTRADAY DATA
 # ══════════════════════════════════════════════════════════════════════════════
-def fetch_intraday_data(yqdata: YQData) -> pd.DataFrame:
-    for period, interval in [("5d","5m"), ("1mo","15m"), ("1mo","30m")]:
+# The chart draws three intraday tiers (1D/1W/1M) off two pulls. The 30-minute series
+# behind 1W is exactly derivable from the 5-minute one, so it is aggregated in the browser
+# rather than fetched or shipped — derived data does not belong in the payload.
+INTRADAY_TIERS = [("5m", "5d", 5 * 80), ("60m", "1mo", 200)]
+
+def fetch_intraday_data(yqdata: YQData) -> dict:
+    """{"5m": df, "60m": df} — either key may be absent, which is a normal outcome.
+
+    Funds, thin names, holidays and an ordinary Yahoo hiccup all produce an empty frame,
+    and the chart already drops the tiers it has no data for. This used to walk a fallback
+    ladder and return one frame that the caller assigned and never read, so the request
+    was being spent every run for nothing; the net upstream cost of using it is one extra
+    call, not two.
+    """
+    out = {}
+    for interval, period, _ in INTRADAY_TIERS:
         try:
             h = yqdata.history(period=period, interval=interval)
-            if not h.empty and len(h) >= 50:
+            if isinstance(h, pd.DataFrame) and not h.empty:
                 h.attrs["interval"] = interval; h.attrs["period"] = period
-                return h
+                out[interval] = h
         except: continue
-    return pd.DataFrame()
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1409,7 +1538,18 @@ def generate_analysis_payload(query: str) -> dict:
         "last_volume":    safe_float(pm.get("regularMarketVolume")),
     }
 
-    intraday_hist = fetch_intraday_data(yqd)
+    # Two intraday tiers feed the chart's 1D/1W/1M ranges; 1W's 30-minute bars are rolled
+    # up in the browser from the 5-minute series rather than fetched separately.
+    intraday_frames  = fetch_intraday_data(yqd)
+    intraday_history = {}
+    intraday_meta    = {}
+    for _iv, _period, _cap in INTRADAY_TIERS:
+        bars = get_intraday_series(intraday_frames.get(_iv), _cap)
+        if bars:
+            intraday_history[_iv] = bars
+            intraday_meta[_iv] = {"interval": _iv, "period": _period, "bars": len(bars),
+                                  "first": bars[0]["date"], "last": bars[-1]["date"]}
+
     options_data  = yqd.option_data(current_price or 0) if current_price else {"available_expirations":[],"chains":[],"iv_summary":{}}
     price_history = get_price_history_series(hist, days=1260)   # 5Y for multi-timeframe charts
 
@@ -1653,7 +1793,11 @@ MA50/MA200: {fmt(ma_50,'usd')} / {fmt(ma_200,'usd')} | BB: {fmt(key_levels.get('
 RSI(14): {fmt(rsi_latest,'ratio')} | MACD/Signal: {fmt(key_levels.get('macd'),'ratio')}/{fmt(key_levels.get('macd_signal'),'ratio')}
 5Y CAGR/MaxDD/Sharpe/Beta/AnnVol: {fmt(cagr,'pct')} / {fmt(max_drawdown,'pct')} / {fmt(sharpe,'ratio')} / {fmt(beta,'ratio')} / {fmt(annual_vol,'pct')}
 Volume: {fmt(volume_ratio,'ratio')}x 20D avg
+"""
 
+    ai_prompt += build_price_bar_block(hist, intraday_history.get("5m"), latest)
+
+    ai_prompt += f"""
 ### 7. KEY LEVELS
 Resistance: {', '.join([fmt(r,'usd') for r in key_levels.get('resistance',[])]) or 'N/A'}
 Support: {', '.join([fmt(s,'usd') for s in key_levels.get('support',[])]) or 'N/A'}
@@ -1760,7 +1904,7 @@ Read the trajectory, not the snapshot: margin direction, revenue growth durabili
 Does analyst consensus (target mean/high/low, rating) agree with your own read, or are they pricing in something you'd push back on? What does the balance of institutional, insider, and short-interest ownership imply about conviction or crowding? Use the dated Finnhub news records when relevant — do those sourced headlines corroborate or contradict the price action and fundamentals? Connect the recent earnings-surprise track record (§earnings history) to how much credibility forward estimates deserve.
 
 ## Price Action & Institutional Footprint
-Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Tie swing levels, Fibonacci zones, and the OBV/accumulation-distribution footprint into one narrative about who is in control. Name the level a buyer defends and the level where the structure breaks. Validate or dismiss the algorithmic signals — call out any that mislead.
+Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Read the actual bars in §6b — the returns row, the last ten sessions and the weekly closes — rather than inferring shape from the summary statistics in §6; where a bar-level reading contradicts an aggregate, say so. Tie swing levels, Fibonacci zones, and the OBV/accumulation-distribution footprint into one narrative about who is in control. Name the level a buyer defends and the level where the structure breaks. Validate or dismiss the algorithmic signals — call out any that mislead.
 
 ## Catalysts & Risks
 The 2–3 catalysts that could re-rate the stock (draw on the Finnhub source records plus earnings dates, 8-K events, insider activity, and sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
@@ -1826,6 +1970,12 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
         "mda_excerpt":       mda_text,
         "live_quote":        live_quote,
         "company_news":      company_news,
+        # Intraday tiers behind the chart's 1D/1W/1M ranges. Either key may be absent —
+        # the range selector only offers a tier whose series actually arrived. The 30-minute
+        # series 1W draws is rolled up in the browser from "5m", so it is deliberately not
+        # here: shipping it would duplicate data the client can derive exactly.
+        "intraday_history":  intraday_history,
+        "intraday_meta":     intraday_meta,
         # price_history contains 5Y of OHLCV data (oldest first).
         # Frontend: use all bars and filter by selected timeframe (1W/1M/3M/6M/1Y/2Y/5Y).
         # Backward-compat alias: price_history_1y still present (last 252 bars).

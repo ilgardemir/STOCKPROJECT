@@ -43,5 +43,104 @@ class ScraperSafeHelperTests(unittest.TestCase):
         self.assertFalse(scraper.is_valid(float("inf")))
 
 
+def _daily_frame(rows=300):
+    """Deterministic daily OHLCV with a gentle uptrend — no randomness, no network."""
+    idx = pd.bdate_range("2024-01-01", periods=rows)
+    close = pd.Series([100.0 + i * 0.25 for i in range(rows)], index=idx)
+    return pd.DataFrame({
+        "Open":   close - 0.40,
+        "High":   close + 0.90,
+        "Low":    close - 1.10,
+        "Close":  close,
+        "Volume": pd.Series([1_000_000 + (i % 7) * 50_000 for i in range(rows)], index=idx),
+    }, index=idx)
+
+
+def _intraday_frame(bars=78):
+    idx = pd.date_range("2024-05-01 09:30", periods=bars, freq="5min")
+    close = pd.Series([200.0 + i * 0.05 for i in range(bars)], index=idx)
+    return pd.DataFrame({
+        "Open":   close - 0.02,
+        "High":   close + 0.08,
+        "Low":    close - 0.09,
+        "Close":  close,
+        "Volume": pd.Series([12_000] * bars, index=idx),
+    }, index=idx)
+
+
+class IntradaySeriesTests(unittest.TestCase):
+    def test_bar_dates_carry_a_time_and_stay_unique(self):
+        bars = scraper.get_intraday_series(_intraday_frame(), 400)
+        self.assertEqual(len(bars), 78)
+        self.assertEqual(bars[0]["date"], "2024-05-01 09:30")
+        # The chart looks bars up by findIndex on `date`; a date-only key would collide
+        # 78 times inside one session and silently anchor Fib handles to the wrong bar.
+        self.assertEqual(len(bars), len({b["date"] for b in bars}))
+
+    def test_caps_to_max_bars_keeping_the_most_recent(self):
+        bars = scraper.get_intraday_series(_intraday_frame(), 10)
+        self.assertEqual(len(bars), 10)
+        self.assertEqual(bars[-1]["date"], "2024-05-01 15:55")
+
+    def test_survives_nan_volume_and_drops_incomplete_bars(self):
+        frame = _intraday_frame(12)
+        frame.loc[frame.index[3], "Volume"] = float("nan")
+        frame.loc[frame.index[5], "Close"] = float("nan")
+        bars = scraper.get_intraday_series(frame, 400)
+        self.assertEqual(len(bars), 11)                      # the NaN close is dropped
+        self.assertEqual(bars[3]["volume"], 0)               # the NaN volume is not
+        self.assertTrue(all(isinstance(b["volume"], int) for b in bars))
+
+    def test_empty_and_missing_frames_return_an_empty_list(self):
+        self.assertEqual(scraper.get_intraday_series(None, 100), [])
+        self.assertEqual(scraper.get_intraday_series(pd.DataFrame(), 100), [])
+        self.assertEqual(scraper.get_intraday_series(_intraday_frame(), 0), [])
+
+
+class PriceBarBlockTests(unittest.TestCase):
+    def test_block_carries_returns_ten_sessions_and_weekly_closes(self):
+        block = scraper.build_price_bar_block(_daily_frame(), None)
+        self.assertIn("### 6b. RECENT PRICE BARS", block)
+        self.assertIn("Returns:", block)
+        for label in ("1D", "1W", "1M", "3M", "6M", "1Y", "YTD"):
+            self.assertIn(label + " ", block)
+        session_rows = [l for l in block.splitlines() if l.startswith("- ") and "vol " in l]
+        self.assertEqual(len(session_rows), 10)
+        weekly = [l for l in block.splitlines() if l.startswith("Weekly closes")]
+        self.assertEqual(len(weekly), 1)
+        self.assertEqual(len(weekly[0].split(":")[1].split(",")), 12)
+
+    def test_never_emits_nan_or_inf_into_the_prompt(self):
+        frame = _daily_frame()
+        frame.loc[frame.index[-2], "Volume"] = float("nan")
+        frame.loc[frame.index[-4], "High"] = float("nan")
+        block = scraper.build_price_bar_block(frame, None).lower()
+        for token in ("nan", "inf"):
+            self.assertNotIn(token, block)
+
+    def test_last_session_line_is_omitted_without_intraday_data(self):
+        self.assertNotIn("Latest session", scraper.build_price_bar_block(_daily_frame(), None))
+        self.assertNotIn("Latest session", scraper.build_price_bar_block(_daily_frame(), []))
+
+    def test_last_session_line_summarises_only_the_final_day(self):
+        bars = scraper.get_intraday_series(_intraday_frame(), 400)
+        # A prior session must not bleed into the latest-session high/low.
+        stale = [dict(b, date=b["date"].replace("2024-05-01", "2024-04-30"), high=999.0) for b in bars]
+        block = scraper.build_price_bar_block(_daily_frame(), stale + bars)
+        self.assertIn("Latest session 2024-05-01 (78 5-min bars)", block)
+        self.assertNotIn("999.00", block)
+
+    def test_missing_price_history_degrades_instead_of_raising(self):
+        self.assertIn("unavailable", scraper.build_price_bar_block(None, None))
+        self.assertIn("unavailable", scraper.build_price_bar_block(pd.DataFrame(), None))
+
+    def test_short_history_still_produces_a_block(self):
+        block = scraper.build_price_bar_block(_daily_frame(rows=6), None)
+        self.assertIn("Returns:", block)
+        self.assertIn("1D ", block)
+        self.assertNotIn("1Y ", block)     # not enough bars to claim a one-year return
+        self.assertNotIn("nan", block.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
