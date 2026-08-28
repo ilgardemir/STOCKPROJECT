@@ -1004,6 +1004,37 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #overlayMenu .toggle.on { background: var(--chrome-2); }
 #overlayMenu .menu-head { padding: 7px 9px 3px; }
 #overlayMenu .chart-guide { margin-top: 6px; padding: 8px 9px 4px; }
+/* COMPARE — same disclosure shape as Overlays, addressed by data attribute rather than id
+   because expandChart clones this control into the modal bar and a cloned id is a dead
+   duplicate. */
+.compare-wrap { position: relative; flex-shrink: 0; }
+[data-compare-btn] { display: inline-flex; align-items: center; gap: 5px; }
+[data-compare-btn] .chev { width: 11px; height: 11px; transition: transform .25s var(--ease); }
+[data-compare-btn][aria-expanded="true"] .chev { transform: rotate(180deg); }
+.compare-cur { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--radius-xs); padding: 0 5px; }
+.compare-cur:empty { display: none; }
+/* A quiet pill fills with the accent on hover (from .chart-tool-btn:hover, which .quiet
+   only overrides the border and text of), so the accent-tinted chip inside it has to step
+   off the accent or it reads as a hole punched in the button. */
+[data-compare-btn]:hover .compare-cur { background: var(--chrome-1); }
+.compare-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; display: none;
+  width: 190px; max-width: calc(100vw - 24px); max-height: 46dvh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 6px; }
+.compare-menu.open { display: block; animation: sugIn .14s var(--ease-out); }
+.compare-menu .menu-head { padding: 7px 9px 3px; }
+.compare-menu button { display: block; width: 100%; text-align: left; background: none; border: 0;
+  border-radius: var(--radius-xs); padding: 6px 9px; cursor: pointer;
+  font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--ink); }
+/* Measured across all six themes, --chrome-hi against the menu's --chrome-1 surface is as
+   little as 1.07:1 (Terminal, Noir) — a background tint alone cannot carry either of these
+   states, so both also move the ink. This is the same reason #overlayMenu's rows change
+   their text and border on hover rather than only their fill. */
+.compare-menu button:hover { background: var(--chrome-hi); color: var(--ink-bright); }
+.compare-menu button.on { background: var(--chrome-2); color: var(--accent); }
+.compare-menu .menu-clear { color: var(--ink-dim); border-top: 1px solid var(--rule); border-radius: 0; margin-top: 4px; padding-top: 8px; }
+.compare-menu .menu-empty { padding: 6px 9px; color: var(--ink-dim); font-family: var(--mono); font-size: var(--t-micro); line-height: 1.5; }
 /* nowrap: in a nowrap row a button that wraps its own label is what turns a 28px control
    strip back into a 44px one. */
 .chart-tool-btn { flex-shrink: 0; white-space: nowrap; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 5px 11px; cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 650; }
@@ -1038,6 +1069,14 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
    selector is the one you act on. */
 .fib-status { flex-shrink: 1; overflow: hidden; }
 @media (max-width: 1180px) { body:not(.focus-mode) .interval-chip { display: none; } }
+/* The control row is nowrap, so something has to give before the range selector does — and
+   what gives is set by the PANE's width, which syncMetricDensity measures, not by the
+   viewport's. The newest control gives up its word first and keeps a two-letter one: a bare
+   chevron would be a button with nothing to read. */
+.cmp-label-short { display: none; }
+.tight-controls .interval-chip { display: none; }
+.tight-controls .cmp-label { display: none; }
+.tight-controls .cmp-label-short { display: inline; }
 #rangeSel button { background: none; border: none; cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--ink-dim); padding: 4px 10px; border-radius: 99px; transition: all .15s; }
 #rangeSel button.active { background: var(--accent); color: var(--accent-ink); }
 /* The canvas takes the region rather than a constant. 360px was a number chosen against a
@@ -1045,14 +1084,35 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
    never be on screen together no matter how much room the browser actually had. drawChart
    already measures clientWidth/clientHeight and bails on zero, so nothing there changes —
    observeChartBox() just has to tell it when the box resizes. */
-#chartBox { position: relative; flex: 1; min-height: 240px; }
-#priceChart { width: 100%; height: 100%; display: block; cursor: crosshair; }
+#chartBox { position: relative; flex: 1; min-height: 240px; display: flex; gap: 20px; }
 /* Outside the chart destination (the expand modal reuses these ids) the box still needs a
    height to resolve against, since there is no flex parent to stretch it. */
 .card #chartBox { flex: none; height: clamp(240px, 42vh, 460px); }
-#chartTip { position: absolute; pointer-events: none; display: none; background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-sm);
+/* COMPARE SPLIT — two panes, one viewport.
+   The split is a row and stays a row at every width. Height is the binding constraint on
+   this page (see the height budget in CLAUDE.md) and there is no second 200px to hand to a
+   stacked chart; width is the axis that can be spent. The expand button is absolute, so it
+   is out of this flow and does not take a column. */
+.chart-pane { position: relative; flex: 1 1 0; min-width: 0; }
+.chart-pane[hidden] { display: none; }
+/* Separated with `gap` rather than a padding on the second pane: the pane tag is placed
+   against the canvas's own left gutter, and a padding only one of the two panes carries
+   would put that tag in a different place on each side. */
+.chart-pane + .chart-pane { border-left: 1px solid var(--rule); }
+/* touch-action: one finger still scrolls the page vertically, so the chart never traps a
+   scroll; horizontal drags and two-finger pinches are ours. */
+.chart-pane canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: pan-y; }
+.chart-pane.panning canvas { cursor: grabbing; }
+/* Which pane is which. Only rendered while comparing — with one chart on screen the header
+   already says whose it is, and a label that repeats it is chrome for nothing.
+   Sits at 57px because that is the canvas's left padding: anywhere left of it is the price
+   gutter, where it lands on top of the topmost axis label. */
+.pane-tag { position: absolute; top: 1px; left: 57px; z-index: 4; pointer-events: none;
+  font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; letter-spacing: .09em; color: var(--ink-dim); }
+.pane-tag:empty { display: none; }
+.chart-tip { position: absolute; pointer-events: none; display: none; background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-sm);
   font-family: var(--mono); font-size: 11px; line-height: 1.7; padding: 8px 11px; color: var(--ink-bright); box-shadow: var(--shadow); z-index: 5; white-space: nowrap; }
-#chartTip .tg { color: var(--up); } #chartTip .tr { color: var(--down); } #chartTip b { color: var(--accent); }
+.chart-tip .tg { color: var(--up); } .chart-tip .tr { color: var(--down); } .chart-tip b { color: var(--accent); }
 .chart-guide { margin-top: 10px; border-top: 1px solid var(--rule); padding-top: 8px; color: var(--ink-dim); }
 .chart-guide summary { cursor: pointer; width: fit-content; font-size: 11px; font-weight: 650; color: var(--accent); }
 .chart-guide p { margin: 7px 0 0; max-width: 760px; font-size: 11.5px; line-height: 1.55; }
@@ -1118,22 +1178,21 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 #chartModalClose:hover { color: var(--down); border-color: var(--down); }
 #chartModalClose:active { transform: scale(.9); }
 #chartModalClose svg { width: 14px; height: 14px; pointer-events: none; }
+/* Same two .chart-pane children as the inline box — the canvas, tooltip and pane-tag rules
+   are shared, so only the frame differs. */
 #chartModalBody {
-  flex: 1; position: relative; min-height: 0; padding: 14px 16px 16px;
+  flex: 1; position: relative; min-height: 0; padding: 14px 16px 16px; display: flex; gap: 20px;
 }
-#chartModalCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
-#chartModalTip {
-  position: absolute; pointer-events: none; display: none;
-  background: var(--chrome-2); border: 1px solid var(--rule); border-radius: var(--radius-sm);
-  font-family: var(--mono); font-size: 11px; line-height: 1.7;
-  padding: 8px 11px; color: var(--ink-bright); box-shadow: var(--shadow); z-index: 5; white-space: nowrap;
-}
-#chartModalTip .tg { color: var(--up); } #chartModalTip .tr { color: var(--down); } #chartModalTip b { color: var(--accent); }
 /* overlay controls bar mirrors inline chart controls */
 #chartModalControls {
   flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 8px 16px; border-top: 1px solid var(--rule);
 }
+/* This bar is at the BOTTOM of the modal and #chartModalInner clips its overflow, so a
+   popover that drops down opens into nothing. */
+#chartModalControls .compare-menu { top: auto; bottom: calc(100% + 6px); }
+#chartModalControls .cmp-label { display: inline; }
+#chartModalControls .cmp-label-short { display: none; }
 
 /* AI PANE */
 #aiPane .pane-body { display: flex; flex-direction: column; padding: 0; overflow: hidden; }

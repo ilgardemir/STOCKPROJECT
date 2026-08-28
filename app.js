@@ -107,6 +107,83 @@ function axisLabel(bar, tf, edge) {
   if (!time) return raw.slice(2);
   return edge ? `${day.slice(5)} ${time}` : time;
 }
+/* ── Viewport: zoom + pan over the tier's default window ──────────────────────
+   A range tier picks the timeframe and a default number of bars; the viewport is a zoom
+   over that default rather than a replacement for it, so "5-min bars" stays true however
+   far in you have pinched. State is two numbers and both are counted in BARS FROM THE
+   RIGHT EDGE — `count` on screen, `offset` trimmed off the newest end — which is what lets
+   one viewport drive two tickers of different history lengths in the compare split without
+   either pane drifting out of step with the other.
+   Everything is clamped in here, so no caller has to reason about a series shorter than
+   the window it is being asked for. Kept beside RANGES rather than beside drawChart for
+   the same reason RANGES is: it is read during the load-time render. */
+const MIN_ZOOM_BARS = 10;
+const chartZoom = { key: null, count: null, offset: 0 };
+const finiteNum = v => typeof v === "number" && isFinite(v);
+
+function visibleWindow(len, defaultBars, zoom) {
+  const n = Math.max(0, Math.floor(len) || 0);
+  const base = Math.min(Math.max(1, Math.floor(defaultBars) || 1), n);
+  const floor = Math.min(MIN_ZOOM_BARS, n);
+  let count = finiteNum(zoom?.count) ? Math.round(zoom.count) : base;
+  count = Math.max(floor, Math.min(count, n));
+  let offset = finiteNum(zoom?.offset) ? Math.round(zoom.offset) : 0;
+  offset = Math.max(0, Math.min(offset, n - count));
+  return { start: n - offset - count, end: n - offset, count, offset };
+}
+/* Zoom holds the bar under the pointer still: `anchor` is where in the window the cursor
+   (or the midpoint of a pinch) sits, 0 at the left edge and 1 at the right. Without it
+   every zoom walks the view toward the newest bar and you cannot open up the level you
+   were actually looking at. */
+function zoomWindow(win, factor, anchor, len) {
+  const n = Math.max(0, Math.floor(len) || 0);
+  const floor = Math.min(MIN_ZOOM_BARS, n);
+  const count = Math.max(floor, Math.min(n, Math.round(win.count * factor)));
+  const a = Math.max(0, Math.min(1, finiteNum(anchor) ? anchor : 1));
+  const held = win.start + a * win.count;                  // the bar that must not move
+  const end = Math.round(held + (1 - a) * count);
+  return { count, offset: Math.max(0, Math.min(n - count, n - end)) };
+}
+/* Positive delta drags the candles to the right, which walks the window back in time. */
+function panWindow(win, deltaBars, len) {
+  const n = Math.max(0, Math.floor(len) || 0);
+  const step = finiteNum(deltaBars) ? Math.round(deltaBars) : 0;
+  return { count: win.count, offset: Math.max(0, Math.min(n - win.count, win.offset + step)) };
+}
+const zoomActive = () => chartZoom.count !== null || chartZoom.offset !== 0;
+/* Per-pane paint and gesture state. Hover, the reveal sweep and the in-flight gesture used
+   to hang off drawChart itself, which was correct while there was exactly one canvas; with
+   the compare split there are two, and a shared hover index draws a crosshair on the chart
+   you are not touching. Declared up here with the rest of the chart state because the
+   load-time applyTheme() repaints, and a const below that call site is a temporal dead
+   zone that throws for every visitor holding a saved tab. */
+const chartPaneState = { primary: {}, compare: {} };
+function resetZoom(key) {
+  if (key !== undefined) chartZoom.key = key;
+  chartZoom.count = null; chartZoom.offset = 0;
+}
+
+/* ── Compare: a second saved tab beside the first ─────────────────────────────
+   A view preference, not session state — the same class of thing as the active rail
+   destination, so it lives under its own localStorage key and never enters a session. */
+const CHART_COMPARE_KEY = "squall-chart-compare-v1";
+let compareTicker = null;
+try { compareTicker = localStorage.getItem(CHART_COMPARE_KEY) || null; } catch (_) { compareTicker = null; }
+/* Resolved at read time rather than pruned on write: the stored ticker can stop being
+   comparable between one render and the next (its tab was deleted, or it became the active
+   one), and a stale id must degrade to "not comparing" rather than to a blank pane. */
+function effectiveCompare() {
+  return compareTicker && compareTicker !== active && sessions[compareTicker] ? compareTicker : null;
+}
+function setCompareTicker(t, redraw = true) {
+  compareTicker = t && sessions[t] && t !== active ? t : null;
+  try {
+    if (compareTicker) localStorage.setItem(CHART_COMPARE_KEY, compareTicker);
+    else localStorage.removeItem(CHART_COMPARE_KEY);
+  } catch (_) {}
+  if (redraw) { syncChartChrome(); drawChart(); }
+}
+
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;   // JS-driven animations honor this too
 const SESSION_STORAGE_KEY = "squall-saved-analyses-v1";
 const SCREENER_STORAGE_KEY = "squall-saved-screeners-v1";
@@ -1462,6 +1539,9 @@ function renderTickerPills() {
   const savedDiv = document.getElementById("savedDiv");
   if (savedDiv) savedDiv.hidden = items.length === 0;
   if (!items.length) closeSavedMenu(false);
+  // The compare menu lists saved analyses, so it goes stale on exactly the events that
+  // rebuild these pills. No-ops on /screener, which has no chart chrome to write.
+  syncChartChrome();
 }
 
 /* Saved-work popover — the same open/close/roving-focus contract as #themeMenu, because a
@@ -1501,7 +1581,13 @@ document.addEventListener("pointerdown", e => {
 function switchTicker(t) {
   if (!sessions[t]) return;
   if (IS_SCREENER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the other page
+  const prev = active;
   active = t; activeScreen = null;
+  // Opening the tab you are comparing against swaps the two panes rather than silently
+  // dropping the comparison: the pair on screen is the thing being read, and losing half
+  // of it because you clicked the half you wanted in front is the wrong outcome. The swap
+  // is written after `active` moves — setCompareTicker refuses a ticker equal to it.
+  if (t === compareTicker) setCompareTicker(prev, false);
   showWorkspace(true);
   renderTickerPills();
   renderAll(sessions[t].data);
@@ -1512,6 +1598,7 @@ function deleteSession(t) {
   if (sess._chatAbort) { try { sess._chatAbort.abort(); } catch (_) {} }
   const keys = Object.keys(sessions), idx = keys.indexOf(t);
   delete sessions[t];
+  if (t === compareTicker) setCompareTicker(null, false);   // nothing left to compare against
   if (active === t) active = keys[idx + 1] && sessions[keys[idx + 1]] ? keys[idx + 1] : keys[idx - 1] && sessions[keys[idx - 1]] ? keys[idx - 1] : Object.keys(sessions)[0] || null;
   persistSessions(); renderTickerPills();
   if (active && sessions[active]) { renderAll(sessions[active].data); syncChatSendMode(); }
@@ -2075,21 +2162,42 @@ function chartCardBody() {
       ${tog("vol", "Volume", "var(--ink-dim)", false)}
       <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>
     </div>`;
+  const chev = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+  /* Compare carries no id on purpose. expandChart clones this row into the modal's control
+     bar, and a cloned id is a duplicate id whose copy is dead — which is exactly why the
+     overlay popover has to be skipped by that clone. Everything here is addressed by data
+     attribute and driven by delegation, so both copies are live. */
+  const compareWrap = `<div class="compare-wrap">
+      <button class="chart-tool-btn quiet" type="button" data-compare-btn aria-haspopup="menu" aria-expanded="false" aria-label="Compare with another saved ticker">
+        <span class="cmp-label">Compare</span><span class="cmp-label-short" aria-hidden="true">vs</span><b class="compare-cur" data-compare-cur></b>${chev}
+      </button>
+      <div class="compare-menu" role="menu" aria-label="Compare with another saved ticker" data-compare-menu></div>
+    </div>`;
   return `<div id="chartControls">
     <div class="overlay-wrap">
       <button class="chart-tool-btn quiet" type="button" id="overlayBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="overlayMenu">
-        Overlays<b class="overlay-count" data-overlay-count></b>
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        Overlays<b class="overlay-count" data-overlay-count></b>${chev}
       </button>
       ${overlayMenu}
     </div>
+    ${compareWrap}
     <button class="chart-tool-btn" type="button" data-chart-action="draw-fib">Draw Fib</button>
     <button class="chart-tool-btn quiet" type="button" data-chart-action="clear-fib">Clear Fib</button>
+    <button class="chart-tool-btn quiet" type="button" data-chart-action="reset-zoom" hidden title="Back to the range's default window">Reset zoom</button>
     <span class="fib-status" data-fib-status></span>
     <span class="interval-chip" data-interval-chip title="Bar interval for the selected range"></span>
     <div id="rangeSel"></div></div>
     <div id="chartBox">
-      <canvas id="priceChart" role="img" aria-label="Candlestick price chart with volume"></canvas><div id="chartTip"></div>
+      <div class="chart-pane" id="chartPane">
+        <canvas id="priceChart" role="img" aria-label="Candlestick price chart with volume"></canvas>
+        <div id="chartTip" class="chart-tip"></div>
+        <span class="pane-tag" data-pane-tag></span>
+      </div>
+      <div class="chart-pane" id="chartPaneB" hidden>
+        <canvas id="compareChart" role="img" aria-label="Comparison candlestick price chart"></canvas>
+        <div id="compareTip" class="chart-tip"></div>
+        <span class="pane-tag" data-pane-tag></span>
+      </div>
       <button class="chart-expand-btn" title="Expand chart">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
@@ -2131,7 +2239,58 @@ document.addEventListener("click", e => {
   const btn = e.target.closest("[data-chart-action]"); if (!btn) return;
   if (btn.dataset.chartAction === "draw-fib") toggleFibDraw();
   if (btn.dataset.chartAction === "clear-fib") clearManualFib();
+  if (btn.dataset.chartAction === "reset-zoom") { resetZoom(); syncChartChrome(); drawChart(); }
 });
+
+/* ── Compare control ──────────────────────────────────────────────────────────
+   Delegated for the same reason #viewRail is: this markup is rebuilt by every render and
+   cloned into the expand modal, so nothing may hold a reference to one instance of it. */
+function closeCompareMenus() {
+  document.querySelectorAll("[data-compare-menu]").forEach(m => m.classList.remove("open"));
+  document.querySelectorAll("[data-compare-btn]").forEach(b => b.setAttribute("aria-expanded", "false"));
+}
+document.addEventListener("click", e => {
+  const item = e.target.closest("[data-compare]");
+  if (item) { closeCompareMenus(); setCompareTicker(item.dataset.compare || null); return; }
+  const btn = e.target.closest("[data-compare-btn]");
+  if (!btn) return;
+  const menu = btn.parentElement?.querySelector("[data-compare-menu]");
+  if (!menu) return;
+  const open = !menu.classList.contains("open");
+  closeCompareMenus();
+  menu.classList.toggle("open", open);
+  btn.setAttribute("aria-expanded", String(open));
+});
+document.addEventListener("pointerdown", e => {
+  if (!e.target.closest("[data-compare-menu]") && !e.target.closest("[data-compare-btn]")) closeCompareMenus();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeCompareMenus(); }, true);
+
+/* One writer for every copy of the chart's stateful chrome — inline row and the modal's
+   clone of it. Called after a render, after a session list changes, and after any zoom or
+   compare change, so the two bars can never disagree about what the chart is showing. */
+function syncChartChrome() {
+  const cmp = effectiveCompare();
+  const others = Object.keys(sessions).filter(t => t !== active).sort();
+  document.querySelectorAll("[data-compare-btn]").forEach(btn => {
+    btn.disabled = !others.length;
+    btn.title = others.length ? "Show a second saved ticker beside this chart"
+                              : "Analyze a second ticker to compare charts";
+    btn.classList.toggle("active", Boolean(cmp));
+    const cur = btn.querySelector("[data-compare-cur]");
+    if (cur) cur.textContent = cmp || "";
+  });
+  document.querySelectorAll("[data-compare-menu]").forEach(menu => {
+    menu.innerHTML = `<div class="menu-head">Compare with</div>` +
+      (others.length
+        ? others.map(t => `<button type="button" role="menuitemradio" aria-checked="${t === cmp}" class="${t === cmp ? "on" : ""}" data-compare="${esc(t)}">${esc(t)}</button>`).join("")
+        : `<div class="menu-empty">No other saved analyses yet.</div>`) +
+      (cmp ? `<button type="button" class="menu-clear" data-compare="">Stop comparing</button>` : "");
+  });
+  // The reset is only offered once there is something to reset — an always-on button that
+  // does nothing most of the time is one more thing in a row with no width to spare.
+  document.querySelectorAll('[data-chart-action="reset-zoom"]').forEach(b => { b.hidden = !zoomActive(); });
+}
 
 /* The interval a range actually draws is not inferable from the candles — a 78-bar 1D view
    and a zoomed daily one look identical. Name it. */
@@ -2155,6 +2314,8 @@ function buildRangeSel(container) {
     b.onclick = () => {
       const id = b.dataset.range;
       if (sessions[active]) { sessions[active].range = id; touchSession(sessions[active]); scheduleSessionSave(); }
+      // Choosing a tier is choosing a window, not zooming the one you had.
+      resetZoom(id); syncChartChrome();
       // keep both selectors in sync
       ["#rangeSel", "#chartModalRangeSel"].forEach(sel =>
         document.querySelectorAll(sel + " button").forEach(x => x.classList.toggle("active", x.dataset.range === id)));
@@ -2194,6 +2355,7 @@ function wireChartControls() {
   buildRangeSel(document.getElementById("rangeSel"));
   buildRangeSel(document.getElementById("chartModalRangeSel"));
   syncFibControls();
+  syncChartChrome();
   const expandBtn = document.querySelector('.chart-expand-btn');
   if (expandBtn) expandBtn.onclick = () => window.expandChart(active);
   observeChartBox();
@@ -2232,18 +2394,61 @@ function bollinger(arr, n = 20, k = 2) {
   return { mid, up, lo };
 }
 
+/* Which canvas / tooltip / pane each role paints into. The modal and the inline card are
+   the same two panes at two sizes, so the only thing that varies is the id. */
+function chartSlots() {
+  const x = window.chartExpanded;
+  const el = id => document.getElementById(id);
+  const primary = sessions[active];
+  if (!primary) return [];
+  const cmp = effectiveCompare();
+  return [
+    { role: "primary", ticker: active, sess: primary,
+      canvas: el(x ? "chartModalCanvas" : "priceChart"),
+      tip:    el(x ? "chartModalTip" : "chartTip"),
+      paneEl: el(x ? "chartModalPane" : "chartPane") },
+    { role: "compare", ticker: cmp, sess: cmp ? sessions[cmp] : null,
+      canvas: el(x ? "chartModalCompareCanvas" : "compareChart"),
+      tip:    el(x ? "chartModalCompareTip" : "compareTip"),
+      paneEl: el(x ? "chartModalPaneB" : "chartPaneB") }
+  ];
+}
+
 function drawChart() {
   const sess = sessions[active]; if (!sess) return;
-  const d = sess.data;
-  const canvas = window._chartCanvasEl ? window._chartCanvasEl() : document.getElementById("priceChart");
-  const tipEl  = window._chartTipEl   ? window._chartTipEl()   : document.getElementById("chartTip");
   // Resolve the timeframe before the series. A saved session can name a tier this payload
   // has no data for (an intraday range restored against a fund, or a provider miss on
   // re-run), so fall back rather than render an empty canvas.
   let spec = rangeSpec(normalizeRange(sess.range));
-  if (!rangeAvailable(d, spec)) spec = rangeSpec(DEFAULT_RANGE);
+  if (!rangeAvailable(sess.data, spec)) spec = rangeSpec(DEFAULT_RANGE);
+  // The viewport belongs to the tier. A range the user never chose (the fallback above, or
+  // a restored tab) must not inherit the zoom left over from the tier they were last on.
+  if (chartZoom.key !== spec.id) resetZoom(spec.id);
+
+  const comparing = Boolean(effectiveCompare());
+  const box = document.getElementById(window.chartExpanded ? "chartModalBody" : "chartBox");
+  if (box) box.classList.toggle("comparing", comparing);
+  chartSlots().forEach(slot => {
+    const show = slot.role === "primary" || comparing;
+    if (slot.paneEl) slot.paneEl.hidden = !show;
+    // The canvas check matters at load: applyTheme() repaints before renderAll has ever
+    // built the chart card, so every element here is still null on the first call.
+    if (show && slot.sess && slot.canvas) paintChartPane(slot, spec, comparing);
+  });
+}
+
+function paintChartPane(slot, primarySpec, comparing) {
+  const sess = slot.sess, d = sess.data;
+  const st = chartPaneState[slot.role];
+  const canvas = slot.canvas, tipEl = slot.tip;
+  // A compare ticker need not have the tier the primary is on — a fund ships no intraday
+  // series at all — so availability is resolved per pane and the pane tag says what it
+  // actually drew rather than what was asked for.
+  const spec = rangeAvailable(d, primarySpec) ? primarySpec : rangeSpec(DEFAULT_RANGE);
   const all = seriesFor(d, spec.tf);
-  if (!canvas || !Array.isArray(all) || all.length < 5) return;
+  const tagEl = slot.paneEl ? slot.paneEl.querySelector("[data-pane-tag]") : null;
+  if (tagEl) tagEl.textContent = comparing ? (slot.ticker + (spec.id === primarySpec.id ? "" : " · " + spec.note)) : "";
+  if (!canvas || !tipEl || !Array.isArray(all) || all.length < 5) return;
 
   const full = all.filter(p => isNum(p.close) && isNum(p.open) && isNum(p.high) && isNum(p.low));
   if (full.length < 5) return;
@@ -2254,11 +2459,13 @@ function drawChart() {
   const ma20f = movingAvg(closesFull, 20), ma50f = movingAvg(closesFull, 50), ma200f = movingAvg(closesFull, 200);
   const bbF = bollinger(closesFull, 20, 2);
 
-  const N = Math.min(spec.bars, full.length);
-  const s0 = full.length - N;
-  const data = full.slice(s0);
-  const ma20 = ma20f.slice(s0), ma50 = ma50f.slice(s0), ma200 = ma200f.slice(s0);
-  const bb = { up: bbF.up.slice(s0), lo: bbF.lo.slice(s0), mid: bbF.mid.slice(s0) };
+  // The tier's bar count is the DEFAULT window, not the window: zoom and pan move inside it.
+  const len = full.length;
+  const win = visibleWindow(len, spec.bars, chartZoom);
+  const data = full.slice(win.start, win.end);
+  if (data.length < 2) return;
+  const ma20 = ma20f.slice(win.start, win.end), ma50 = ma50f.slice(win.start, win.end), ma200 = ma200f.slice(win.start, win.end);
+  const bb = { up: bbF.up.slice(win.start, win.end), lo: bbF.lo.slice(win.start, win.end), mid: bbF.mid.slice(win.start, win.end) };
 
   const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
   if (!W || !H) return;
@@ -2266,16 +2473,17 @@ function drawChart() {
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
 
   // Wind-front reveal — sweep the plot in on ticker / range / expand changes.
-  // Key excludes canvas size so split-drags and window resizes don't retrigger it.
-  const revealKey = active + "|" + spec.id + "|" + N + "|" + (window.chartExpanded ? "x" : "i");
-  if (drawChart._revealKey !== revealKey) {
-    drawChart._revealKey = revealKey;
-    drawChart._revealT0 = REDUCED ? 0 : performance.now();
+  // Key excludes canvas size so split-drags and window resizes don't retrigger it, and
+  // excludes the viewport so a pinch or a pan — which repaint continuously — don't either.
+  const revealKey = slot.ticker + "|" + spec.id + "|" + (window.chartExpanded ? "x" : "i");
+  if (st.revealKey !== revealKey) {
+    st.revealKey = revealKey;
+    st.revealT0 = REDUCED ? 0 : performance.now();
   }
   let reveal = 1;
-  if (drawChart._revealT0) {
-    const rt = (performance.now() - drawChart._revealT0) / 650;
-    if (rt >= 1) drawChart._revealT0 = 0; else reveal = 1 - Math.pow(1 - rt, 3);
+  if (st.revealT0) {
+    const rt = (performance.now() - st.revealT0) / 650;
+    if (rt >= 1) st.revealT0 = 0; else reveal = 1 - Math.pow(1 - rt, 3);
   }
 
   const kl = d.raw_data?.key_levels || {};
@@ -2303,11 +2511,15 @@ function drawChart() {
   if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x) && inBand(x)) vals.push(x, bb.lo[i]); });
   srLevels.forEach(l => vals.push(l[0]));
   if (fibVisible) Object.values(fibVisible).forEach(x => vals.push(x));
-  if (fibInteraction.ticker === active && fibInteraction.pending) vals.push(fibInteraction.pending.price);
+  if (fibInteraction.ticker === slot.ticker && fibInteraction.pending) vals.push(fibInteraction.pending.price);
   vals = vals.filter(isNum);
   const lo = Math.min(...vals) * 0.99, hi = Math.max(...vals) * 1.01;
 
-  const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = 12, padB = 30;
+  // The pane tag is an HTML label sitting over the canvas's top-left. The top gridline and
+  // any S/R label near the high are drawn right there, so while comparing the plot gives up
+  // a strip for it rather than letting two pieces of text share the same pixels. Nothing is
+  // spent in the single-chart case, where the tag renders empty.
+  const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = comparing ? 26 : 12, padB = 30;
   const volH = chartOpts.vol ? 46 : 0;
   const plotB = H - padB - volH;
   const X = i => padL + (i + 0.5) / data.length * (W - padL - padR);
@@ -2383,7 +2595,7 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(startPoint.x, startPoint.y); ctx.lineTo(endPoint.x, endPoint.y); ctx.stroke(); ctx.globalAlpha = 1;
     [startPoint, endPoint].forEach(point => { ctx.beginPath(); ctx.arc(point.x, point.y, 5, 0, Math.PI * 2); ctx.fillStyle = cssVar("--chrome-1"); ctx.fill(); ctx.strokeStyle = cssVar("--accent"); ctx.lineWidth = 2; ctx.stroke(); });
   }
-  const pendingPoint = fibInteraction.ticker === active ? anchorPoint(fibInteraction.pending) : null;
+  const pendingPoint = fibInteraction.ticker === slot.ticker ? anchorPoint(fibInteraction.pending) : null;
   if (pendingPoint) { ctx.beginPath(); ctx.arc(pendingPoint.x, pendingPoint.y, 6, 0, Math.PI * 2); ctx.fillStyle = cssVar("--accent"); ctx.fill(); }
 
   // MA lines
@@ -2427,16 +2639,69 @@ function drawChart() {
     const hit = pointFromEvent(e); if (!hit) return;
     const i = hit.i;
     const p = data[i]; if (!p) return;
-    drawChart._hover = i; drawChart();
+    st.hover = i; drawChart();
     tipEl.style.display = "block";
     const chg = ((p.close - p.open) / p.open) * 100;
     tipEl.innerHTML = `<b>${p.date}</b><br>O ${fUsd(p.open)} · H ${fUsd(p.high)}<br>L ${fUsd(p.low)} · C ${fUsd(p.close)}<br>
       <span class="${chg >= 0 ? "tg" : "tr"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span> · Vol ${fInt(p.volume)}`;
     const tx = Math.min(X(i) + 12, W - 160); tipEl.style.left = Math.max(padL, tx) + "px"; tipEl.style.top = "10px";
   };
+
+  /* ── Viewport gestures ──────────────────────────────────────────────────────
+     Zoom and pan write to the shared chartZoom and repaint everything, so the compare
+     pane follows the pane being touched. `plotW` is the drawable width; a fraction of it
+     is what a zoom anchors on and what a pan converts into bars. */
+  const plotW = W - padL - padR;
+  const fracFromClientX = cx => {
+    const rect = canvas.getBoundingClientRect();
+    return Math.max(0, Math.min(1, ((cx - rect.left) - padL) / plotW));
+  };
+  const setViewport = next => {
+    if (next.count === win.count && next.offset === win.offset) return;
+    chartZoom.count = next.count; chartZoom.offset = next.offset;
+    tipEl.style.display = "none"; st.hover = null;
+    syncChartChrome(); drawChart();
+  };
+  // The window a gesture started from, so a pinch or a drag stays absolute against its own
+  // starting point rather than compounding its own rounding frame after frame.
+  const windowFrom = base => visibleWindow(len, spec.bars, base);
+  /* Ctrl/⌘ + wheel, and the trackpad pinch the platform delivers as a ctrlKey wheel. A
+     bare wheel is deliberately left alone: the chart lives inside a scrolling pane, and
+     swallowing the page scroll whenever the pointer crosses a canvas is the thing that
+     makes an embedded chart hostile to the page around it. */
+  canvas.onwheel = e => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    // deltaMode normalizes lines and pages to pixels; the exponent — not the delta — is
+    // what gets clamped, so one violent flick of a wheel cannot jump the whole series.
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * H : e.deltaY;
+    setViewport(zoomWindow(win, Math.exp(Math.max(-0.7, Math.min(0.7, dy * 0.0022))), fracFromClientX(e.clientX), len));
+  };
+
+  const pointers = st.pointers || (st.pointers = new Map());
+  const setPanning = on => { if (slot.paneEl) slot.paneEl.classList.toggle("panning", on); };
+  const endGesture = e => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) st.pinch = null;
+    if (!pointers.size) { st.drag = null; setPanning(false); }
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
   canvas.onpointerdown = e => {
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    /* Two fingers is a pinch, whatever the first one had started. Capture both so a finger
+       that wanders off the canvas mid-gesture keeps reporting to it. */
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      st.drag = null; setPanning(false);
+      st.pinch = { dist: Math.max(1, Math.abs(a.x - b.x)), anchor: fracFromClientX((a.x + b.x) / 2),
+                   base: { count: win.count, offset: win.offset } };
+      tipEl.style.display = "none"; st.hover = null;
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
+    if (pointers.size > 2) return;
     const hit = pointFromEvent(e); if (!hit) return;
-    const drawing = fibInteraction.mode && fibInteraction.ticker === active;
+    const drawing = fibInteraction.mode && fibInteraction.ticker === active && slot.role === "primary";
     if (drawing) {
       if (!fibInteraction.pending) fibInteraction.pending = { date: hit.date, price: hit.price };
       else {
@@ -2445,39 +2710,68 @@ function drawChart() {
       }
       syncFibControls(); drawChart(); return;
     }
-    const near = (point, name) => point && Math.hypot((e.clientX - canvas.getBoundingClientRect().left) - point.x, (e.clientY - canvas.getBoundingClientRect().top) - point.y) <= 14 ? name : null;
-    const handle = near(startPoint, "start") || near(endPoint, "end");
-    if (handle) { fibInteraction.dragging = handle; fibInteraction.ticker = active; canvas.setPointerCapture(e.pointerId); e.preventDefault(); }
+    const rect = canvas.getBoundingClientRect();
+    const near = (point, name) => point && Math.hypot((e.clientX - rect.left) - point.x, (e.clientY - rect.top) - point.y) <= 14 ? name : null;
+    const handle = slot.role === "primary" ? (near(startPoint, "start") || near(endPoint, "end")) : null;
+    if (handle) { fibInteraction.dragging = handle; fibInteraction.ticker = active; canvas.setPointerCapture(e.pointerId); e.preventDefault(); return; }
+    // Otherwise arm a pan. It does not become one until the pointer has actually travelled,
+    // so a plain click still reads as a click and hover keeps working under a resting mouse.
+    st.drag = { x: e.clientX, base: { count: win.count, offset: win.offset }, moved: false };
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
   };
   canvas.onpointermove = e => {
-    if (fibInteraction.dragging && fibInteraction.ticker === active && sess.fibAnchors) {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (st.pinch && pointers.size >= 2) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.max(1, Math.abs(a.x - b.x));
+      // Spreading the fingers grows the distance, which must SHRINK the bar count.
+      setViewport(zoomWindow(windowFrom(st.pinch.base), st.pinch.dist / dist, st.pinch.anchor, len));
+      return;
+    }
+    if (fibInteraction.dragging && fibInteraction.ticker === active && slot.role === "primary" && sess.fibAnchors) {
       const hit = pointFromEvent(e); if (!hit) return;
       sess.fibAnchors[fibInteraction.dragging] = { date: hit.date, price: hit.price };
       tipEl.style.display = "none"; drawChart(); return;
     }
+    if (st.drag) {
+      const dx = e.clientX - st.drag.x;
+      if (st.drag.moved || Math.abs(dx) > 3) {
+        st.drag.moved = true; setPanning(true);
+        const barW = plotW / Math.max(1, win.count);
+        setViewport(panWindow(windowFrom(st.drag.base), dx / barW, len));
+        return;
+      }
+    }
     showHover(e);
   };
-  canvas.onpointerup = () => {
-    if (!fibInteraction.dragging) return;
-    fibInteraction.dragging = null; touchSession(sess); scheduleSessionSave(); syncFibControls(); drawChart();
+  canvas.onpointerup = e => {
+    const wasDrag = st.drag && st.drag.moved;
+    endGesture(e);
+    if (fibInteraction.dragging && slot.role === "primary") {
+      fibInteraction.dragging = null; touchSession(sess); scheduleSessionSave(); syncFibControls(); drawChart();
+    } else if (wasDrag) drawChart();
   };
   canvas.onpointercancel = canvas.onpointerup;
-  canvas.onmouseleave = () => { if (fibInteraction.dragging) return; tipEl.style.display = "none"; drawChart._hover = null; drawChart(); };
+  canvas.onmouseleave = () => {
+    if (fibInteraction.dragging || st.drag || st.pinch) return;
+    tipEl.style.display = "none"; st.hover = null; drawChart();
+  };
 
   // draw crosshair if hovering
-  if (isNum(drawChart._hover) && drawChart._hover < data.length) {
-    const x = X(drawChart._hover);
+  if (isNum(st.hover) && st.hover < data.length) {
+    const x = X(st.hover);
     ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .4; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, plotB); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
   }
 
   // keep sweeping until the reveal completes
-  if (drawChart._revealT0 && !drawChart._revealRaf) {
-    drawChart._revealRaf = requestAnimationFrame(() => { drawChart._revealRaf = null; drawChart(); });
+  if (st.revealT0 && !st.revealRaf) {
+    st.revealRaf = requestAnimationFrame(() => { st.revealRaf = null; drawChart(); });
   }
 }
-drawChart._hover = null;
-window.chartRedrawCallback = function () { drawChart(); };
+/* The modal fires this on open and on close, and open is when expandChart has just cloned
+   the control row — so this is where the clone gets its live state written into it. */
+window.chartRedrawCallback = function () { syncChartChrome(); drawChart(); };
 window.addEventListener("resize", () => { syncMetricDensity(); clearTimeout(window._rz); window._rz = setTimeout(() => { if (active) drawChart(); }, 120); });
 
 /* ════════════════ MARKDOWN ════════════════ */
@@ -2786,7 +3080,14 @@ const syncMetricDensity = () => { const p = document.getElementById("dataPane");
   // hidden pane on mobile. That is not "narrow": treating it as narrow stacks every
   // metric and nothing widens it back until you happen to drag or resize.
   if (!w) return;
-  p.classList.toggle("stack-metrics", w < 380); };
+  p.classList.toggle("stack-metrics", w < 380);
+  /* The chart's control row is nowrap and #rangeSel is the elastic member, so on a narrow
+     pane the range buttons are what quietly scroll out of reach — nothing overflows, the
+     tiers just stop being visible. Measured on this row: all six survive down to ~670px,
+     and dropping the interval chip and the Compare label buys back ~115px of that. Keyed
+     to the PANE, not the viewport: the split drag narrows this pane to any width it likes
+     without the viewport moving at all, which is what a media query cannot see. */
+  p.classList.toggle("tight-controls", w < 760); };
 
 // The pane's width changes from the drag, from the viewport, and from the hero giving way
 // to the dashboard. One observer catches all three; the explicit calls below are belt-and-braces.

@@ -228,6 +228,84 @@ test("price_history_1y still backs the daily tier for older saved sessions", () 
   assert.equal(APP.seriesFor(legacy, "1d").length, 1);
 });
 
+/* ── Viewport: zoom + pan ───────────────────────────────────────────────────── */
+
+test("an untouched viewport is exactly the tier's default window, ending at the newest bar", () => {
+  const win = APP.visibleWindow(300, 252, { count: null, offset: 0 });
+  assert.equal(win.count, 252);
+  assert.equal(win.end, 300, "the window must sit on the right edge of the series");
+  assert.equal(win.start, 48);
+});
+
+test("a window wider than the series it is asked for collapses onto the series", () => {
+  // 1Y (252 bars) against a name with 60 sessions of history: the old slice silently
+  // produced a short window; the clamp has to produce a valid one.
+  const win = APP.visibleWindow(60, 252, { count: null, offset: 0 });
+  assert.equal(win.count, 60);
+  assert.equal(win.start, 0);
+  assert.equal(win.end, 60);
+});
+
+test("the viewport clamps rather than running off either end of the series", () => {
+  const tooFar = APP.visibleWindow(300, 252, { count: 50, offset: 9999 });
+  assert.equal(tooFar.start, 0, "panning past the oldest bar must stop at it");
+  assert.equal(tooFar.count, 50);
+  const negative = APP.visibleWindow(300, 252, { count: 50, offset: -40 });
+  assert.equal(negative.end, 300, "panning past the newest bar must stop at it");
+  const tooTight = APP.visibleWindow(300, 252, { count: 1, offset: 0 });
+  assert.equal(tooTight.count, APP.MIN_ZOOM_BARS, "a chart of one candle is not a chart");
+  const tooWide = APP.visibleWindow(300, 252, { count: 5000, offset: 0 });
+  assert.equal(tooWide.count, 300, "zooming out stops at the whole series");
+});
+
+test("a viewport survives the degenerate inputs a restored tab can hand it", () => {
+  for (const zoom of [null, undefined, {}, { count: NaN, offset: NaN }, { count: Infinity, offset: "x" }]) {
+    const win = APP.visibleWindow(300, 252, zoom);
+    assert.ok(win.count >= 1 && win.count <= 300, `count out of range for ${JSON.stringify(zoom)}`);
+    assert.ok(win.start >= 0 && win.end <= 300, `bounds out of range for ${JSON.stringify(zoom)}`);
+    assert.equal(win.end - win.start, win.count);
+  }
+  const empty = APP.visibleWindow(0, 252, null);
+  assert.deepEqual([empty.start, empty.end, empty.count], [0, 0, 0], "an empty series must not go negative");
+});
+
+test("zooming holds the bar under the pointer still", () => {
+  // Without the anchor every zoom walks the view toward the newest bar, so you can never
+  // open up the level you are actually looking at.
+  const win = APP.visibleWindow(300, 100, { count: 100, offset: 0 });   // bars 200..300
+  const mid = APP.zoomWindow(win, 0.5, 0.5, 300);                       // zoom 2× on the middle
+  assert.equal(mid.count, 50);
+  const after = APP.visibleWindow(300, 100, mid);
+  assert.equal(after.start + after.count / 2, 250, "the middle bar moved");
+});
+
+test("zooming out at the right edge stays pinned to the newest bar", () => {
+  const win = APP.visibleWindow(300, 60, { count: 60, offset: 0 });
+  const out = APP.zoomWindow(win, 2, 1, 300);
+  assert.equal(out.count, 120);
+  assert.equal(out.offset, 0, "the newest bar must stay on screen when zooming out at the edge");
+});
+
+test("panning moves whole bars and never changes how many are on screen", () => {
+  const win = APP.visibleWindow(300, 100, { count: 100, offset: 0 });
+  const back = APP.panWindow(win, 25, 300);       // drag the candles right → walk back in time
+  assert.equal(back.count, 100);
+  assert.equal(back.offset, 25);
+  const forward = APP.panWindow(back, -60, 300);  // and past the right edge
+  assert.equal(forward.offset, 0);
+  const wall = APP.panWindow(win, 9999, 300);
+  assert.equal(wall.offset, 200, "panning stops when the oldest bar reaches the left edge");
+});
+
+test("both panes read one viewport, whatever their history lengths are", () => {
+  // The compare split is only legible if a pinch means the same thing on both sides, which
+  // is why the state counts bars from the RIGHT edge instead of naming absolute indices.
+  const zoom = { count: 40, offset: 10 };
+  const long = APP.visibleWindow(1260, 252, zoom), short = APP.visibleWindow(300, 252, zoom);
+  assert.equal(long.count, short.count);
+  assert.equal(long.end - 1260, short.end - 300, "both windows must end the same distance from the newest bar");
+});
+
 test("a tier is only offered when its series has enough bars to be a chart", () => {
   const d = payload();
   const byId = Object.fromEntries(APP.RANGES.map(r => [r.id, r]));

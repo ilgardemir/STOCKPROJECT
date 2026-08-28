@@ -118,6 +118,11 @@
     rangeSel →  #chartModalRangeSel |  #rangeSel
   Use window._chartCanvasEl() / _chartTipEl() / _chartRangeSelEl()
   inside the redraw callback to get the correct live element.
+
+  Each side is a .chart-pane and there are two of them: #chartModalPane always draws the
+  active ticker and #chartModalPaneB draws the compare selection when one is set (inline:
+  #chartPane / #chartPaneB). app.js owns which is shown — the accessors above name the
+  primary pane only, and chartSlots() in app.js resolves both.
 ════════════════════════════════════════════════════════════════════════════ -->
 <div id="chartModal" role="dialog" aria-modal="true" aria-label="Expanded price chart">
   <div id="chartModalInner">
@@ -130,8 +135,16 @@
       </button>
     </div>
     <div id="chartModalBody">
-      <canvas id="chartModalCanvas" role="img" aria-label="Expanded candlestick price chart"></canvas>
-      <div id="chartModalTip"></div>
+      <div class="chart-pane" id="chartModalPane">
+        <canvas id="chartModalCanvas" role="img" aria-label="Expanded candlestick price chart"></canvas>
+        <div id="chartModalTip" class="chart-tip"></div>
+        <span class="pane-tag" data-pane-tag></span>
+      </div>
+      <div class="chart-pane" id="chartModalPaneB" hidden>
+        <canvas id="chartModalCompareCanvas" role="img" aria-label="Expanded comparison candlestick price chart"></canvas>
+        <div id="chartModalCompareTip" class="chart-tip"></div>
+        <span class="pane-tag" data-pane-tag></span>
+      </div>
     </div>
     <div id="chartModalControls"></div>
   </div>
