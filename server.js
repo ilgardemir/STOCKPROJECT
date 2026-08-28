@@ -49,7 +49,46 @@ const AI_PROVIDER_SORT = ["throughput", "latency", "price"].includes(process.env
   ? process.env.SQUALL_AI_PROVIDER_SORT
   : "throughput";
 // `allow_fallbacks` keeps rerouting on a dropped provider; `sort` only sets the order tried.
+//
 const AI_PROVIDER = { allow_fallbacks: true, sort: AI_PROVIDER_SORT };
+
+// ─── Repetition damping ───────────────────────────────────────────────────────
+// A reasoning model that falls into a degenerate loop emits the same phrase until it
+// runs out of budget. Because reasoning and answer SHARE `max_tokens`, a loop inside
+// the thinking does not just look bad in the "Show thinking" panel — it eats the
+// budget the write-up was going to be written with, and the answer arrives truncated
+// or never starts. That is why "it repeats" and "it cuts off" are one failure, not two.
+//
+// `frequency_penalty` scales with how often a token has already appeared, which is the
+// shape of this failure; `presence_penalty` (a flat one-off charge) is not, and is left
+// at 0 so the model can still reuse the vocabulary a financial write-up needs — "margin"
+// and "guidance" recur legitimately in a 900-word analysis. 0.3 is deliberately mild:
+// high values push a model off domain terms and into paraphrase. Env-tunable so it can
+// be dialled from the Railway dashboard without a deploy, and 0 disables it outright.
+//
+// `require_parameters` rides along with it and is not cosmetic: OpenRouter SILENTLY DROPS
+// a sampling parameter the routed host does not implement — the request still succeeds,
+// just undamped. Sorting by throughput actively selects the fastest hosts, which are also
+// the likeliest to be running a stripped-down serving stack, so the damper and the routing
+// preference pull against each other unless the pool is constrained to hosts that honor it.
+const envFloat = (name, dflt, lo, hi) => {
+  const v = parseFloat(process.env[name]);
+  return Number.isFinite(v) && v >= lo && v <= hi ? v : dflt;
+};
+//
+// Setting the penalty to 0 removes BOTH the parameter and `require_parameters`, which is
+// the deliberate escape hatch: `require_parameters` filters the provider pool *before*
+// `allow_fallbacks` gets to reroute, so if no host for this model implements the penalty
+// the whole request 404s with "No allowed providers are available". If that ever happens,
+// `SQUALL_AI_FREQ_PENALTY=0` reverts routing to exactly what it was, from the dashboard,
+// with no deploy — which is why the two are tied together rather than tunable apart.
+const AI_FREQ_PENALTY = envFloat("SQUALL_AI_FREQ_PENALTY", 0.3, 0, 2);
+const AI_SAMPLING = {
+  temperature: envFloat("SQUALL_AI_TEMPERATURE", 0.3, 0, 2),
+  ...(AI_FREQ_PENALTY > 0
+    ? { frequency_penalty: AI_FREQ_PENALTY, provider: { ...AI_PROVIDER, require_parameters: true } }
+    : { provider: AI_PROVIDER })
+};
 
 // ─── ABUSE LIMIT CONFIG ───────────────────────────────────────────────────────
 // Every knob is env-tunable so Railway variables retune the site without a code
@@ -201,6 +240,99 @@ function buildAiMessages(prompt, profile) {
     },
     { role: "user", content: userContent }
   ];
+}
+
+// ─── Reading an OpenRouter stream ─────────────────────────────────────────────
+// The three streaming call sites below used to read `delta.reasoning`/`delta.content`
+// and discard everything else on the chunk. That threw away the only field that says
+// WHY generation stopped.
+//
+// This matters because a response cut off at `max_tokens` does not fail. The stream
+// closes cleanly — no error chunk, no dropped socket, nothing for the retry loop to
+// catch — and carries `finish_reason: "length"` on its final chunk. Reading deltas
+// alone, a truncated write-up and a finished one are byte-for-byte indistinguishable,
+// so the old loops fell straight through to `ai_done` and the browser reported
+// "Analysis complete" over prose that stops mid-sentence. The user sees the model
+// "not finishing"; the server sees a clean success. Nothing logs, nothing retries.
+//
+// `usage` arrives only when asked for (`usage: { include: true }`) and is the evidence
+// channel for the other half of the failure: reasoning_tokens pinned near the budget
+// with completion_tokens near zero is a model that spent the entire request thinking
+// in circles and never got to the answer.
+
+function newAiStreamState() {
+  return {
+    reasoning: "", answer: "",
+    finishReason: null, nativeFinishReason: null,
+    usage: null, provider: null,
+    emitted: false   // "did any token reach the client" — gates the retry loop
+  };
+}
+
+// Providers spell truncation differently ("length", "MAX_TOKENS", "max_tokens") and
+// `native_finish_reason` passes their wording through unnormalized, so match loosely.
+// Erring toward reporting truncation is the safe direction: the cost is one honest
+// "this was cut off" on a complete answer, versus silently presenting a fragment.
+const TRUNCATED_REASON = /^(length|max_tokens|max_output_tokens)$/i;
+
+function aiStreamTruncated(state) {
+  return TRUNCATED_REASON.test(state.finishReason || "")
+      || TRUNCATED_REASON.test(state.nativeFinishReason || "");
+}
+
+/**
+ * Folds one line of the provider's SSE stream into `state`.
+ *
+ * Returns an Error when the stream itself reports one (so the caller can throw it into
+ * its own retry logic), otherwise null. Unparseable lines, keep-alives and blank data
+ * are skipped rather than thrown — the stream is a mix of comments and JSON and a
+ * strict parse here would turn a keep-alive into a failed analysis.
+ *
+ * @param {(kind: "reasoning"|"answer", text: string) => void} emit
+ */
+function readAiStreamLine(line, state, emit) {
+  const trimmed = String(line).trim();
+  if (!trimmed.startsWith("data:")) return null;        // ": OPENROUTER PROCESSING" keep-alives
+  const raw = trimmed.slice(5).trim();
+  if (!raw || raw === "[DONE]") return null;
+
+  let j; try { j = JSON.parse(raw); } catch { return null; }
+  if (j.error) return new Error(j.error.message || "OpenRouter stream error");
+
+  if (j.provider) state.provider = j.provider;
+  if (j.usage) state.usage = j.usage;
+
+  const choice = j.choices?.[0];
+  if (!choice) return null;
+  // Read the stop reason off EVERY chunk, not just the last: providers vary in whether
+  // it rides the final content chunk or a trailing one with an empty delta. Only
+  // overwrite with a real value so a later `null` cannot erase what was already seen.
+  if (choice.finish_reason) state.finishReason = choice.finish_reason;
+  if (choice.native_finish_reason) state.nativeFinishReason = choice.native_finish_reason;
+
+  const d = choice.delta || {};
+  if (d.reasoning) { state.reasoning += d.reasoning; state.emitted = true; emit("reasoning", d.reasoning); }
+  if (d.content)   { state.answer    += d.content;   state.emitted = true; emit("answer",   d.content); }
+  return null;
+}
+
+/** One log line per completed AI call — the only place a thinking loop is visible. */
+function describeAiStream(state, label = "ai") {
+  const u = state.usage || {};
+  const reasoningTokens = u.completion_tokens_details?.reasoning_tokens;
+  const total = u.completion_tokens;
+  // completion_tokens counts reasoning too, so the answer is the difference.
+  const answerTokens = Number.isFinite(total) && Number.isFinite(reasoningTokens)
+    ? total - reasoningTokens : total;
+  return [
+    `[${label}]`,
+    `provider=${state.provider || "?"}`,
+    `finish=${state.finishReason || "?"}${state.nativeFinishReason && state.nativeFinishReason !== state.finishReason ? `/${state.nativeFinishReason}` : ""}`,
+    `reasoning=${reasoningTokens ?? "?"}`,
+    `answer=${answerTokens ?? "?"}`,
+    `chars=${state.answer.length}`,
+    aiStreamTruncated(state) ? "TRUNCATED" : ""
+  ].filter(Boolean).join(" ");
 }
 
 function buildBacktestAiMessages(prompt, profile) {
@@ -2062,11 +2194,12 @@ const appServer = http.createServer(async (req, res) => {
 
       send("backtest_ai_start", { model:AI_MODEL });
       const body = JSON.stringify({
-        model:AI_MODEL, temperature:0.3, max_tokens:ANALYSIS_MAX,
-        reasoning:{ effort:REASON_EFFORT }, stream:true, provider:AI_PROVIDER,
+        model:AI_MODEL, max_tokens:ANALYSIS_MAX,
+        reasoning:{ effort:REASON_EFFORT }, stream:true, usage:{ include:true },
+        ...AI_SAMPLING,
         messages:buildBacktestAiMessages(payload.ai_prompt, profile)
       });
-      let answer = "", reasoning = "", emitted = false, lastError = null;
+      let answer = "", reasoning = "", emitted = false, lastError = null, truncated = false;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -2083,22 +2216,25 @@ const appServer = http.createServer(async (req, res) => {
           }
           let sseBuffer = "";
           const decoder = new TextDecoder();
+          const state = newAiStreamState();
           for await (const chunk of aiRes.body) {
             sseBuffer += decoder.decode(chunk, { stream:true });
             let nl;
             while ((nl = sseBuffer.indexOf("\n")) >= 0) {
-              const line = sseBuffer.slice(0, nl).trim();
+              const line = sseBuffer.slice(0, nl);
               sseBuffer = sseBuffer.slice(nl + 1);
-              if (!line.startsWith("data:")) continue;
-              const raw = line.slice(5).trim();
-              if (!raw || raw === "[DONE]") continue;
-              let item; try { item = JSON.parse(raw); } catch { continue; }
-              if (item.error) throw new Error(item.error.message || "OpenRouter stream error");
-              const delta = item.choices?.[0]?.delta || {};
-              if (delta.reasoning) { reasoning += delta.reasoning; emitted = true; send("backtest_ai_thinking", { t:delta.reasoning }); }
-              if (delta.content) { answer += delta.content; emitted = true; send("backtest_ai_delta", { t:delta.content }); }
+              const streamErr = readAiStreamLine(line, state, (kind, t) =>
+                send(kind === "reasoning" ? "backtest_ai_thinking" : "backtest_ai_delta", { t }));
+              if (streamErr) throw streamErr;
             }
           }
+          reasoning = state.reasoning; answer = state.answer; emitted = state.emitted;
+          console.log(describeAiStream(state, "backtest"));
+          // A truncated replay is worse than a truncated analysis: the forced long/short
+          // position lives at the END of the write-up, so a cut-off answer is exactly the
+          // one whose decision never got written. Fall through to the deterministic
+          // pre-cutoff fallback rather than extracting a decision from a fragment.
+          if (aiStreamTruncated(state)) { truncated = true; break; }
           send("backtest_ai_done", { aiSummary:answer, aiReasoning:reasoning, model:AI_MODEL });
           lastError = null;
           break;
@@ -2111,10 +2247,13 @@ const appServer = http.createServer(async (req, res) => {
           break;
         }
       }
-      if (lastError) send("backtest_ai_error", { error:emitted
+      if (truncated) send("backtest_ai_error", {
+        error:"The historical write-up ran past its length limit and stopped early, so the position below comes from the deterministic pre-cutoff signal instead.",
+        truncated:true });
+      else if (lastError) send("backtest_ai_error", { error:emitted
         ? `The historical write-up was interrupted (${lastError.message}). Outcomes are still shown below.`
         : `Historical AI write-up failed: ${lastError.message}` });
-      await revealOutcomes(answer);
+      await revealOutcomes(truncated ? null : answer);
     });
     py.stdin.end(JSON.stringify({ query:queryCheck.query, as_of:dateCheck.value }));
     return;
@@ -2172,16 +2311,18 @@ const appServer = http.createServer(async (req, res) => {
       // to another provider instead of hard-failing when one drops the connection.
       const aiReqBody = JSON.stringify({
         model:       AI_MODEL,
-        temperature: 0.3,
         max_tokens:  ANALYSIS_MAX,
         reasoning:   { effort: REASON_EFFORT },
         stream:      true,
-        provider:    AI_PROVIDER,
+        // Asked for explicitly — without it the final chunk carries no token counts, and
+        // a reasoning loop that ate the answer budget leaves no trace anywhere.
+        usage:       { include: true },
+        ...AI_SAMPLING,
         messages:    buildAiMessages(payload.ai_prompt, profile)
       });
 
       const MAX_ATTEMPTS = 3;
-      let aiSummary = "", aiReasoning = "", emitted = false, lastErr = null;
+      let aiSummary = "", aiReasoning = "", emitted = false, lastErr = null, truncated = false;
 
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         aiSummary = ""; aiReasoning = "";   // only ever retried when nothing was emitted yet, so this is safe
@@ -2205,22 +2346,27 @@ const appServer = http.createServer(async (req, res) => {
 
           let sseBuf = "";
           const decoder = new TextDecoder();
+          const state = newAiStreamState();
           for await (const chunk of aiRes.body) {
             sseBuf += decoder.decode(chunk, { stream: true });
             let nl;
             while ((nl = sseBuf.indexOf("\n")) >= 0) {
-              const line = sseBuf.slice(0, nl).trim();
+              const line = sseBuf.slice(0, nl);
               sseBuf = sseBuf.slice(nl + 1);
-              if (!line.startsWith("data:")) continue;      // skips ": OPENROUTER PROCESSING" keep-alives
-              const data = line.slice(5).trim();
-              if (!data || data === "[DONE]") continue;
-              let j; try { j = JSON.parse(data); } catch { continue; }
-              if (j.error) throw new Error(j.error.message || "OpenRouter stream error");
-              const d = j.choices?.[0]?.delta || {};
-              if (d.reasoning) { aiReasoning += d.reasoning; emitted = true; send("ai_thinking", { t: d.reasoning }); }
-              if (d.content)   { aiSummary   += d.content;   emitted = true; send("ai_delta",   { t: d.content }); }
+              const streamErr = readAiStreamLine(line, state, (kind, t) =>
+                send(kind === "reasoning" ? "ai_thinking" : "ai_delta", { t }));
+              if (streamErr) throw streamErr;
             }
           }
+          aiReasoning = state.reasoning; aiSummary = state.answer; emitted = state.emitted;
+          console.log(describeAiStream(state, `analyze ${query}`));
+
+          // A clean stream is not the same as a finished answer. Stopping at max_tokens
+          // ends the stream with no error at all, so this is the only branch that can
+          // tell the browser the write-up is a fragment — `ai_done` would render it as
+          // complete, at 100%, with no Retry.
+          if (aiStreamTruncated(state)) { truncated = true; break; }
+
           send("ai_done", { aiSummary, aiReasoning, model: AI_MODEL });
           lastErr = null;
           break;
@@ -2241,7 +2387,21 @@ const appServer = http.createServer(async (req, res) => {
       // Failure surfaces as ai_error (never ai_done) so an interrupted stream is never
       // mistaken for a finished answer. The client keeps whatever partial text streamed
       // and shows a Retry button — the dashboard is untouched either way.
-      if (lastErr) {
+      if (truncated) {
+        // Deliberately not retried: the request would be identical, so it would hit the
+        // same ceiling and spend the budget again. Raise SQUALL_ANALYSIS_MAX (or lower
+        // SQUALL_REASON_EFFORT, which frees the share of it that thinking is taking)
+        // rather than asking the same question twice.
+        send("ai_error", {
+          error: "The write-up ran past its length limit and stopped early — everything above it is complete. Retry to regenerate it.",
+          truncated: true
+        });
+      } else if (lastErr) {
+        // The one self-inflicted failure worth naming: require_parameters narrows the pool
+        // before allow_fallbacks can reroute, so a model with no host implementing
+        // frequency_penalty fails here rather than degrading. Say which knob reverts it.
+        if (/no allowed providers|no endpoints found/i.test(lastErr.message || ""))
+          console.error("AI routing found no provider — SQUALL_AI_FREQ_PENALTY=0 reverts the require_parameters constraint.");
         const msg = emitted
           ? `Response was interrupted before finishing (${lastErr.message}). Hit Retry to regenerate the full analysis.`
           : `AI call failed: ${lastErr.message}`;
@@ -2430,20 +2590,27 @@ const appServer = http.createServer(async (req, res) => {
                 },
                 body: JSON.stringify({
                   model:       AI_MODEL,
-                  temperature: 0.3,
                   max_tokens:  ANALYSIS_MAX,
                   reasoning:   { effort: REASON_EFFORT },
-                  provider:    AI_PROVIDER,
+                  ...AI_SAMPLING,
                   messages:    buildAiMessages(payload.ai_prompt, profile)
                 })
               });
               const aiData   = await aiRes.json();
               if (aiData.error) throw new Error(aiData.error.message || "OpenRouter API error");
-              const aiMsg     = aiData.choices[0].message;
+              const choice    = aiData.choices[0];
+              const aiMsg     = choice.message;
               const aiSummary = aiMsg.content;
               const aiReasoning = aiMsg.reasoning || "";
+              // Same trap as the streaming path, just in one response object: stopping at
+              // max_tokens is reported here and nowhere else, so without this the fallback
+              // route hands back a fragment as a successful analysis.
+              const truncated = TRUNCATED_REASON.test(choice.finish_reason || "")
+                             || TRUNCATED_REASON.test(choice.native_finish_reason || "");
               res.writeHead(200, {"Content-Type":"application/json"});
-              res.end(JSON.stringify({ ...payload, aiSummary, aiReasoning, model: AI_MODEL }));
+              res.end(JSON.stringify({ ...payload, aiSummary, aiReasoning, model: AI_MODEL,
+                ...(truncated ? { aiTruncated: true,
+                  aiError: "The write-up ran past its length limit and stopped early." } : {}) }));
             } catch (aiErr) {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: "AI call failed: " + aiErr.message }));
@@ -2503,10 +2670,10 @@ const appServer = http.createServer(async (req, res) => {
 
       const reqBody = {
         model:       AI_MODEL,
-        temperature: 0.3,
         max_tokens:  think ? 4000 : 2048,   // reasoning shares the output budget → give it more room
         stream:      true,
-        provider:    AI_PROVIDER,   // reroute instead of hard-failing when a provider drops
+        usage:       { include: true },
+        ...AI_SAMPLING,             // reroute on a dropped provider, and damp repetition loops
         messages: [
           {
             role: "system",
@@ -2541,23 +2708,33 @@ const appServer = http.createServer(async (req, res) => {
           return res.end();
         }
 
-        let sseBuf = "", reply = "", reasoning = "";
+        let sseBuf = "";
+        const state = newAiStreamState();
         const decoder = new TextDecoder();
         for await (const chunk of aiRes.body) {
           sseBuf += decoder.decode(chunk, { stream: true });
           let nl;
           while ((nl = sseBuf.indexOf("\n")) >= 0) {
-            const line = sseBuf.slice(0, nl).trim();
+            const line = sseBuf.slice(0, nl);
             sseBuf = sseBuf.slice(nl + 1);
-            if (!line.startsWith("data:")) continue;      // skips ": OPENROUTER PROCESSING" keep-alives
-            const data = line.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
-            let j; try { j = JSON.parse(data); } catch { continue; }   // ignore any non-JSON noise mid-stream
-            if (j.error) { send("error", { error: j.error.message || "The model stream errored." }); return res.end(); }
-            const d = j.choices?.[0]?.delta || {};
-            if (d.reasoning) { reasoning += d.reasoning; send("think", { t: d.reasoning }); }
-            if (d.content)   { reply     += d.content;   send("delta", { t: d.content }); }
+            const streamErr = readAiStreamLine(line, state, (kind, t) =>
+              send(kind === "reasoning" ? "think" : "delta", { t }));
+            if (streamErr) { send("error", { error: streamErr.message || "The model stream errored." }); return res.end(); }
           }
+        }
+        const { answer: reply, reasoning } = state;
+        console.log(describeAiStream(state, think ? "chat+think" : "chat"));
+
+        // An empty reply after a truncated stream is not "the model returned nothing" —
+        // it is thinking that consumed the whole shared budget before writing a word.
+        // Saying "try again" there sends the user back into the identical request.
+        if (aiStreamTruncated(state)) {
+          if (!reply.trim()) {
+            send("error", { error: "The model spent its whole budget reasoning and never answered. Ask a narrower question, or turn thinking off.", truncated: true });
+            return res.end();
+          }
+          send("done", { reply, reasoning, truncated: true });
+          return res.end();
         }
         if (!reply.trim()) { send("error", { error: "The model returned an empty response — please try again." }); return res.end(); }
         send("done", { reply, reasoning });
@@ -2606,5 +2783,7 @@ module.exports = {
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
-  acquirePy, readBody, validateChatPayload, limitStats
+  acquirePy, readBody, validateChatPayload, limitStats,
+  // AI stream termination — exported so truncation detection is testable without a provider.
+  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING
 };

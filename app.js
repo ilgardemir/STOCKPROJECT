@@ -3013,7 +3013,11 @@ async function streamChatReply(sess) {
         let j; try { j = JSON.parse(l.slice(5).trim()); } catch { continue; }
         if      (evt === "think") { aiMsg.reasoning += j.t; schedulePaint(); }
         else if (evt === "delta") { aiMsg.content   += j.t; schedulePaint(); }
-        else if (evt === "done")  { if (j.reply) aiMsg.content = j.reply; if (j.reasoning) aiMsg.reasoning = j.reasoning; }
+        // `truncated` means the model stopped at its token ceiling, not that it finished.
+        // Marking it inline is the whole point: an answer that just stops mid-sentence
+        // reads as the model being vague rather than as the reply being cut in half.
+        else if (evt === "done")  { if (j.reply) aiMsg.content = j.reply; if (j.reasoning) aiMsg.reasoning = j.reasoning;
+                                    if (j.truncated) aiMsg.content += "\n\n_…cut off at the length limit._"; }
         else if (evt === "error") { aiMsg.error = true; aiMsg.content = (aiMsg.content ? aiMsg.content + "\n\n" : "") + "⚠️ " + j.error; }
       }
     }

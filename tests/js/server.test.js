@@ -5,7 +5,8 @@ const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
   backtestProfilePlan, ensureBacktestPosition,
-  LIM, COST, clientIp, clientKey, admit, buckets, globals
+  LIM, COST, clientIp, clientKey, admit, buckets, globals,
+  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING
 } = require("../../server");
 const BARS = require("../fixtures/backtest_bars.json");
 
@@ -366,4 +367,137 @@ test("simulated trade return scales with the MySquall position size", () => {
     { direction:"long", horizon:"6m", position_pct:0.25, stop_pct:null, target_pct:null }, bars);
   assert.equal(Math.round(result.stats.trade_return * 10000) / 10000, 0.025);
   assert.equal(result.curve.at(-1).trade, 10250);
+});
+
+/* ── AI stream termination ──────────────────────────────────────────────────
+   A response that stops because it hit max_tokens ends the SSE stream cleanly:
+   no error, no dropped socket, just a last chunk carrying finish_reason.
+   Reading the deltas alone cannot tell that apart from a finished answer, which
+   is why a truncated write-up used to render as "Analysis complete". */
+
+function feed(lines, state, emit = () => {}) {
+  for (const line of lines) {
+    const err = readAiStreamLine(line, state, emit);
+    if (err) return err;
+  }
+  return null;
+}
+
+function chunk(delta, extra = {}) {
+  return `data: ${JSON.stringify({ choices: [{ delta, ...extra }] })}`;
+}
+
+test("readAiStreamLine accumulates reasoning and answer deltas and reports neither as truncated", () => {
+  const state = newAiStreamState();
+  const seen = [];
+  const err = feed([
+    ": OPENROUTER PROCESSING",
+    chunk({ reasoning: "weighing " }),
+    chunk({ reasoning: "the multiple" }),
+    chunk({ content: "## Verdict\n" }),
+    chunk({ content: "Hold." }, { finish_reason: "stop", native_finish_reason: "stop" }),
+    "data: [DONE]"
+  ], state, (kind, text) => seen.push([kind, text]));
+
+  assert.equal(err, null);
+  assert.equal(state.reasoning, "weighing the multiple");
+  assert.equal(state.answer, "## Verdict\nHold.");
+  assert.equal(state.emitted, true);
+  assert.equal(state.finishReason, "stop");
+  assert.equal(aiStreamTruncated(state), false);
+  assert.deepEqual(seen, [
+    ["reasoning", "weighing "], ["reasoning", "the multiple"],
+    ["answer", "## Verdict\n"], ["answer", "Hold."]
+  ]);
+});
+
+test("aiStreamTruncated catches a response cut off at max_tokens", () => {
+  const state = newAiStreamState();
+  feed([
+    chunk({ content: "## Verdict\nThe balance sheet carries" }),
+    chunk({}, { finish_reason: "length" }),
+    "data: [DONE]"
+  ], state);
+  assert.equal(state.finishReason, "length");
+  assert.equal(aiStreamTruncated(state), true);
+});
+
+test("aiStreamTruncated reads a provider's own truncation wording, whatever its case", () => {
+  for (const native of ["MAX_TOKENS", "max_tokens", "length", "Length"]) {
+    const state = newAiStreamState();
+    feed([chunk({ content: "cut" }, { finish_reason: null, native_finish_reason: native })], state);
+    assert.equal(aiStreamTruncated(state), true, `native_finish_reason ${native} should read as truncated`);
+  }
+  const clean = newAiStreamState();
+  feed([chunk({ content: "done" }, { native_finish_reason: "STOP" })], clean);
+  assert.equal(aiStreamTruncated(clean), false);
+});
+
+test("readAiStreamLine records usage and the serving provider so a thinking loop is visible", () => {
+  const state = newAiStreamState();
+  feed([
+    chunk({ reasoning: "..." }),
+    `data: ${JSON.stringify({
+      provider: "SomeHost",
+      choices: [{ delta: {}, finish_reason: "length" }],
+      usage: { completion_tokens: 5980, prompt_tokens: 9000,
+               completion_tokens_details: { reasoning_tokens: 5975 } }
+    })}`,
+    "data: [DONE]"
+  ], state);
+
+  assert.equal(state.provider, "SomeHost");
+  assert.equal(state.usage.completion_tokens, 5980);
+  const line = describeAiStream(state);
+  // The whole point of the log line is spotting reasoning that ate the answer budget.
+  assert.match(line, /SomeHost/);
+  assert.match(line, /length/);
+  assert.match(line, /reasoning=5975/);
+  assert.match(line, /answer=5/);
+});
+
+test("readAiStreamLine surfaces an in-stream provider error instead of swallowing it", () => {
+  const state = newAiStreamState();
+  const err = feed([`data: ${JSON.stringify({ error: { message: "upstream exploded" } })}`], state);
+  assert.ok(err instanceof Error);
+  assert.match(err.message, /upstream exploded/);
+});
+
+test("readAiStreamLine ignores keep-alives, blank data and unparseable chunks", () => {
+  const state = newAiStreamState();
+  const err = feed([": keep-alive", "", "data:", "data: {not json", "id: 7"], state);
+  assert.equal(err, null);
+  assert.equal(state.emitted, false);
+  assert.equal(state.finishReason, null);
+});
+
+test("AI sampling sends a repetition damper and only routes to providers that honor it", () => {
+  // A degenerate loop is the failure this defends against; OpenRouter silently DROPS
+  // an unsupported parameter, so require_parameters is what makes the damper real.
+  assert.ok(AI_SAMPLING.frequency_penalty > 0, "frequency_penalty must be applied");
+  assert.equal(AI_SAMPLING.provider.require_parameters, true);
+  assert.equal(AI_SAMPLING.provider.allow_fallbacks, true);
+});
+
+test("zeroing the repetition damper also drops the provider constraint it needs", () => {
+  // require_parameters filters the pool BEFORE allow_fallbacks can reroute, so leaving it
+  // on with no parameter to require would narrow routing for nothing. This is the documented
+  // one-env-var revert, and it is only a revert if both halves come off together.
+  const { execFileSync } = require("node:child_process");
+  const read = env => JSON.parse(execFileSync(process.execPath,
+    ["-e", "process.stdout.write(JSON.stringify(require('./server').AI_SAMPLING))"],
+    { env: { ...process.env, ...env }, encoding: "utf8" }));
+
+  const off = read({ SQUALL_AI_FREQ_PENALTY: "0" });
+  assert.equal("frequency_penalty" in off, false);
+  assert.equal("require_parameters" in off.provider, false);
+  assert.equal(off.provider.allow_fallbacks, true);
+
+  const on = read({ SQUALL_AI_FREQ_PENALTY: "0.5" });
+  assert.equal(on.frequency_penalty, 0.5);
+  assert.equal(on.provider.require_parameters, true);
+
+  // An out-of-range or garbage value must fall back to the default, never disable silently.
+  assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "banana" }).frequency_penalty, 0.3);
+  assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "9" }).frequency_penalty, 0.3);
 });
