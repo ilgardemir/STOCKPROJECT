@@ -39,9 +39,28 @@ const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const REASON_EFFORT = EFFORTS.includes(process.env.SQUALL_REASON_EFFORT)
   ? process.env.SQUALL_REASON_EFFORT
   : "low";                      // was "medium", and "high" before that
+// 6000 was too tight in practice: at effort "low" the thinking takes ~20% of it, leaving
+// ~4800 for the write-up, and a full analysis (verdict + five sections, each with real
+// numbers quoted back) regularly ran into that ceiling — surfacing as an `ai_error` with
+// `truncated: true` rather than an answer. 16000 gives the answer ~12800 tokens, which is
+// several times the longest write-up observed, so the cap stops being the binding limit.
+//
+// Raising this raises the THINKING cap with it (see the percentage note above): ~3200
+// instead of ~1200. That is a ceiling, not a target — the model used ~1800 even when
+// permitted 3000 — so the latency cost is small, but it is the number to lower first if
+// analyses start feeling slow again. Cost scales with tokens actually generated, not with
+// the cap, so a bigger ceiling only costs more on the requests that genuinely needed it.
 const ANALYSIS_MAX  = Number.isFinite(parseInt(process.env.SQUALL_ANALYSIS_MAX, 10))
   ? parseInt(process.env.SQUALL_ANALYSIS_MAX, 10)
-  : 6000;                       // total output cap — thinking and answer SHARE this
+  : 16000;                      // total output cap — thinking and answer SHARE this
+// /chat had its own hardcoded pair (2048 plain / 4000 thinking) and was the worse offender:
+// a follow-up that asks for a table or a walk-through of five metrics does not fit in 2048,
+// and with thinking on, `low` effort took ~800 of the 4000 before a word was written. Same
+// knob shape as ANALYSIS_MAX so both can be retuned from the dashboard; the non-thinking
+// call gets half, since nothing is skimmed off the top for reasoning there.
+const CHAT_MAX = Number.isFinite(parseInt(process.env.SQUALL_CHAT_MAX, 10))
+  ? parseInt(process.env.SQUALL_CHAT_MAX, 10)
+  : 8000;
 // Default OpenRouter routing load-balances on price, which is why we land on slow hosts.
 // "throughput" ranks by generation speed instead and costs nothing in output quality —
 // it is the same model either way. Set to "price" or "latency" to change the trade.
@@ -829,7 +848,10 @@ async function interpretScreenerQuery(query, profile) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", signal: ctrl.signal,
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Interpreter" },
-      body: JSON.stringify({ model: UTILITY_MODEL, temperature: .05, max_tokens: 900,
+      // Doubled from 900. This one emits JSON, so hitting the cap does not show up as a
+      // visibly cut-off answer — the parse fails and we quietly serve the deterministic
+      // fallback recipe, which reads to the user as "the screener ignored what I asked".
+      body: JSON.stringify({ model: UTILITY_MODEL, temperature: .05, max_tokens: 1800,
         messages: [
           { role:"system", content:`Translate a layperson's stock-screening request into strict JSON. Never select stocks and never invent a metric. Choose up to 10 concepts only from this catalog: ${JSON.stringify(SCREENER_CATALOG)}. The backend definitions are authoritative. Convert fuzzy language and named chart formations (for example VCP, cup with handle, flat base, double bottom, and bull flag) into the closest measurable concept blend, using weights for emphasis. Mark required only when the user clearly says must/only.
 
@@ -932,7 +954,9 @@ async function refineScreenerSpec(message, existing, profile, resultCount) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method:"POST", signal:ctrl.signal,
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${API_KEY}`, "HTTP-Referer":"http://localhost", "X-Title":"Squall Screener Refiner" },
-      body:JSON.stringify({ model:UTILITY_MODEL, temperature:.08, max_tokens:1100, messages:[
+      // Doubled from 1100, same reasoning as the interpreter — and this one carries a prose
+      // `reply` alongside the revised recipe, so it has strictly more to fit.
+      body:JSON.stringify({ model:UTILITY_MODEL, temperature:.08, max_tokens:2200, messages:[
         { role:"system", content:`Revise an existing quantitative stock-screening recipe after a user follow-up. Never choose stocks or invent metrics. Use no more than 10 concepts from this authoritative catalog: ${JSON.stringify(SCREENER_CATALOG)}. Return JSON only with reply (one concise explanation), title, summary, concepts, filters, settings, max_results, and optionally theme={label, keywords, exclude_keywords, min_score}. Allowed filters are sectors, exclude_sectors, market_cap_min/max, price_min/max, pe_max, forward_pe_max, volume_min, avg_dollar_volume_min, dividend_yield_min, revenue_growth_min, earnings_growth_min, profit_margin_min, current_ratio_min, beta_min/max, and short_interest_min. Keep the existing theme unless the user changes the subject or asks to drop it; when replacing it, use specific lowercase terms and a 15-80 minimum relevance score. Include a filter key only when a real constraint applies — never emit 0/null placeholders. “Broaden” should lower match_threshold and remove unnecessary required flags; “narrow” should raise it or make the clearest priority required. Preserve explicit user concepts; MySquall is context only because the server reapplies its secondary calibration.` },
         { role:"user", content:`Follow-up: ${String(message).slice(0,500)}\nPrevious matches: ${Number(resultCount)||0}\nMySquall: ${formatProfile(profile) || "none"}\nExisting recipe: ${JSON.stringify(existing)}\nDeterministic fallback: ${JSON.stringify(fallback)}` }
       ] })
@@ -2670,7 +2694,7 @@ const appServer = http.createServer(async (req, res) => {
 
       const reqBody = {
         model:       AI_MODEL,
-        max_tokens:  think ? 4000 : 2048,   // reasoning shares the output budget → give it more room
+        max_tokens:  think ? CHAT_MAX : Math.round(CHAT_MAX / 2),  // reasoning shares the output budget → give it more room
         stream:      true,
         usage:       { include: true },
         ...AI_SAMPLING,             // reroute on a dropped provider, and damp repetition loops
