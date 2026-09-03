@@ -1353,6 +1353,35 @@ const CACHE = {
   ".svg":  "public, max-age=604800", ".ico": "public, max-age=604800"
 };
 
+/* A 404 is the only error page a visitor actually lands on, and as three words of plain
+   text it reads as the platform's failure rather than the app's — a dead end with no route
+   back to the two pages that do exist. 404.html is sent for it instead, at a real 404 so
+   crawlers, fetch() and the health of the deploy are all still told the truth.
+
+   Two deliberate limits. It goes out only when the client asked for HTML *and* the miss
+   looks like a page request: a missing PNG must not answer with markup under an image
+   content type, and neither must an EventSource. And an unreadable 404.html degrades to the
+   old plain text rather than throwing — the error path is the one path that cannot have an
+   error path of its own. Cached on the same size+mtime stamp as the partials. */
+let notFoundCache = { stamp: -1, body: "" };
+function notFoundPage() {
+  const file = path.join(PUBLIC_DIR, "404.html");
+  let stamp = 0;
+  try { const st = fs.statSync(file); stamp = st.mtimeMs + st.size; } catch (_) { return ""; }
+  if (notFoundCache.stamp === stamp) return notFoundCache.body;
+  let text = "";
+  try { text = expandIncludes(fs.readFileSync(file, "utf8")); } catch (_) { return ""; }
+  notFoundCache = { stamp, body: text };
+  return text;
+}
+function sendNotFound(req, res, pageish) {
+  const wantsHtml = String(req.headers.accept || "").includes("text/html");
+  const body = pageish && wantsHtml ? notFoundPage() : "";
+  if (!body) { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); return; }
+  res.writeHead(404, {"Content-Type":"text/html; charset=utf-8", "Cache-Control":"no-cache"});
+  res.end(body);
+}
+
 function serveStatic(req, res) {
   // Strip the query FIRST. Testing req.url === "/" before doing so misses "/?t=AAPL", whose
   // path is still the root — and the extensionless rewrite below then turns the empty
@@ -1363,7 +1392,12 @@ function serveStatic(req, res) {
   if (p === "/" || p === "") p = "/index.html";
   else if (!path.extname(p)) p = p.replace(/\/+$/, "") + ".html";
   const filePath = path.join(PUBLIC_DIR, p);
-  const notFound = () => { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); };
+  // Post-rewrite, "is this a page?" is exactly "did it end up as .html?" — extensionless
+  // URLs have already become one and real assets never do.
+  const notFound = () => sendNotFound(req, res, path.extname(p) === ".html");
+  // /404 and /404.html are the error page itself; serving them 200 would make the one page
+  // whose entire job is to report a failure the one page that reports success.
+  if (p === "/404.html") return notFound();
   fs.stat(filePath, (statErr, st) => {
     if (statErr || !st.isFile()) return notFound();
     const ext = path.extname(filePath).toLowerCase();
@@ -1974,7 +2008,9 @@ const appServer = http.createServer(async (req, res) => {
     const expected = process.env.SQUALL_STATS_KEY || "";
     const ok = expected && key && key.length === expected.length
                && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(expected));
-    if (!ok) { res.writeHead(404, {"Content-Type":"text/plain"}); res.end("Not found"); return; }
+    // Through the same helper as every other miss, so "wrong key" and "no such route" stay
+    // byte-identical — a hand-rolled 404 here would be the tell that /stats is real.
+    if (!ok) { sendNotFound(req, res, true); return; }
     res.writeHead(200, {"Content-Type":"application/json", "Cache-Control":"no-store"});
     res.end(JSON.stringify(limitStats(), null, 2));
     return;
@@ -2771,8 +2807,9 @@ const appServer = http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404);
-  res.end("Not found");
+  // Only non-GET methods reach here (every GET is absorbed by serveStatic above), so this
+  // is an API caller with a wrong method or path, not a person in a browser — plain text.
+  sendNotFound(req, res, false);
 
 });
 

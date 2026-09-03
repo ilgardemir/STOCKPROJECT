@@ -36,15 +36,30 @@ function idsOf(html) {
   return ids;
 }
 
-// The page's own <script src> tags, in document order. Derived rather than
-// listed: a hardcoded list silently stops covering a script the moment someone
-// adds one to a page, which is exactly the regression this harness exists to
-// prevent. Only same-origin relative sources are executable here.
-function scriptsOf(html) {
-  return [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)]
-    .map(m => m[1])
-    .filter(src => !/^(?:https?:)?\/\//.test(src))
-    .map(src => src.replace(/^\.?\//, "").split("?")[0]);
+/* The page's own executable scripts, in document order. Derived rather than listed: a
+   hardcoded list silently stops covering a script the moment someone adds one to a page,
+   which is exactly the regression this harness exists to prevent.
+
+   Inline blocks count as scripts. They used to be skipped because every page's logic lived
+   in app.js, but 404.html is deliberately standalone — its whole behavior (the theme
+   restore that runs before first paint, the path readout, the search hand-off) is inline,
+   and an uncovered inline block is the same silent failure as an uncovered file: the first
+   throw kills every listener below it and the page still renders, looking fine. Only
+   same-origin relative sources are loadable; a cross-origin <script src> is left out. */
+function unitsOf(html) {
+  const units = [];
+  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const src = (m[1].match(/\bsrc\s*=\s*["']([^"']+)["']/i) || [])[1];
+    if (src) {
+      if (/^(?:https?:)?\/\//.test(src)) continue;
+      const file = src.replace(/^\.?\//, "").split("?")[0];
+      units.push({ name: file, code: () => fs.readFileSync(path.join(ROOT, file), "utf8") });
+    } else if (m[2].trim()) {
+      const body = m[2];
+      units.push({ name: `inline#${units.length + 1}`, code: () => body });
+    }
+  }
+  return units;
 }
 
 function makeEl(id) {
@@ -104,7 +119,7 @@ const SEEDED_STORAGE = {
   "squall-theme": "dark"
 };
 
-function run(page, scripts, poisonId) {
+function run(page, units, poisonId) {
   const html = assemble(page);
   const ids = idsOf(html);
   const bodyPage = (html.match(/<body[^>]*data-page\s*=\s*["']([^"']+)["']/) || [])[1] || "analyzer";
@@ -155,24 +170,24 @@ function run(page, scripts, poisonId) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
-  const last = scripts[scripts.length - 1];
-  for (const s of scripts) {
-    let code = fs.readFileSync(path.join(ROOT, s), "utf8");
+  const last = units[units.length - 1];
+  for (const u of units) {
+    let code = u.code();
     // Appended to the LAST script rather than to one matched by name, so that
     // renaming or splitting a script cannot turn the self-check into a no-op.
-    if (poisonId && s === last)
+    if (poisonId && u === last)
       code += `\ndocument.getElementById(${JSON.stringify(poisonId)}).addEventListener("click", () => {});\n`;
     try {
-      vm.runInContext(code, sandbox, { filename: s });
+      vm.runInContext(code, sandbox, { filename: `${page}:${u.name}` });
     } catch (e) {
-      return { page, script: s, error: e.message, stack: (e.stack || "").split("\n").slice(0, 3).join("\n") };
+      return { page, script: u.name, error: e.message, stack: (e.stack || "").split("\n").slice(0, 3).join("\n") };
     }
   }
   return { page, ok: true, ids: ids.size };
 }
 
-const PAGES = ["index.html", "screener.html", "ilgar.html"];
-const JOBS = PAGES.map(page => [page, scriptsOf(assemble(page))]);
+const PAGES = ["index.html", "screener.html", "ilgar.html", "404.html"];
+const JOBS = PAGES.map(page => [page, unitsOf(assemble(page))]);
 
 /*
  * Proves the harness can still fail, on every run rather than on a human
