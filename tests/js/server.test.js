@@ -336,7 +336,7 @@ test("completed backtests always receive a long or short position", () => {
   assert.ok(decision.target_pct > decision.stop_pct);
 });
 
-test("AI direction survives while MySquall overrides sizing and horizon", () => {
+test("AI direction survives and conviction scales the profile's exposure", () => {
   const decision = ensureBacktestPosition(
     { direction:"short", conviction:4, horizon:"1m", stop_pct:0.08, target_pct:0.2,
       thesis:"Weak trend." },
@@ -344,8 +344,59 @@ test("AI direction survives while MySquall overrides sizing and horizon", () => 
     { risk:4, horizon:5, style:"long-term" });
   assert.equal(decision.direction, "short");
   assert.equal(decision.decision_source, "ai");
-  assert.equal(decision.position_pct, 0.50);
-  assert.equal(decision.horizon, "6m");
+  // risk 4 sizes at 0.50; conviction 4 scales it 1.3x. Conviction used to be rendered and
+  // discarded, which left the model no way to bet more on a setup it believed in.
+  assert.equal(decision.position_pct, 0.65);
+  assert.equal(decision.position_pct_base, 0.50);
+  assert.equal(decision.conviction_scale, 1.3);
+});
+
+test("conviction 3 sizes exactly as the profile alone did", () => {
+  // The multiplier is centred on 1.0 so an unchanged profile is bit-identical to the
+  // pre-conviction behaviour. Without this every existing saved profile silently resizes.
+  for (const risk of [1, 2, 3, 4, 5]) {
+    const plan = backtestProfilePlan({ risk, horizon:3, style:"balanced" });
+    const decision = ensureBacktestPosition(
+      { direction:"long", conviction:3, horizon:"3m", stop_pct:0.06 },
+      { technical:{ metrics:{ atr_pct:0.03 } } }, { risk, horizon:3, style:"balanced" });
+    assert.equal(decision.position_pct, plan.position_pct);
+    assert.equal(decision.conviction_scale, 1);
+  }
+});
+
+test("conviction can never size past the profile's own ceiling", () => {
+  // 0.75 is the band backtestProfilePlan enforces; a 5 must not vault over it.
+  const decision = ensureBacktestPosition(
+    { direction:"long", conviction:5, horizon:"6m", stop_pct:0.10 },
+    { technical:{ metrics:{ atr_pct:0.05 } } },
+    { risk:5, horizon:5, style:"growth" });
+  assert.ok(decision.position_pct <= 0.75, `sized ${decision.position_pct} past the ceiling`);
+  // ...and the floor holds at the other end.
+  const timid = ensureBacktestPosition(
+    { direction:"long", conviction:1, horizon:"1m", stop_pct:0.04 },
+    { technical:{ metrics:{ atr_pct:0.02 } } },
+    { risk:1, horizon:1, style:"options" });
+  assert.ok(timid.position_pct >= 0.05, `sized ${timid.position_pct} under the floor`);
+});
+
+test("the profile caps the horizon but does not lengthen it", () => {
+  // A shorter hold cannot breach a preference expressed as "how long am I willing to be
+  // exposed". This used to overwrite unconditionally, so all 18 runs of the /ilgar audit
+  // executed at 3m including the four that asked for 1m.
+  const shorter = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"1m", stop_pct:0.05 },
+    { technical:{ metrics:{ atr_pct:0.03 } } },
+    { risk:3, horizon:5, style:"long-term" });
+  assert.equal(shorter.horizon, "1m");
+  assert.equal(shorter.horizon_capped, false);
+
+  const longer = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"6m", stop_pct:0.05 },
+    { technical:{ metrics:{ atr_pct:0.03 } } },
+    { risk:3, horizon:1, style:"swing" });
+  assert.equal(longer.horizon, "1m");
+  assert.equal(longer.horizon_requested, "6m");
+  assert.equal(longer.horizon_capped, true);
 });
 
 test("MySquall risk settings bound an extracted stop and reward target", () => {

@@ -144,6 +144,37 @@ function renderBacktestSnapshot(payload) {
     ? `<section class="backtest-panel"><h3>Fundamentals known by the cutoff</h3><div class="backtest-stats">${fundCards}</div><p class="backtest-caveat">Computed from filing figures alone. No price enters these, so unlike the multiples above they are exact as reported.${ttmNote}</p></section>`
     : "";
 
+  /*
+   * When the next results were due, reconstructed from the issuer's own filing cadence.
+   *
+   * Rendered beside the filings it was derived from, and always carrying its own
+   * uncertainty: this is an estimate from a median lag, not a calendar entry, and a panel
+   * that showed a bare date would be claiming a precision the method does not have.
+   */
+  const event = snapshot.event_risk;
+  const eventPanel = !event ? "" : (() => {
+    const days = btNum(event.days_until_release_estimate);
+    const imminent = days != null && days <= 21;
+    const window = Array.isArray(event.filing_window) ? event.filing_window : [];
+    return `<section class="backtest-panel"><h3>Event risk known by the cutoff</h3>
+      <div class="backtest-stats">
+        ${btStat("Estimated next results", btEsc(event.release_estimate))}
+        ${btStat("Sessions out", days == null ? "—" : `~${days} days`)}
+        ${btStat("Pending period ended", btEsc(event.pending_period_end))}
+        ${btStat("Filing lag used", `${btEsc(event.observed_filing_lag_days?.median)}d median`)}
+      </div>
+      ${imminent ? `<p class="backtest-caveat"><b>Inside the holding window.</b> A results
+        release is estimated within ${days} days of this cutoff. An earnings gap opens
+        past a stop rather than through it, so a stop distance does not bound the loss
+        across this date.</p>` : ""}
+      <p class="backtest-curve-note">Periodic filing expected between
+        ${btEsc(window[0] || "—")} and ${btEsc(window[1] || "—")}; the results announcement
+        customarily precedes it. Derived from this issuer's own period-end-to-filing lags
+        on a ${btEsc(event.reporting_cadence_days)}-day cadence — no calendar and no
+        post-cutoff data was used, so treat it as accurate to within a couple of weeks.</p>
+    </section>`;
+  })();
+
   const filings = (snapshot.filings_known_by_cutoff || []).slice(0, 8).map(filing =>
     `<div class="backtest-filing"><b>${btEsc(filing.form)}</b><span>Filed ${btEsc(filing.filed)}${filing.report_date ? ` · report date ${btEsc(filing.report_date)}` : ""}</span></div>`
   ).join("") || `<p class="backtest-empty">No SEC filing list was available by the cutoff.</p>`;
@@ -153,7 +184,7 @@ function renderBacktestSnapshot(payload) {
     <div class="backtest-integrity" id="backtestIntegrityState">Everything in this section existed by the cutoff. The AI is now analyzing this snapshot while the future outcome remains sealed.</div>
     <section class="backtest-panel" id="backtestSetup"></section>
     <section class="backtest-panel"><h3>Price and technical condition</h3><div class="backtest-stats">${metricCards}</div><div class="backtest-scores">${scoreCards}</div></section>
-    ${valuationPanel}${fundamentalsPanel}
+    ${valuationPanel}${fundamentalsPanel}${eventPanel}
     <section class="backtest-panel"><h3>SEC facts known by the cutoff</h3><div class="backtest-facts">${factCards}</div></section>
     <section class="backtest-panel"><h3>Recent filings known by the cutoff</h3><div class="backtest-filings">${filings}</div></section>`;
   renderBacktestSetupChart(snapshot);
@@ -631,12 +662,17 @@ function renderBacktestDecision(data) {
     d.target_pct == null ? "" : `If a daily close ${targetMove} ${btMagnitudePct(d.target_pct)} from entry, exit at the following session's open.`,
     `Otherwise, exit when the ${btEsc(d.horizon)} maximum holding period ends.`
   ].filter(Boolean).join(" ");
+  // Conviction now moves the position, so the two stats have to be readable together —
+  // "3/5" beside "35%" says nothing about why that size, and a 5 that quietly sized up
+  // 1.6x would look like a profile change rather than a judgment.
+  const sizeNote = btNum(d.conviction_scale) != null && d.conviction_scale !== 1
+    ? ` <small>${d.conviction_scale}× base ${btMagnitudePct(d.position_pct_base)}</small>` : "";
   const bits = [
     `<div class="backtest-stat"><span>Direction</span><b>${btEsc(BT_DIRECTION_COPY[d.direction] || d.direction)}</b></div>`,
     `<div class="backtest-stat"><span>Conviction</span><b>${btEsc(d.conviction)}/5</b></div>`,
-    `<div class="backtest-stat"><span>Position size</span><b>${positionLabel}</b></div>`,
+    `<div class="backtest-stat"><span>Position size</span><b>${positionLabel}${sizeNote}</b></div>`,
     `<div class="backtest-stat"><span>Instrument</span><b>${btEsc(instrumentLabel)}</b></div>`,
-    `<div class="backtest-stat"><span>Horizon</span><b>${btEsc(d.horizon)}</b></div>`,
+    `<div class="backtest-stat"><span>Horizon</span><b>${btEsc(d.horizon)}${d.horizon_capped ? ` <small>asked ${btEsc(d.horizon_requested)}, capped by profile</small>` : ""}</b></div>`,
     `<div class="backtest-stat"><span>Stop</span><b>${d.stop_pct == null ? "—" : btPct(-d.stop_pct)}</b></div>`,
     `<div class="backtest-stat"><span>Target</span><b>${d.target_pct == null ? "—" : btPct(d.target_pct)}</b></div>`
   ].join("");

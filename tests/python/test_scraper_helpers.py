@@ -174,5 +174,159 @@ class PriceBarBlockTests(unittest.TestCase):
         self.assertNotIn("nan", block.lower())
 
 
+class InstitutionalBiasTests(unittest.TestCase):
+    """
+    net_bias must not manufacture a verdict out of a tie.
+
+    The original comparison was `dist >= acc` against a falling OBV, and the tie that
+    actually occurs is 0 == 0 — no high-volume day in either direction over 25 sessions,
+    i.e. no footprint evidence at all. That returned DISTRIBUTION, which
+    classify_market_regime rewards with up to 7 points, which is enough to win outright.
+    """
+
+    @staticmethod
+    def _frame(closes, volumes=None, opens=None):
+        n = len(closes)
+        volumes = volumes if volumes is not None else [1_000_000] * n
+        opens = opens if opens is not None else [c - 0.01 for c in closes]
+        index = pd.date_range("2023-01-02", periods=n, freq="B")
+        return pd.DataFrame({
+            "Open": opens, "Close": closes,
+            "High": [max(o, c) + 0.5 for o, c in zip(opens, closes)],
+            "Low": [min(o, c) - 0.5 for o, c in zip(opens, closes)],
+            "Volume": volumes,
+        }, index=index)
+
+    def test_no_high_volume_days_and_falling_obv_is_not_distribution(self):
+        # A gentle drift down on dead-flat volume: OBV slopes down, but no session
+        # clears the 1.4x threshold, so acc and dist are both zero. Up-volume share
+        # decides instead of the tie.
+        closes = [100 - i * 0.05 for i in range(60)]
+        out = scraper.analyze_institutional(self._frame(closes))
+        self.assertEqual(out["accumulation_days"], 0)
+        self.assertEqual(out["distribution_days"], 0)
+        self.assertEqual(out["obv_trend"], "FALLING")
+        self.assertNotEqual(out["net_bias"], "DISTRIBUTION")
+
+    def test_up_volume_share_breaks_the_tie_it_used_to_lose(self):
+        # NVDA 2023-01-17 in miniature: 0/0 days, OBV falling, and 68% of volume on up
+        # days sitting unread in the same dict as the bearish verdict.
+        n = 60
+        closes, opens, volumes = [], [], []
+        price = 100.0
+        for i in range(n):
+            up = i % 3 != 0                       # two up sessions per down session
+            opens.append(price)
+            price += 0.4 if up else -0.9          # net drift down, so OBV still falls
+            closes.append(price)
+            volumes.append(1_000_000 if up else 300_000)
+        out = scraper.analyze_institutional(self._frame(closes, volumes, opens))
+        self.assertEqual((out["accumulation_days"], out["distribution_days"]), (0, 0))
+        self.assertGreaterEqual(out["up_vol_ratio"], 0.60)
+        self.assertEqual(out["net_bias"], "ACCUMULATION")
+
+    def test_real_footprint_evidence_still_produces_a_verdict(self):
+        # The fix must not neuter the signal where it is genuinely earned: high-volume
+        # down closes with a falling OBV is distribution and should still say so.
+        n = 60
+        closes, opens, volumes = [], [], []
+        price = 100.0
+        for i in range(n):
+            heavy_down = i >= n - 10 and i % 2 == 0
+            opens.append(price)
+            price += -3.0 if heavy_down else -0.1
+            closes.append(price)
+            volumes.append(6_000_000 if heavy_down else 800_000)
+        out = scraper.analyze_institutional(self._frame(closes, volumes, opens))
+        self.assertGreater(out["distribution_days"], out["accumulation_days"])
+        self.assertEqual(out["net_bias"], "DISTRIBUTION")
+
+
+class RegimeFramingTests(unittest.TestCase):
+    def test_prompt_projection_drops_the_percentage_and_keeps_the_scale(self):
+        # `confidence` clamps at 92 and 11 of 18 audited replays returned exactly that,
+        # so it reads as near-certainty while measuring only the winning bucket's lead.
+        # The dashboard keeps it for its meter; no prompt may carry it.
+        regime = {"label": "DISTRIBUTION", "confidence": 92, "separation": "wide",
+                  "summary": "s", "evidence": [], "conflicts": [], "basis": "b"}
+        projected = scraper.regime_for_prompt(regime)
+        self.assertNotIn("confidence", projected)
+        self.assertEqual(projected["separation"], "wide")
+        self.assertEqual(projected["basis"], "b")
+        # Non-dict input degrades rather than throwing — this runs inside prompt assembly.
+        self.assertEqual(scraper.regime_for_prompt(None), {})
+
+    def test_reversal_shape_is_reported_as_a_conflict(self):
+        # Price above all three averages while the averages are still stacked bearishly
+        # is the signature of an early reversal. NVDA 2023-01-17 was exactly this shape
+        # and the write-up shorted it, citing the regime label.
+        # A long decline, then a recovery sharp enough to clear the 200-bar mean but
+        # short enough that the 20-bar mean has not yet crossed the 50-bar one. That is
+        # exactly the NVDA 2023-01-17 shape: price 17.66 above ma20 15.47, ma50 15.81 and
+        # ma200 16.41, with the averages themselves still stacked 20 < 50 < 200.
+        closes = [150 - i * 0.30 for i in range(240)]
+        base = closes[-1]
+        closes += [base + (i + 1) * 6.0 for i in range(5)]
+        n = len(closes)
+        index = pd.date_range("2023-01-02", periods=n, freq="B")
+        hist = pd.DataFrame({
+            "Open": closes, "Close": closes,
+            "High": [c + 1 for c in closes], "Low": [c - 1 for c in closes],
+            "Volume": [1_000_000] * n,
+        }, index=index)
+        price_action = scraper.analyze_price_action(hist, closes[-1])
+        institutional = scraper.analyze_institutional(hist)
+        regime = scraper.classify_market_regime(hist, price_action, institutional)
+        self.assertIn(regime["separation"], ("wide", "moderate", "narrow"))
+        joined = " ".join(regime["conflicts"])
+        self.assertIn("reversal", joined.lower())
+
+    def test_a_clean_uptrend_reports_no_conflicts(self):
+        n = 260
+        closes = [100 + i * 0.5 for i in range(n)]
+        index = pd.date_range("2023-01-02", periods=n, freq="B")
+        hist = pd.DataFrame({
+            "Open": closes, "Close": [c + 0.2 for c in closes],
+            "High": [c + 1 for c in closes], "Low": [c - 1 for c in closes],
+            "Volume": [1_000_000] * n,
+        }, index=index)
+        price_action = scraper.analyze_price_action(hist, closes[-1])
+        institutional = scraper.analyze_institutional(hist)
+        regime = scraper.classify_market_regime(hist, price_action, institutional)
+        self.assertEqual(regime["conflicts"], [])
+
+
+class KeyLevelNoteTests(unittest.TestCase):
+    def test_an_empty_level_list_says_why_it_is_empty(self):
+        # A stock making new lows has no prior trough beneath it to cluster, so the
+        # detector legitimately finds nothing. Shipped as a bare [] that was read as a
+        # finding: 3 of 4 audited runs with no supports turned it into a bear point.
+        n = 200
+        closes = [200 - i * 0.8 for i in range(n)]
+        index = pd.date_range("2023-01-02", periods=n, freq="B")
+        hist = pd.DataFrame({
+            "Open": closes, "Close": closes,
+            "High": [c + 1 for c in closes], "Low": [c - 1 for c in closes],
+            "Volume": [1_000_000] * n,
+        }, index=index)
+        _patterns, levels = scraper.detect_chart_patterns(hist, closes[-1])
+        self.assertEqual(levels["support"], [])
+        self.assertIn("levels_note", levels)
+        self.assertIn("not a finding", levels["levels_note"])
+
+    def test_no_note_when_both_sides_resolved(self):
+        n = 200
+        closes = [100 + 12 * math.sin(i / 9.0) for i in range(n)]
+        index = pd.date_range("2023-01-02", periods=n, freq="B")
+        hist = pd.DataFrame({
+            "Open": closes, "Close": closes,
+            "High": [c + 1 for c in closes], "Low": [c - 1 for c in closes],
+            "Volume": [1_000_000] * n,
+        }, index=index)
+        _patterns, levels = scraper.detect_chart_patterns(hist, closes[-1])
+        if levels["support"] and levels["resistance"]:
+            self.assertNotIn("levels_note", levels)
+
+
 if __name__ == "__main__":
     unittest.main()

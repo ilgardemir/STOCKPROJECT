@@ -1158,6 +1158,22 @@ def detect_chart_patterns(hist: pd.DataFrame, current_price: float):
     key_levels["resistance"] = sorted([r for r in cluster(local_highs) if r > current_price])[:3]
     key_levels["support"]    = sorted([s for s in cluster(local_lows)  if s < current_price], reverse=True)[:3]
 
+    # An empty list here means the swing detector found no pivot inside its lookback on
+    # that side of price — which is the NORMAL result at a 52-week extreme, since a stock
+    # making new lows has no prior trough beneath it to cluster. Shipped as a bare `[]` it
+    # was read as a finding: 4 of 18 audited replays had no support levels and 3 of them
+    # turned that into a bear point, AMD 2025-04-07 writing "has no identified support"
+    # into its bear case eight sessions before the low. Absence of a detection is not
+    # evidence of absence, and only this function knows which one it is.
+    missing = [name for name in ("support", "resistance") if not key_levels[name]]
+    if missing:
+        key_levels["levels_note"] = (
+            f"No {' or '.join(missing)} level was detected. This means the swing-pivot "
+            "detector found no qualifying prior pivot on that side of the current price "
+            "within its lookback window, which is the expected result near a 52-week "
+            "extreme. It is not a finding that the level does not exist, and it is not "
+            "evidence for either direction.")
+
     for r in key_levels["resistance"][:2]:
         if abs(current_price-r)/r < 0.02: patterns.append(f"AT RESISTANCE: Price within 2% of {fmt(r,'usd')}.")
     for s in key_levels["support"][:2]:
@@ -1281,8 +1297,26 @@ def analyze_institutional(hist: pd.DataFrame) -> dict:
     if out["accumulation_days"] >= 3: out["signals"].append(f"ACCUMULATION: {out['accumulation_days']} high-vol up-closes in 25 sessions.")
     if out["distribution_days"] >= 3: out["signals"].append(f"DISTRIBUTION: {out['distribution_days']} high-vol down-closes in 25 sessions.")
     acc, dist = out["accumulation_days"], out["distribution_days"]
-    if out["obv_trend"] == "RISING"  and acc >= dist: out["net_bias"] = "ACCUMULATION"
-    if out["obv_trend"] == "FALLING" and dist >= acc: out["net_bias"] = "DISTRIBUTION"
+    # A TIE MUST NOT BE A VERDICT. This was `dist >= acc` against a falling OBV, and the
+    # overwhelmingly common tie is 0 == 0 — a stock with no high-volume day in either
+    # direction over 25 sessions, i.e. no footprint evidence at all. That returned
+    # DISTRIBUTION, which classify_market_regime then rewards with up to 7 points, which
+    # is enough to win outright. Measured on 18 blind /ilgar replays, 3 of them (TSLA,
+    # NVDA, PFE) had 0/0 days and were handed a directional verdict on that basis; NVDA
+    # 2023-01-17 scored DISTRIBUTION 7 where ALL SEVEN points traced to the tie, and the
+    # analysis shorted it two weeks before a +166% run while quoting the regime back as
+    # "the more statistically weighted signal".
+    #
+    # up_vol_ratio was also computed here and then never consulted — NVDA's was 0.68,
+    # firmly bullish, sitting in the same dict as the bearish verdict. It now breaks the
+    # tie, using the same thresholds classify_market_regime already applies to it, so the
+    # two functions cannot disagree about what 0.60/0.42 mean.
+    up_vol = out["up_vol_ratio"]
+    if   acc > dist and out["obv_trend"] == "RISING":  out["net_bias"] = "ACCUMULATION"
+    elif dist > acc and out["obv_trend"] == "FALLING": out["net_bias"] = "DISTRIBUTION"
+    elif acc == dist and is_valid(up_vol):
+        if   up_vol >= 0.60: out["net_bias"] = "ACCUMULATION"
+        elif up_vol <= 0.42: out["net_bias"] = "DISTRIBUTION"
     return out
 
 def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional: dict) -> dict:
@@ -1335,6 +1369,47 @@ def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional
     evidence.append(f"20-session return: {ret20:+.1%}; 60-session return: {ret60:+.1%}.")
     if bias != "NEUTRAL": evidence.append(f"Volume footprint: {bias.lower()}.")
 
+    # ── Contradictions the label hides ────────────────────────────────────────
+    # The winning bucket is a sum, so a label can win while the inputs behind it point
+    # opposite ways, and the label alone never says so. Two of the four worst calls in
+    # the 18-run /ilgar audit were ACCUMULATION sitting directly on top of its own
+    # "Structure: downtrend" evidence line (INTC 2024-07-15 -> -44% in 6m, UNH
+    # 2025-04-15 -> -37%). The model resolved that pairing bullishly both times, without
+    # prompting, because nothing marked it as a conflict rather than a reading.
+    #
+    # These are stated as genuinely two-sided, because they are: accumulation inside a
+    # downtrend is what a bottom looks like AND what a falling knife looks like. The
+    # point is to stop the label being read as a settled verdict, not to flip it.
+    conflicts = []
+    if label == "ACCUMULATION" and structure == "DOWNTREND":
+        conflicts.append("Volume footprint is accumulation while price structure is a downtrend. "
+                         "This pairing occurs at bottoms and in continuing declines alike; it is not "
+                         "on its own bullish.")
+    if label == "DISTRIBUTION" and structure == "UPTREND":
+        conflicts.append("Volume footprint is distribution while price structure is an uptrend. "
+                         "This pairing occurs at tops and during ordinary consolidation alike; it is "
+                         "not on its own bearish.")
+    # The MA stack is the lagging half of a reversal: price crosses first and the stack
+    # re-orders weeks later, so "price above all three MAs" and "20D < 50D < 200D" is the
+    # SIGNATURE of an early upturn, not a bear confirmation. NVDA 2023-01-17 was exactly
+    # this shape and the analysis shorted it.
+    if last > ma20 and last > ma50 and last > ma200 and ma20 < ma50 < ma200:
+        conflicts.append("Price is above all three moving averages while the averages themselves are "
+                         "still stacked bearishly. The stack lags price, so this is the signature of "
+                         "an early trend reversal rather than a confirmed downtrend.")
+    if last < ma20 and last < ma50 and last < ma200 and ma20 > ma50 > ma200:
+        conflicts.append("Price is below all three moving averages while the averages themselves are "
+                         "still stacked bullishly. The stack lags price, so this is the signature of "
+                         "an early trend break rather than a confirmed uptrend.")
+    if bias == "DISTRIBUTION" and is_valid(up_vol) and up_vol >= 0.60:
+        conflicts.append(f"Net bias reads distribution while {up_vol:.0%} of 20-session volume "
+                         "traded on up days. The bias is driven by the OBV slope; the up-volume share "
+                         "disagrees with it.")
+    if bias == "ACCUMULATION" and is_valid(up_vol) and up_vol <= 0.42:
+        conflicts.append(f"Net bias reads accumulation while only {up_vol:.0%} of 20-session volume "
+                         "traded on up days. The bias is driven by the OBV slope; the up-volume share "
+                         "disagrees with it.")
+
     summaries = {
         "TRENDING UP":"Buyers control the primary trend; pullbacks matter more than isolated red days.",
         "TRENDING DOWN":"Sellers control the primary trend; rallies need confirmation before the regime improves.",
@@ -1342,11 +1417,38 @@ def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional
         "DISTRIBUTION":"Price is relatively contained while volume behavior suggests patient net selling.",
         "RANGE / TRANSITION":"Neither side has durable control; range boundaries and confirmation matter most."
     }
-    out.update({"label":label, "confidence":confidence, "summary":summaries[label],
-                "evidence":evidence, "scores":scores,
+    # `confidence` survives for the dashboard meter, which renders it as a bar and already
+    # carries a "does not predict the next move" learn-note beside it. It must NOT reach a
+    # model as a percentage: the formula clamps to 92, and 11 of 18 audited replays came
+    # back at exactly 92 against an observed range of only 68-92, so it reads as near-total
+    # certainty while being nothing more than how far the winning bucket finished ahead.
+    # 15 of 18 write-ups quoted it back as though it were a probability. `separation` says
+    # the same thing on a scale that cannot be mistaken for one, and the prompt builders
+    # ship that instead (see regime_for_prompt).
+    separation = "wide" if gap >= 4 else "moderate" if gap >= 2 else "narrow"
+    out.update({"label":label, "confidence":confidence, "separation":separation,
+                "summary":summaries[label], "evidence":evidence, "conflicts":conflicts,
+                "scores":scores,
+                "basis":("Backward-looking classification of the last 60 sessions of price and volume. "
+                         "It is a summary of the metrics supplied alongside it, not an independent "
+                         "signal, and it carries no forecasting weight. `separation` describes only "
+                         "how far the winning bucket finished ahead of the next one."),
                 "metrics":{"return_20d":safe_float(ret20), "return_60d":safe_float(ret60),
                            "range_20d":safe_float(range20), "ma_spread":safe_float(ma_spread)}})
     return out
+
+
+def regime_for_prompt(regime: dict) -> dict:
+    """
+    The regime block as a model should see it: `separation`, never `confidence`.
+
+    Shared by both prompt builders (this file's §12c and backtester.build_ai_prompt) so
+    the analyzer and the historical replay cannot drift on the one field that most
+    distorted the audited write-ups.
+    """
+    if not isinstance(regime, dict):
+        return {}
+    return {key: value for key, value in regime.items() if key != "confidence"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1824,6 +1926,7 @@ Volume: {fmt(volume_ratio,'ratio')}x 20D avg
 ### 7. KEY LEVELS
 Resistance: {', '.join([fmt(r,'usd') for r in key_levels.get('resistance',[])]) or 'N/A'}
 Support: {', '.join([fmt(s,'usd') for s in key_levels.get('support',[])]) or 'N/A'}
+{key_levels.get('levels_note','')}
 
 ### 8. CHART PATTERNS
 """
@@ -1862,8 +1965,12 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
     ai_prompt += f"OBV: {institutional.get('obv_trend','N/A')} | Up-Vol%: {fmt(institutional.get('up_vol_ratio'),'pct')} | Acc/Dist days: {institutional.get('accumulation_days',0)}/{institutional.get('distribution_days',0)} | Bias: {institutional.get('net_bias','NEUTRAL')}\n"
     for s in institutional.get("signals",[]): ai_prompt += f"- {s}\n"
 
-    ai_prompt += f"\n### 12c. MARKET REGIME\n{market_regime.get('label','N/A')} ({market_regime.get('confidence',0)}% confidence): {market_regime.get('summary','')}\n"
-    for item in market_regime.get("evidence",[]): ai_prompt += f"- {item}\n"
+    # Separation, not "N% confidence" — see regime_for_prompt.
+    _regime_prompt = regime_for_prompt(market_regime)
+    ai_prompt += f"\n### 12c. MARKET REGIME\n{_regime_prompt.get('label','N/A')} (separation from next-ranked: {_regime_prompt.get('separation','n/a')}): {_regime_prompt.get('summary','')}\n"
+    ai_prompt += f"Basis: {_regime_prompt.get('basis','')}\n"
+    for item in _regime_prompt.get("evidence",[]): ai_prompt += f"- {item}\n"
+    for item in _regime_prompt.get("conflicts",[]): ai_prompt += f"- CONFLICT: {item}\n"
 
     if data_warnings:
         ai_prompt += "\n### DATA QUALITY\n"

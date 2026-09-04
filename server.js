@@ -116,9 +116,15 @@ const envInt = (name, dflt) => { const v = parseInt(process.env[name], 10); retu
 const LIM = {
   BURST_CAP:           envInt("SQUALL_BURST_CAP", 6),            // tokens per key
   BURST_REFILL_MS:     envInt("SQUALL_BURST_REFILL_MS", 60000),  // time to refill from empty to full
-  IP_HOURLY:           envInt("SQUALL_IP_HOURLY", 20),           // cost-requests / key / hour
-  IP_DAILY:            envInt("SQUALL_IP_DAILY", 60),            // cost-requests / key / UTC day
-  IP_ANALYZE_DAILY:    envInt("SQUALL_IP_ANALYZE_DAILY", 25),    // scrapes / key / UTC day
+  // Raised from 20/60/25 to run evaluation sweeps against /ilgar from one address without
+  // tripping the anti-abuse gates every twenty runs. This does NOT raise worst-case spend:
+  // GLOBAL_AI_DAILY is the money ceiling and is unchanged, so the only thing widening
+  // means is that a single key may consume more of that same shared budget before the
+  // site-wide limit stops everyone. Lower these first if abuse ever shows up in /stats —
+  // they are the anti-abuse dial, not the cost one.
+  IP_HOURLY:           envInt("SQUALL_IP_HOURLY", 45),           // cost-requests / key / hour
+  IP_DAILY:            envInt("SQUALL_IP_DAILY", 120),           // cost-requests / key / UTC day
+  IP_ANALYZE_DAILY:    envInt("SQUALL_IP_ANALYZE_DAILY", 60),    // scrapes / key / UTC day
   GLOBAL_AI_DAILY:     envInt("SQUALL_GLOBAL_AI_DAILY", 1500),   // weighted AI credits / UTC day
   // The two daily engine ceilings are self-imposed, not provider-imposed: SEC (10 req/s),
   // Finnhub (~60 req/min) and Yahoo all limit by RATE, and nothing limits us by the day.
@@ -365,8 +371,24 @@ function buildBacktestAiMessages(prompt, profile) {
         "You are a point-in-time equity analyst participating in a historical blind test.",
         "The cutoff date and supplied snapshot are absolute: never use knowledge from after that date, including facts you remember independently.",
         "Never guess missing historical news, options, estimates, or outcomes. Analyze only the supplied price and SEC evidence, distinguish what was known from what was uncertain, and do not claim that a chart-pattern score proves a pattern.",
+        // Grounding rules. The routed model is a fast, high-throughput snapshot, and the
+        // failure it is most prone to is a confident figure that no field supports.
+        // Requiring every number to trace to a key is the cheapest available check,
+        // because an invented figure has no key to name.
+        "Every figure in your write-up must come from a field in the snapshot or from arithmetic on snapshot fields. If a number would help your case and is not in the snapshot, write that it is unavailable rather than supplying one. Do not state analyst targets, peer multiples, index weights, historical averages, market-share figures, or product details from memory — none of them are in the snapshot and none can be verified.",
+        "Snapshot percentages are decimal fractions: 0.152 means 15.2%. Re-check every conversion, and never restate a snapshot value as a different number.",
+        "Prefer a short report you can fully support over a long one padded with plausible detail. Omitting a section you have no data for is correct; filling it is not.",
+        // Direction guardrails. Both trace to a reasoning error found in a 18-run audit of
+        // this route, where the model listed the contradicting evidence itself and then
+        // discarded it in favour of the regime label.
+        "The market_regime label is a summary of the metrics supplied alongside it, not independent evidence, and it must never outrank them. Do not call it the most heavily weighted or most statistically significant signal — it carries no weighting at all. Where its `conflicts` list is non-empty, address each conflict explicitly instead of siding with the label.",
+        "Never short a stock trading above all three of its 20-, 50- and 200-day moving averages, no matter how bearish the regime reads: the moving-average stack lags price, so that combination is a reversal already in progress.",
+        "Never short into capitulation. RSI under 32 combined with either volume above 1.5x the 20-day average or a drawdown deeper than 45% from the 52-week high marks the end of declines at least as often as their continuation; in that case take the long side with low conviction and say why.",
+        "An empty support or resistance list means the detector found no pivot in its lookback, which is normal at a 52-week extreme. Never cite it as evidence in either direction.",
+        "If an event_risk block is present, state the estimated next results date, say whether it falls inside your holding period, and either shorten the horizon to close before it or acknowledge that you are accepting a gap your stop cannot protect against.",
         "This is a forced-choice backtest: finish with one explicit simulated LONG or SHORT stock position. Never answer flat, neutral, wait, watch, or avoid; express uncertainty through lower conviction and smaller MySquall-calibrated sizing.",
-        "State next-session-open entry, stop distance, target distance, and maximum holding period. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
+        "State next-session-open entry, stop distance, target distance, and maximum holding period. Size the stop off the snapshot's own atr_pct rather than a round number — a stop tighter than roughly 2x ATR is hit by ordinary noise before any thesis resolves. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
+        "Conviction drives simulated position size, so 3 is not a neutral default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when technical, relative and fundamental evidence agree and you can name no substantial contradiction.",
         "Do not predict with certainty or provide individualized financial advice."
       ].join(" ")
     },
@@ -395,7 +417,15 @@ async function requestBacktestDecision(aiPrompt, prose, profile, signal) {
         'Schema: {"direction":"long"|"short","conviction":1-5,"horizon":"1m"|"3m"|"6m",',
         '"stop_pct":number|null,"target_pct":number|null,"thesis":"one sentence"}.',
         "stop_pct and target_pct are POSITIVE FRACTIONS of the entry price (0.08 means 8%), never prices.",
+        // The analysis states its stop as a named level far more often than as a
+        // percentage ("stop at ~$94.73, above the broken swing low" in 12 of 18 audited
+        // runs). Without this the extractor has to guess, and a guess here silently
+        // becomes the simulated trade.
+        "If the analysis expresses its stop or target as a price level rather than a distance, convert it: divide the gap between that level and the stated entry price by the entry price. Never return the level itself.",
         "You must choose long or short for this experiment. Never return flat, neutral, wait, watch, or avoid; lower conviction when evidence is mixed.",
+        // Conviction now scales position size, so a midpoint default is no longer free.
+        // 17 of 18 audited extractions returned exactly 3 and none returned 1, 4 or 5.
+        "Report the conviction the analysis actually expressed, not a default: 1 where it picks a side reluctantly, 3 where it leans with objections outstanding, 5 where it finds no substantial contradiction. Do not answer 3 merely because the analysis is balanced in tone.",
         "Use the supplied MySquall risk tolerance, holding period, style, priorities, and custom preference when selecting direction, conviction, stop, target, and horizon.",
         "If the profile prefers options, choose the underlying stock direction only; no historical option chain exists and no contract may be invented."
       ].join(" ") },
@@ -1054,8 +1084,9 @@ function sanitizeBacktestDecision(raw) {
 
   return {
     direction,
-    // Display-only: conviction never scales the position. A missing or absurd value
-    // must not throw away an otherwise usable decision.
+    // Conviction scales the position in ensureBacktestPosition. A missing or absurd
+    // value must still not throw away an otherwise usable decision, and 3 is the right
+    // fallback precisely because it leaves sizing at the profile's own figure.
     conviction: Number.isFinite(conviction) ? Math.min(5, Math.max(1, conviction)) : 3,
     horizon: BT_HORIZONS.has(horizon) ? horizon : "3m",
     stop_pct: flat ? null : pct(obj.stop_pct, 0.5),
@@ -1160,10 +1191,43 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
   decision.target_pct = Math.round(Math.min(0.50, Math.max(0.03,
     requestedTarget, profileTarget)) * 10000) / 10000;
 
+  /*
+   * Horizon: the profile sets a CEILING, not a fixed term.
+   *
+   * This used to overwrite the model's horizon unconditionally, so all 18 runs of the
+   * audit executed at 3m including the four that asked for 1m — and WMT 2025-01-15 was
+   * scored a miss on a -0.1% three-month return after asking for the one month over
+   * which the stock rose 13.7%. A shorter hold cannot breach a risk preference expressed
+   * as "how long am I willing to be exposed", so the model keeps its own choice whenever
+   * it is at or inside the profile's, and only a longer request is clamped down.
+   */
+  const requested = BT_HORIZONS.has(decision.horizon) ? decision.horizon : plan.horizon;
+  const horizon = BT_HORIZON_SESSIONS[requested] <= BT_HORIZON_SESSIONS[plan.horizon]
+    ? requested : plan.horizon;
+
+  /*
+   * Conviction scales exposure around the profile's own figure.
+   *
+   * Until now conviction was rendered and discarded, which left the model no way to bet
+   * more on a setup it believed in — and, predictably, the number carried no information
+   * either: 17 of 18 audited extractions returned exactly 3. Both ends are now prompted
+   * for explicitly. The multiplier is centred on 1.0 at conviction 3 so an unchanged
+   * profile still sizes exactly as it did, and the result is re-clamped to the same
+   * 0.05-0.75 band backtestProfilePlan enforces, so a 5 cannot size past what the
+   * profile's risk setting already allows.
+   */
+  const convictionScale = [0.4, 0.7, 1.0, 1.3, 1.6][decision.conviction - 1] ?? 1;
+  const positionPct = Math.round(Math.max(0.05, Math.min(0.75,
+    plan.position_pct * convictionScale)) * 100) / 100;
+
   return {
     ...decision,
-    horizon: plan.horizon,
-    position_pct: plan.position_pct,
+    horizon,
+    horizon_requested: decision.horizon,
+    horizon_capped: horizon !== decision.horizon,
+    position_pct: positionPct,
+    position_pct_base: plan.position_pct,
+    conviction_scale: convictionScale,
     instrument: plan.instrument,
     options_proxy: plan.options_proxy,
     entry_rule: "next_open",

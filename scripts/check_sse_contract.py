@@ -22,8 +22,28 @@ ROOT = Path(__file__).resolve().parents[1]
 # interpolation is still seen; one WITH interpolation is unmatchable by regex
 # and is caught instead by MIN_EVENTS below.
 _NAME = r'(backtest_[A-Za-z0-9_]+)'
-SENT = re.compile(r'send\(\s*["\'`]' + _NAME + r'["\'`]')
+QUOTED = re.compile(r'["\'`]' + _NAME + r'["\'`]')
+# The event name is not always the literal first token. Two of the eleven are chosen by a
+# ternary inside the call — send(kind === "reasoning" ? "backtest_ai_thinking" : ...) —
+# and a pattern anchored to `send(` immediately followed by a quote matched NEITHER, so
+# backtest_ai_thinking and backtest_ai_delta went unchecked while the run reported green.
+# MIN_EVENTS is what caught it; this is what makes the check see them.
+#
+# Deliberately line-scoped and greedy rather than precise: every quoted backtest_* literal
+# on a line containing `send(` counts as sent. A stray mention in a trailing comment would
+# be a false positive, which fails LOUD and gets fixed. The alternative — a tighter pattern
+# that misses a real send — fails silent, which is the whole failure mode this file exists
+# to prevent.
+SEND_LINE = re.compile(r'\bsend\(')
 HEARD = re.compile(r'addEventListener\(\s*["\'`]' + _NAME + r'["\'`]')
+
+
+def sent_events(server: str) -> set[str]:
+    found: set[str] = set()
+    for line in server.splitlines():
+        if SEND_LINE.search(line):
+            found.update(QUOTED.findall(line))
+    return found
 
 # Set equality is also satisfied when both sides are empty, so the count is
 # floored. Raise this when events are added; never lower it to make a run pass.
@@ -34,7 +54,7 @@ def main() -> int:
     server = (ROOT / "server.js").read_text(encoding="utf-8")
     client = (ROOT / "backtester.js").read_text(encoding="utf-8")
 
-    sent = set(SENT.findall(server))
+    sent = sent_events(server)
     heard = set(HEARD.findall(client))
 
     if len(sent) < MIN_EVENTS:

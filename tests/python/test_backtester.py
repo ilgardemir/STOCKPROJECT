@@ -582,5 +582,144 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         self.assertEqual(backtester.relative_context(short, self._tape(periods=64, seed=11)), {})
 
 
+class EventRiskTests(unittest.TestCase):
+    """
+    When the next results land, reconstructed from the issuer's own filing history.
+
+    Exists because the 18-run audit found the model trading blind through scheduled
+    events: 1 of 18 analyses mentioned an upcoming report, while the five cases with
+    results due inside three weeks averaged -15.1% over the following month.
+    """
+
+    @staticmethod
+    def _facts(pairs, name="revenue"):
+        """pairs: [(period_end, filed), ...] newest first, as fact_series emits them."""
+        return {name: {"concept": "Revenues", "label": "Revenues", "series": [
+            {"value": 1000.0 + i, "unit": "USD", "period_end": end,
+             "period_start": None, "filed": filed, "form": "10-Q",
+             "fiscal_year": 2024, "fiscal_period": "Q1"}
+            for i, (end, filed) in enumerate(pairs)]}}
+
+    def test_anchors_on_the_quarter_that_ended_but_has_not_been_filed(self):
+        # INTC at 2024-07-15: last FILED covers the quarter ended 2024-03-30, but the
+        # quarter ending ~2024-06-29 is already over and outstanding. Anchoring on the
+        # filed one projects a full quarter late and misses the event entirely — INTC
+        # reported on 2024-08-01 and fell 40% inside the month.
+        out = backtester.event_risk(self._facts([
+            ("2024-03-30", "2024-04-26"), ("2023-12-30", "2024-01-26"),
+            ("2023-09-30", "2023-10-27"), ("2023-07-01", "2023-07-28"),
+            ("2023-04-01", "2023-04-28"),
+        ]), date(2024, 7, 15))
+        self.assertIsNotNone(out)
+        pending = date.fromisoformat(out["pending_period_end"])
+        # The pending period must be the one after the last reported, not two after.
+        self.assertGreater(pending, date(2024, 3, 30))
+        self.assertLess(pending, date(2024, 7, 15))
+        self.assertTrue(out["pending_period_already_ended"])
+        # And the release has to land close enough to matter to a one-month hold.
+        self.assertLess(out["days_until_release_estimate"], 45)
+        self.assertTrue(out["falls_inside_horizon"]["3m"])
+
+    def test_a_report_two_days_out_is_flagged_inside_every_horizon(self):
+        # UNH at 2025-04-15 reported on 2025-04-17 and lost 53% inside the month. The
+        # model went long into it without mentioning the date.
+        out = backtester.event_risk(self._facts([
+            ("2024-12-31", "2025-02-27"), ("2024-09-30", "2024-11-04"),
+            ("2024-06-30", "2024-08-02"), ("2024-03-31", "2024-05-03"),
+            ("2023-12-31", "2024-02-28"),
+        ]), date(2025, 4, 15))
+        self.assertIsNotNone(out)
+        self.assertEqual(out["pending_period_end"][:7], "2025-03")
+        self.assertTrue(all(out["falls_inside_horizon"].values()))
+        self.assertLess(out["days_until_release_estimate"], 30)
+
+    def test_the_estimate_never_precedes_the_period_it_reports_on(self):
+        # release_estimate subtracts three weeks from the filing estimate, which for a
+        # fast filer could otherwise land before the quarter it covers has even ended.
+        out = backtester.event_risk(self._facts([
+            ("2024-09-30", "2024-10-02"), ("2024-06-30", "2024-07-02"),
+            ("2024-03-31", "2024-04-02"), ("2023-12-31", "2024-01-03"),
+        ]), date(2024, 11, 1))
+        self.assertGreaterEqual(date.fromisoformat(out["release_estimate"]),
+                                date.fromisoformat(out["pending_period_end"]))
+
+    def test_annual_period_ends_do_not_stretch_the_cadence(self):
+        # A quarterly reporter also emits annual period ends, so the raw gap set mixes
+        # ~91 with ~365. Taking the median across all of them would push the next report
+        # months away and silently disarm the whole block.
+        out = backtester.event_risk(self._facts([
+            ("2024-09-30", "2024-10-28"), ("2024-06-30", "2024-07-29"),
+            ("2024-03-31", "2024-04-29"), ("2023-12-31", "2024-02-20"),
+            ("2023-09-30", "2023-10-28"), ("2023-06-30", "2023-07-29"),
+        ]), date(2024, 11, 15))
+        self.assertLessEqual(out["reporting_cadence_days"], 120)
+        self.assertGreaterEqual(out["reporting_cadence_days"], 60)
+
+    def test_degrades_to_none_rather_than_guessing(self):
+        self.assertIsNone(backtester.event_risk({}, date(2024, 1, 1)))
+        self.assertIsNone(backtester.event_risk(None, date(2024, 1, 1)))
+        # One period cannot establish a cadence.
+        self.assertIsNone(backtester.event_risk(
+            self._facts([("2024-03-31", "2024-04-28")]), date(2024, 7, 1)))
+        # A row whose filed date precedes its period end is malformed and is dropped;
+        # dropping every row leaves nothing to reason from.
+        self.assertIsNone(backtester.event_risk(
+            self._facts([("2024-03-31", "2024-01-01"), ("2023-12-31", "2023-01-01")]),
+            date(2024, 7, 1)))
+
+    def test_the_block_serializes_under_the_engine_s_own_json_rules(self):
+        out = backtester.event_risk(self._facts([
+            ("2024-09-30", "2024-10-28"), ("2024-06-30", "2024-07-29"),
+            ("2024-03-31", "2024-04-29"),
+        ]), date(2024, 11, 15))
+        json.dumps(out, allow_nan=False)
+
+
+class PromptProjectionTests(unittest.TestCase):
+    def test_sec_facts_are_trimmed_for_the_prompt_but_not_the_snapshot(self):
+        # sec_facts measured 29,000-30,300 characters of a ~37,600 character prompt:
+        # 77-80% of everything the model read, to produce two lines of YoY growth.
+        series = [{"value": float(i), "unit": "USD", "period_end": f"2024-0{(i % 9) + 1}-30",
+                   "period_start": "2024-01-01", "filed": f"2024-0{(i % 9) + 1}-30",
+                   "form": "10-Q", "fiscal_year": 2024, "fiscal_period": "Q1"}
+                  for i in range(10)]
+        facts = {"revenue": {"concept": "Revenues", "label": "Revenues", "series": series}}
+        trimmed = backtester.facts_for_prompt(facts)
+        self.assertEqual(len(trimmed["revenue"]["series"]),
+                         backtester.PROMPT_FACT_PERIODS)
+        # The newest row keeps its full shape; the rest shed constants inferable from
+        # period_end.
+        self.assertIn("fiscal_year", trimmed["revenue"]["series"][0])
+        for row in trimmed["revenue"]["series"][1:]:
+            for dropped in backtester.PROMPT_FACT_DROP:
+                self.assertNotIn(dropped, row)
+        # The source dict is untouched — the dashboard still discloses all ten periods.
+        self.assertEqual(len(facts["revenue"]["series"]), 10)
+
+    def test_the_prompt_carries_event_risk_and_never_a_confidence_percentage(self):
+        snapshot = {
+            "ticker": "TST", "as_of": "2024-06-03", "effective_market_date": "2024-05-31",
+            "technical": {"metrics": {}, "scores": {}},
+            "market_regime": {"label": "DISTRIBUTION", "confidence": 92,
+                              "separation": "wide", "summary": "s", "evidence": [],
+                              "conflicts": ["c"], "basis": "b"},
+            "event_risk": {"release_estimate": "2024-06-20"},
+            "sec_facts": {},
+        }
+        prompt = backtester.build_ai_prompt(snapshot)
+        self.assertIn("event_risk", prompt)
+        self.assertIn("2024-06-20", prompt)
+        self.assertIn("separation", prompt)
+        # The clamped score margin must not reach the model as a percentage.
+        self.assertNotIn('"confidence"', prompt)
+        # ...while the snapshot the dashboard renders still has it.
+        self.assertEqual(snapshot["market_regime"]["confidence"], 92)
+
+    def test_event_risk_is_a_prompt_block(self):
+        # A block absent from PROMPT_BLOCKS is computed, shipped to the browser, and
+        # never seen by the model — silently, with nothing raising.
+        self.assertIn("event_risk", backtester.PROMPT_BLOCKS)
+
+
 if __name__ == "__main__":
     unittest.main()

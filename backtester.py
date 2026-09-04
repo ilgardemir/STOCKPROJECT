@@ -438,6 +438,147 @@ def point_in_time_facts(companyfacts, as_of):
             if (result := fact_series(companyfacts, concepts, unit, as_of)) is not None}
 
 
+def _median(values):
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _is_month_end(day):
+    return (day + timedelta(days=1)).day == 1
+
+
+def _snap_period_end(projected, observed_ends):
+    """
+    Pull a day-count projection back onto the issuer's actual period-end calendar.
+
+    Adding a 91- or 92-day cadence to a quarter end drifts: 2024-12-31 + 92 lands on
+    2025-04-02, two days past the 2025-03-31 quarter it is meant to name, and the error
+    compounds on every further step. For a calendar-quarter filer — recognisable because
+    its period ends all sit on the last day of a month — the nearest month end is the
+    right answer and is never more than a few days away.
+
+    A 4-4-5 filer (INTC ending 2024-06-29, NVDA 2022-10-30) has period ends that are NOT
+    month ends, and for those the raw cadence is already accurate to the day, because
+    52 weeks is exactly what their calendar advances by. So the snap is applied only when
+    the issuer's own history says it is a month-end filer.
+    """
+    month_end_count = sum(1 for day in observed_ends if _is_month_end(day))
+    if month_end_count < max(2, len(observed_ends) * 0.75):
+        return projected
+    # Nearest month end to the projection: either the end of its own month, or the end of
+    # the month before it.
+    end_of_month = (projected.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    end_of_prev = projected.replace(day=1) - timedelta(days=1)
+    return min((end_of_prev, end_of_month), key=lambda day: abs((day - projected).days))
+
+
+def event_risk(facts, as_of):
+    """
+    When this issuer's next results land, estimated from its OWN filing history.
+
+    This breaks no seal. Every input is a (period_end, filed) pair from a filing already
+    dated on or before the cutoff; nothing dated later is consulted and no calendar is
+    fetched. What it reconstructs is the issuer's reporting rhythm, which was as knowable
+    on the cutoff date as any price on the chart.
+
+    It exists because the 18-run audit found the model trading blind through scheduled
+    events. One of eighteen analyses mentioned an upcoming report at all, while the five
+    cases with results due inside three weeks of the cutoff averaged -15.1% over the
+    following month against +1.4% for the other thirteen. UNH 2025-04-15 reported two
+    days after its cutoff and fell 53% inside the holding window; INTC 2024-07-15 was
+    eleven days out and fell 40%. The model was long into four of the five.
+
+    The anchor is the most recent fiscal period that has ENDED but has NOT yet been
+    reported, which is precisely the pending release — not the last one filed. INTC at
+    2024-07-15 had last filed for the quarter ended 2024-03-30, but the quarter ending
+    2024-06-29 was already over and outstanding; anchoring on the filed one would have
+    projected the report a full quarter too late and missed the event entirely.
+
+    A window rather than a date, because two lags are being estimated at once and only
+    one is measurable here. `filing_window` brackets the 10-Q/10-K itself using this
+    issuer's own observed spread of period-end-to-filed lags. `release_estimate` is
+    earlier because the results announcement customarily precedes the periodic filing by
+    two to four weeks, and that offset is a convention rather than something these rows
+    can measure — so it is labelled as an assumption everywhere it appears.
+    """
+    periods = []
+    for fact in (facts or {}).values():
+        for row in fact.get("series") or []:
+            end, filed = _parse_day(row.get("period_end")), _parse_day(row.get("filed"))
+            if end and filed and filed >= end:
+                periods.append((end, filed))
+    if not periods:
+        return None
+
+    # One filed date per period end: a quarter end contributes both a discrete-quarter and
+    # a year-to-date row, and counting the lag twice would weight that period double.
+    by_end = {}
+    for end, filed in periods:
+        if end not in by_end or filed < by_end[end]:
+            by_end[end] = filed
+    ends = sorted(by_end)
+    if len(ends) < 2:
+        return None
+
+    lags = [(by_end[end] - end).days for end in ends]
+    median_lag = _median(lags)
+    # Trimmed rather than raw min/max: a single restated or amended filing produces one
+    # absurd lag that would widen the window to uselessness.
+    ordered_lags = sorted(lags)
+    low_lag = ordered_lags[len(ordered_lags) // 6]
+    high_lag = ordered_lags[-1 - len(ordered_lags) // 6]
+
+    gaps = [(ends[i] - ends[i - 1]).days for i in range(1, len(ends))]
+    # Quarterly reporters also emit annual period ends, so the gap set mixes ~91 with
+    # ~273 and ~365. The quarterly cadence is what the next report follows, so gaps that
+    # are obviously multi-period are dropped before taking the median.
+    quarterly_gaps = [gap for gap in gaps if 60 <= gap <= 120] or gaps
+    cadence = int(round(_median(quarterly_gaps) or 91))
+
+    # Walk forward to the first period end that is still unreported. Normally one step.
+    next_end = _snap_period_end(ends[-1] + timedelta(days=cadence), ends)
+    for _ in range(8):
+        if next_end not in by_end:
+            break
+        next_end = _snap_period_end(next_end + timedelta(days=cadence), ends)
+
+    filing_low = next_end + timedelta(days=int(low_lag))
+    filing_high = next_end + timedelta(days=int(high_lag))
+    filing_typical = next_end + timedelta(days=int(round(median_lag)))
+    # Never earlier than the period it reports on, and never before the cutoff for the
+    # "typical" figure being described as upcoming.
+    release_estimate = filing_typical - timedelta(days=21)
+    if release_estimate < next_end:
+        release_estimate = next_end
+
+    days_out = (release_estimate - as_of).days
+    quarter_already_ended = next_end <= as_of
+    return {
+        "last_reported_period_end": ends[-1].isoformat(),
+        "last_reported_filed": by_end[ends[-1]].isoformat(),
+        "pending_period_end": next_end.isoformat(),
+        "pending_period_already_ended": quarter_already_ended,
+        "observed_filing_lag_days": {"low": int(low_lag), "median": int(round(median_lag)),
+                                     "high": int(high_lag)},
+        "reporting_cadence_days": cadence,
+        "filing_window": [filing_low.isoformat(), filing_high.isoformat()],
+        "release_estimate": release_estimate.isoformat(),
+        "days_until_release_estimate": days_out,
+        "falls_inside_horizon": {label: days_out <= sessions * 1.45
+                                 for label, sessions in HORIZONS.items()},
+        "basis": ("Estimated from this issuer's own filing history — the median lag from period "
+                  "end to filing date across the periods above, applied to the next period end "
+                  "on the same cadence. No calendar or post-cutoff data was consulted. The "
+                  "release estimate assumes the results announcement precedes the periodic "
+                  "filing by about three weeks, which is a market convention rather than "
+                  "something these filings measure; treat it as accurate to within a couple of "
+                  "weeks, not to the day."),
+    }
+
+
 _SUBMISSIONS_CACHE = {}
 
 
@@ -705,16 +846,29 @@ def price_history_rows(before, limit=252):
 # construction -- a split that has not happened yet leaves no trace in pre-cutoff data --
 # so it cannot be recovered without breaking the seal, and it is not guessed at here.
 # The caveat travels inside the block so it cannot be separated from the numbers.
+#
+# The wording matters as much as the arithmetic. The first version said only what these
+# numbers could not do, and the audit showed the model taking that literally: 16 of 18
+# write-ups spent a paragraph explaining why they would not rely on valuation and then
+# used none of it. That is a worse outcome than a caveated number, because the multiple
+# still carries real information in the one direction that survives a split — a constant
+# divisor cancels in a ratio of two of these figures, so this issuer against its own
+# history is valid even though its level is not. NVDA at a cyclical trough and AMD at
+# roughly 6x sales were both cases where that comparison argued against the trade the
+# model took. So the caveat now states what remains USABLE before what is broken.
 BASIS_CAVEAT = (
-    "UNRELIABLE IN LEVEL. pe, ps, pb, ev_ebitda, fcf_yield, market_cap and "
-    "enterprise_value are computed from a split-adjusted price stated on TODAY's share "
-    "basis against as-reported filing figures stated on the cutoff's basis. A stock "
-    "split between this date and today divides every one of them by the split ratio, so "
-    "a later 10:1 split makes them read ten times too cheap. Whether such a split "
-    "happened is not knowable from data dated on or before the cutoff, so this is not "
-    "corrected. Do not compare these levels against remembered multiples or call the "
-    "stock cheap on them. The margins, returns and ratios in `fundamentals` use no "
-    "price at all and are exact."
+    "USABLE RELATIVELY, NOT ABSOLUTELY. Every ratio here shares one unknown divisor, so "
+    "it cancels in any comparison between two of them: this issuer's pe today against its "
+    "own pe four quarters ago is valid, as is pe against ps, as is the direction and size "
+    "of any change across the periods supplied. Use them that way rather than discarding "
+    "them. What is NOT valid is the level. pe, ps, pb, ev_ebitda, fcf_yield, market_cap "
+    "and enterprise_value are computed from a split-adjusted price stated on TODAY's share "
+    "basis against as-reported filing figures stated on the cutoff's basis, so a later "
+    "10:1 split makes all of them read ten times too cheap. Whether such a split happened "
+    "is not knowable from data dated on or before the cutoff and is not corrected here. "
+    "Never call the stock cheap or expensive on these levels, and never compare them "
+    "against a multiple you remember for this company or its peers. The margins, returns "
+    "and ratios in `fundamentals` use no price at all and are exact in level as well."
 )
 PRICE_BASIS_NOTE = (
     "Split-adjusted close at the cutoff, on the current share basis. This pipeline has "
@@ -812,18 +966,71 @@ PROMPT_BLOCKS = (
     "ticker", "company_name", "as_of", "effective_market_date", "price_basis",
     "technical", "chart_patterns", "key_levels", "price_action", "institutional",
     "market_regime", "relative", "valuation", "fundamentals",
-    "sec_facts", "filings_known_by_cutoff", "availability", "data_sources",
+    "sec_facts", "filings_known_by_cutoff", "event_risk", "availability", "data_sources",
 )
+
+# How many reported periods per concept reach the model, against the 10 kept in the
+# snapshot for the dashboard's "earlier reported periods" disclosure.
+#
+# Measured on three audited payloads, sec_facts was 29,000-30,300 characters of a ~37,600
+# character prompt: 77-80% of everything the model read, to produce two lines of
+# year-over-year growth it then set aside. Meanwhile market_regime got 547 characters and
+# decided the trade in 18 of 18 runs. Five periods still spans the current quarter, the
+# three before it and the prior-year comparative, which is every period the write-ups
+# actually referenced.
+PROMPT_FACT_PERIODS = 5
+# Constant across every row of a series and inferable from period_end, so repeating them
+# ten times per concept spends prompt on nothing. The newest row keeps its full shape.
+PROMPT_FACT_DROP = ("fiscal_year", "fiscal_period", "period_start")
+
+
+def facts_for_prompt(facts):
+    """sec_facts trimmed to what the model reads. See PROMPT_FACT_PERIODS."""
+    out = {}
+    for name, fact in (facts or {}).items():
+        series = (fact.get("series") or [])[:PROMPT_FACT_PERIODS]
+        trimmed = []
+        for index, row in enumerate(series):
+            trimmed.append(row if index == 0 else
+                           {k: v for k, v in row.items() if k not in PROMPT_FACT_DROP})
+        out[name] = {**fact, "series": trimmed}
+    return out
 
 
 def build_ai_prompt(snapshot):
     projection = {key: snapshot[key] for key in PROMPT_BLOCKS if key in snapshot}
+    if "sec_facts" in projection:
+        projection["sec_facts"] = facts_for_prompt(projection["sec_facts"])
+    # Separation, never "N% confidence" — see scraper.regime_for_prompt.
+    if "market_regime" in projection:
+        projection["market_regime"] = scraper.regime_for_prompt(projection["market_regime"])
     return "\n".join([
         f"You are performing a historical stock analysis as if today were {snapshot['as_of']}.",
         "Use only the frozen snapshot below. Do not use or imply knowledge of any later price, filing, news, product event, macro event, or outcome.",
         "The snapshot intentionally contains no forward returns. Historical news, options flow, analyst estimates, and historical index membership are unavailable; say so instead of filling gaps from memory.",
         "Write a concise but substantive report with: setup at the cutoff, technical condition, fundamentals known by then, bull case, bear case, and a confidence/data-limitations note.",
-        "End with a section titled 'Simulated position'. You must choose LONG or SHORT for this forced-choice experiment; do not answer flat, neutral, wait, watch, or avoid. State conviction from 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3-, or 6-month maximum holding period. When evidence is mixed, choose the better-supported side with lower conviction. MySquall preferences appended by the server must determine the risk, sizing emphasis, and holding-period choice.",
+        # Every figure in a write-up has a key it came from. Requiring the model to keep
+        # that link is the cheapest available check on a fast model inventing a plausible
+        # number, because a fabricated figure has no key to name.
+        "Every number you state must be copied from a field in the snapshot below, or computed from snapshot fields with the arithmetic shown. Do not state a figure the snapshot does not contain — no analyst targets, no peer multiples, no index weights, no historical averages from memory. If a figure would strengthen your case and is not present, write that it is unavailable and continue.",
+        "Do not restate a snapshot value as a different number. Percentages in the snapshot are decimal fractions: 0.152 is 15.2%. Check any figure you convert.",
+        # --- Direction guardrails -------------------------------------------------
+        # Both come from a reasoning error visible in the audited prose, not from fitting
+        # to returns: in each case the model wrote down the contradicting evidence and
+        # then discarded it in favour of the regime label.
+        "The regime label summarises the same metrics supplied beside it. It is not independent evidence and must not outrank the metrics it was computed from. Never describe it as the most heavily weighted or most statistically significant signal — it carries no weighting. If the block lists conflicts, address them explicitly rather than choosing the side that matches the label.",
+        "Do not short a stock trading above all three of its 20-, 50- and 200-day moving averages, however bearish the regime label reads. Price crosses first and the moving-average stack re-orders weeks later, so a rising price through a bearishly-stacked set of averages is the signature of a reversal already underway.",
+        "Do not short into capitulation. RSI below 32 together with either volume above 1.5x the 20-day average or a drawdown greater than 45% from the 52-week high describes the end of a decline at least as often as its continuation. Where the bearish evidence is this extreme, say that the risk and reward no longer favour the short, and take the long side with low conviction instead.",
+        "Symmetrically, a high RSI with price extended far above its moving averages is not by itself a reason to be short, and an oversold reading in an intact uptrend is not by itself a reason to be long.",
+        # --- Event risk -----------------------------------------------------------
+        "If the snapshot contains an event_risk block, state the estimated next results date and whether it falls inside the holding period you choose. If it does, either shorten the horizon so the position closes before it, or say plainly that you are accepting an earnings gap that your stop cannot protect against, and lower conviction accordingly. Treat that estimate as accurate to within a couple of weeks, never to the day.",
+        # --- The forced call ------------------------------------------------------
+        "End with a section titled 'Simulated position'. You must choose LONG or SHORT for this forced-choice experiment; do not answer flat, neutral, wait, watch, or avoid. State conviction from 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3-, or 6-month maximum holding period. MySquall preferences appended by the server must determine the risk, sizing emphasis, and holding-period choice.",
+        # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned
+        # exactly 3 and none returned 1, 4 or 5, which made the field carry no information
+        # at all. Conviction now scales position size, so the anchors have to be explicit.
+        "Conviction is not a politeness scale and 3 is not a default. Use 1 when the evidence genuinely points both ways and you are choosing a side only because the format requires one; 3 when the evidence leans one way with real objections outstanding; 5 only when the technical, relative and fundamental evidence in the snapshot agree and you can name no substantial contradiction. Conviction scales the simulated position size, so a 3 you did not mean costs as much as a wrong direction.",
+        "Size the stop off this stock's own volatility, not off a round number. A stop closer than about 2x the snapshot's atr_pct will be hit by ordinary daily noise before the thesis can resolve.",
         "Treat chart-pattern scores as candidate detectors rather than facts. This is research, not individualized financial advice.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
         json.dumps(projection, separators=(",", ":"), allow_nan=False),
@@ -880,6 +1087,14 @@ def main():
     # Priced off the only close this pipeline has. valuation_block states plainly what
     # that basis is and does not pretend the per-share ratios are trustworthy in level.
     derived = valuation_block(facts, split_adj_close_at_cutoff)
+    # Degrades to absent rather than failing the run: an issuer with too little filing
+    # history to establish a cadence is a normal outcome, and the rest of the snapshot
+    # is unaffected by not knowing when its next report lands.
+    try:
+        pending_report = event_risk(facts, as_of)
+    except Exception as exc:
+        print(f"WARN|backtest_event_risk|{type(exc).__name__}", file=sys.stderr, flush=True)
+        pending_report = None
     effective = before.index[-1].date().isoformat()
     snapshot = {
         "ticker": ticker,
@@ -913,6 +1128,7 @@ def main():
         **derived,
         "price_history": price_history_rows(before),
         "sec_facts": facts, "filings_known_by_cutoff": filings,
+        **({"event_risk": pending_report} if pending_report else {}),
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
             # Surfaced because a fall-through to the raw basis is otherwise invisible:
@@ -925,6 +1141,9 @@ def main():
             "relative": bool(relative),
             "valuation": "valuation" in derived,
             "fundamentals": "fundamentals" in derived,
+            # An estimate reconstructed from this issuer's own filing cadence, not a
+            # calendar. False means there was too little filing history to establish one.
+            "next_report_estimate": bool(pending_report),
             # Not a data-availability question but a correctness one, and the two read
             # the same way to anything consuming this block: there is no price basis on
             # which the per-share multiples are trustworthy in level. See BASIS_CAVEAT.
