@@ -39,6 +39,32 @@ const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const REASON_EFFORT = EFFORTS.includes(process.env.SQUALL_REASON_EFFORT)
   ? process.env.SQUALL_REASON_EFFORT
   : "low";                      // was "medium", and "high" before that
+
+/*
+ * An ABSOLUTE ceiling on thinking, because `effort` turned out not to be one.
+ *
+ * `effort: "low"` is documented above as ~20% of max_tokens, which at ANALYSIS_MAX 16000
+ * should be ~3200 reasoning tokens. Measured on /backtest-stream it is not binding at all
+ * on the currently routed host: single replays produced 47,000-62,000 CHARACTERS of
+ * reasoning — roughly 12,000-15,500 tokens, i.e. 75-97% of the whole budget — and since
+ * thinking and answer share max_tokens the write-up then arrived corrupted, truncated, or
+ * never at all. INTC 2024-07-15 spent 61,526 characters thinking and emitted nothing.
+ * Halving the prompt barely moved it, which is what ruled the prompt out as the sole
+ * cause: `effort` is a hint the serving stack may quietly ignore, exactly like the
+ * sampling parameters `require_parameters` exists to guard.
+ *
+ * `reasoning.max_tokens` is the absolute form of the same control, so the answer keeps a
+ * guaranteed floor of (ANALYSIS_MAX - this) whatever the host decides to do. Set to 0 to
+ * fall back to sending `effort` alone — the escape hatch if a host rejects the absolute
+ * form and routing starts failing, in the same spirit as SQUALL_AI_FREQ_PENALTY=0.
+ */
+const REASON_MAX_TOKENS = Number.isFinite(parseInt(process.env.SQUALL_REASON_MAX_TOKENS, 10))
+  ? parseInt(process.env.SQUALL_REASON_MAX_TOKENS, 10)
+  : 4000;
+/** The `reasoning` field for a request, absolute where we can, effort where we cannot. */
+const reasoningConfig = () => (REASON_MAX_TOKENS > 0
+  ? { max_tokens: REASON_MAX_TOKENS }
+  : { effort: REASON_EFFORT });
 // 6000 was too tight in practice: at effort "low" the thinking takes ~20% of it, leaving
 // ~4800 for the write-up, and a full analysis (verdict + five sections, each with real
 // numbers quoted back) regularly ran into that ceiling — surfacing as an `ai_error` with
@@ -2324,7 +2350,7 @@ const appServer = http.createServer(async (req, res) => {
       send("backtest_ai_start", { model:AI_MODEL });
       const body = JSON.stringify({
         model:AI_MODEL, max_tokens:ANALYSIS_MAX,
-        reasoning:{ effort:REASON_EFFORT }, stream:true, usage:{ include:true },
+        reasoning:reasoningConfig(), stream:true, usage:{ include:true },
         ...AI_SAMPLING,
         messages:buildBacktestAiMessages(payload.ai_prompt, profile)
       });
@@ -2441,7 +2467,7 @@ const appServer = http.createServer(async (req, res) => {
       const aiReqBody = JSON.stringify({
         model:       AI_MODEL,
         max_tokens:  ANALYSIS_MAX,
-        reasoning:   { effort: REASON_EFFORT },
+        reasoning:   reasoningConfig(),
         stream:      true,
         // Asked for explicitly — without it the final chunk carries no token counts, and
         // a reasoning loop that ate the answer budget leaves no trace anywhere.
@@ -2720,7 +2746,7 @@ const appServer = http.createServer(async (req, res) => {
                 body: JSON.stringify({
                   model:       AI_MODEL,
                   max_tokens:  ANALYSIS_MAX,
-                  reasoning:   { effort: REASON_EFFORT },
+                  reasoning:   reasoningConfig(),
                   ...AI_SAMPLING,
                   messages:    buildAiMessages(payload.ai_prompt, profile)
                 })
@@ -2816,7 +2842,7 @@ const appServer = http.createServer(async (req, res) => {
           ...(Array.isArray(messages) ? messages : [])
         ]
       };
-      if (think) reqBody.reasoning = { effort: REASON_EFFORT };
+      if (think) reqBody.reasoning = reasoningConfig();
 
       try {
         const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -2915,5 +2941,7 @@ module.exports = {
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
   acquirePy, readBody, validateChatPayload, limitStats,
   // AI stream termination — exported so truncation detection is testable without a provider.
-  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING
+  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
+  // Reasoning budget — exported so the absolute cap can be checked without a provider.
+  reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
 };

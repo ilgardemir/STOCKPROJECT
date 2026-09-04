@@ -6,7 +6,8 @@ const {
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
   backtestProfilePlan, ensureBacktestPosition,
   LIM, COST, clientIp, clientKey, admit, buckets, globals,
-  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING
+  newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
+  reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
 } = require("../../server");
 const BARS = require("../fixtures/backtest_bars.json");
 
@@ -520,6 +521,43 @@ test("readAiStreamLine ignores keep-alives, blank data and unparseable chunks", 
   assert.equal(err, null);
   assert.equal(state.emitted, false);
   assert.equal(state.finishReason, null);
+});
+
+test("thinking is capped in absolute tokens, leaving the answer a guaranteed floor", () => {
+  // `effort` is a percentage of max_tokens and is not honored by every serving stack:
+  // measured on /backtest-stream, effort "low" (nominally ~20%) produced 47,000-62,000
+  // CHARACTERS of reasoning — 75-97% of the whole budget — and since thinking and answer
+  // share max_tokens the write-up arrived corrupted, truncated, or not at all.
+  const cfg = reasoningConfig();
+  assert.ok("max_tokens" in cfg, "reasoning must carry an absolute cap, not just effort");
+  assert.equal(cfg.max_tokens, REASON_MAX_TOKENS);
+  assert.ok(cfg.max_tokens > 0);
+  // The point of the cap: whatever the host does, the answer keeps this much room.
+  const answerFloor = ANALYSIS_MAX - cfg.max_tokens;
+  assert.ok(answerFloor >= 8000,
+    `answer floor is only ${answerFloor} tokens of ${ANALYSIS_MAX}`);
+});
+
+test("zeroing the reasoning cap falls back to effort rather than sending nothing", () => {
+  // The escape hatch, same shape as SQUALL_AI_FREQ_PENALTY=0: if a host rejects the
+  // absolute form and routing starts failing, this reverts to the previous behaviour
+  // from the dashboard with no deploy. It must never yield an empty reasoning object,
+  // which would disable thinking outright and empty the UI's "Show thinking" panel.
+  const prev = process.env.SQUALL_REASON_MAX_TOKENS;
+  try {
+    process.env.SQUALL_REASON_MAX_TOKENS = "0";
+    delete require.cache[require.resolve("../../server.js")];
+    const reloaded = require("../../server.js");
+    const cfg = reloaded.reasoningConfig();
+    assert.ok(!("max_tokens" in cfg));
+    assert.equal(cfg.effort, reloaded.REASON_EFFORT);
+    assert.ok(cfg.effort && cfg.effort !== "none");
+  } finally {
+    if (prev === undefined) delete process.env.SQUALL_REASON_MAX_TOKENS;
+    else process.env.SQUALL_REASON_MAX_TOKENS = prev;
+    delete require.cache[require.resolve("../../server.js")];
+    require("../../server.js");
+  }
 });
 
 test("AI sampling sends a repetition damper and only routes to providers that honor it", () => {
