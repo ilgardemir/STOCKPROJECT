@@ -153,25 +153,27 @@ function renderBacktestSnapshot(payload) {
    */
   const event = snapshot.event_risk;
   const eventPanel = !event ? "" : (() => {
-    const days = btNum(event.days_until_release_estimate);
-    const imminent = days != null && days <= 21;
-    const window = Array.isArray(event.filing_window) ? event.filing_window : [];
+    const opens = btNum(event.days_until_earnings_window_opens);
+    const open = event.earnings_window_already_open;
+    const imminent = open || (opens != null && opens <= 21);
+    const win = Array.isArray(event.earnings_window) ? event.earnings_window : [];
+    const filed = Array.isArray(event.expected_filing_window) ? event.expected_filing_window : [];
     return `<section class="backtest-panel"><h3>Event risk known by the cutoff</h3>
       <div class="backtest-stats">
-        ${btStat("Estimated next results", btEsc(event.release_estimate))}
-        ${btStat("Sessions out", days == null ? "—" : `~${days} days`)}
+        ${btStat("Earnings window", `${btEsc(win[0] || "—")} → ${btEsc(win[1] || "—")}`)}
+        ${btStat("Opens in", open ? "already open" : opens == null ? "—" : `~${opens} days`)}
         ${btStat("Pending period ended", btEsc(event.pending_period_end))}
         ${btStat("Filing lag used", `${btEsc(event.observed_filing_lag_days?.median)}d median`)}
       </div>
-      ${imminent ? `<p class="backtest-caveat"><b>Inside the holding window.</b> A results
-        release is estimated within ${days} days of this cutoff. An earnings gap opens
-        past a stop rather than through it, so a stop distance does not bound the loss
-        across this date.</p>` : ""}
+      ${imminent ? `<p class="backtest-caveat"><b>Inside the holding window.</b> Results are
+        expected ${open ? "any session now" : `within about ${opens} days`}. An earnings gap
+        opens past a stop rather than through it, so a stop distance does not bound the loss
+        across this event.</p>` : ""}
       <p class="backtest-curve-note">Periodic filing expected between
-        ${btEsc(window[0] || "—")} and ${btEsc(window[1] || "—")}; the results announcement
-        customarily precedes it. Derived from this issuer's own period-end-to-filing lags
-        on a ${btEsc(event.reporting_cadence_days)}-day cadence — no calendar and no
-        post-cutoff data was used, so treat it as accurate to within a couple of weeks.</p>
+        ${btEsc(filed[0] || "—")} and ${btEsc(filed[1] || "—")}; the results announcement
+        lands at or before it. Derived from this issuer's own period-end-to-filing lags on a
+        ${btEsc(event.reporting_cadence_days)}-day cadence — no calendar and no post-cutoff
+        data was used, so treat it as accurate to within a week or two, never to the day.</p>
     </section>`;
   })();
 

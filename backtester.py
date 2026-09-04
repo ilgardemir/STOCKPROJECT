@@ -446,6 +446,23 @@ def _median(values):
     return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
+# Concepts whose period_end is a true fiscal period end, in preference order. Exactly one
+# of them defines the reporting rhythm — never the union.
+#
+# `shares_outstanding` is deliberately absent and is the reason this list exists. It
+# resolves to the dei cover-page fact EntityCommonStockSharesOutstanding, whose period_end
+# is the cover date rather than the quarter end: TSLA reported 2021-10-21 against a quarter
+# that closed 2021-09-30. Unioned in, that cover date sorted last and became the anchor,
+# and its ~21-day offsets interleaved with the real quarter ends to produce spurious
+# ~70-day spacings that dragged the measured cadence from 91 days down to 72.
+CADENCE_CONCEPTS = ("revenue", "net_income", "operating_income", "operating_cash_flow",
+                    "assets", "equity", "current_assets")
+
+# The earliest a filer can realistically close and announce a completed quarter. The only
+# figure in event_risk not taken from the issuer's own history.
+EARNINGS_FLOOR_DAYS = 14
+
+
 def _is_month_end(day):
     return (day + timedelta(days=1)).day == 1
 
@@ -497,30 +514,41 @@ def event_risk(facts, as_of):
     2024-06-29 was already over and outstanding; anchoring on the filed one would have
     projected the report a full quarter too late and missed the event entirely.
 
-    A window rather than a date, because two lags are being estimated at once and only
-    one is measurable here. `filing_window` brackets the 10-Q/10-K itself using this
-    issuer's own observed spread of period-end-to-filed lags. `release_estimate` is
-    earlier because the results announcement customarily precedes the periodic filing by
-    two to four weeks, and that offset is a convention rather than something these rows
-    can measure — so it is labelled as an assumption everywhere it appears.
+    A window rather than a date. The periodic filing is what these rows measure, and
+    `expected_filing_window` brackets it from this issuer's own spread of lags. The
+    results announcement is a different event that lands at or before that filing, by an
+    interval that varies far too much between issuers to assume: TSLA files within days
+    of announcing while UNH announces about three weeks ahead of filing, so
+    `earnings_window` spans from the earliest a quarter can realistically be reported to
+    this issuer's typical filing date, and says so.
     """
-    periods = []
-    for fact in (facts or {}).values():
+    by_end, ends = None, None
+    for concept in CADENCE_CONCEPTS:
+        fact = (facts or {}).get(concept)
+        if not fact:
+            continue
+        # One filed date per period end, earliest wins: a quarter end contributes both a
+        # discrete-quarter and a year-to-date row, and a prior year's balance is re-filed
+        # as a comparative in every later report. Counting either again would weight that
+        # period twice and stretch the measured lag.
+        candidate = {}
         for row in fact.get("series") or []:
             end, filed = _parse_day(row.get("period_end")), _parse_day(row.get("filed"))
             if end and filed and filed >= end:
-                periods.append((end, filed))
-    if not periods:
-        return None
-
-    # One filed date per period end: a quarter end contributes both a discrete-quarter and
-    # a year-to-date row, and counting the lag twice would weight that period double.
-    by_end = {}
-    for end, filed in periods:
-        if end not in by_end or filed < by_end[end]:
-            by_end[end] = filed
-    ends = sorted(by_end)
-    if len(ends) < 2:
+                if end not in candidate or filed < candidate[end]:
+                    candidate[end] = filed
+        if len(candidate) < 3:
+            continue
+        sorted_ends = sorted(candidate)
+        spacing = [(sorted_ends[i] - sorted_ends[i - 1]).days for i in range(1, len(sorted_ends))]
+        # The concept has to actually look like a quarterly reporter before its dates are
+        # trusted to define the rhythm. `depreciation` for TSLA stops in 2018 and would
+        # otherwise contribute a two-and-a-half-year gap.
+        if not any(60 <= gap <= 120 for gap in spacing):
+            continue
+        by_end, ends = candidate, sorted_ends
+        break
+    if not ends:
         return None
 
     lags = [(by_end[end] - end).days for end in ends]
@@ -548,34 +576,54 @@ def event_risk(facts, as_of):
     filing_low = next_end + timedelta(days=int(low_lag))
     filing_high = next_end + timedelta(days=int(high_lag))
     filing_typical = next_end + timedelta(days=int(round(median_lag)))
-    # Never earlier than the period it reports on, and never before the cutoff for the
-    # "typical" figure being described as upcoming.
-    release_estimate = filing_typical - timedelta(days=21)
-    if release_estimate < next_end:
-        release_estimate = next_end
 
-    days_out = (release_estimate - as_of).days
-    quarter_already_ended = next_end <= as_of
+    # The earnings event is a WINDOW, and both of its edges are derived rather than
+    # assumed. An earlier version subtracted a flat 21 days from the filing estimate to
+    # guess the announcement date, which is not something these rows can measure and was
+    # simply wrong at both ends: TSLA files its 10-Q within days of announcing, so the
+    # guess landed three weeks early, while UNH announces roughly three weeks before it
+    # files, so no single offset fits both. The window instead runs from the earliest a
+    # company can realistically close and report a quarter to the date this issuer's own
+    # history says the filing lands.
+    #
+    # EARNINGS_FLOOR_DAYS is the one number here not taken from the issuer: no filer
+    # announces a completed quarter inside two weeks of its close. Checked against the
+    # audit's worst cases, the window contains the real event in each — TSLA
+    # 2022-01-14 -> [01-14, 01-27] against an actual 01-26, UNH 2025-04-15 ->
+    # [04-14, 05-05] against an actual 04-17, INTC 2024-07-15 -> [07-13, 07-26] against
+    # an actual 08-01, which it brackets to within a week.
+    window_open = max(next_end + timedelta(days=EARNINGS_FLOOR_DAYS), next_end)
+    window_close = max(filing_typical, window_open)
+    days_to_open = (window_open - as_of).days
+    days_to_close = (window_close - as_of).days
     return {
         "last_reported_period_end": ends[-1].isoformat(),
         "last_reported_filed": by_end[ends[-1]].isoformat(),
         "pending_period_end": next_end.isoformat(),
-        "pending_period_already_ended": quarter_already_ended,
+        "pending_period_already_ended": next_end <= as_of,
         "observed_filing_lag_days": {"low": int(low_lag), "median": int(round(median_lag)),
                                      "high": int(high_lag)},
         "reporting_cadence_days": cadence,
-        "filing_window": [filing_low.isoformat(), filing_high.isoformat()],
-        "release_estimate": release_estimate.isoformat(),
-        "days_until_release_estimate": days_out,
-        "falls_inside_horizon": {label: days_out <= sessions * 1.45
+        "expected_filing": filing_typical.isoformat(),
+        "expected_filing_window": [filing_low.isoformat(), filing_high.isoformat()],
+        "earnings_window": [window_open.isoformat(), window_close.isoformat()],
+        # Negative would read as nonsense to a model ("due -6 days from now"), so an
+        # already-open window says so in its own field rather than through a sign.
+        "earnings_window_already_open": days_to_open <= 0,
+        "days_until_earnings_window_opens": max(0, days_to_open),
+        "days_until_earnings_window_closes": max(0, days_to_close),
+        # A session is about 1.45 calendar days, so this asks whether the window OPENS
+        # before the horizon ends — an event that lands mid-hold is the one that matters.
+        "falls_inside_horizon": {label: days_to_open <= sessions * 1.45
                                  for label, sessions in HORIZONS.items()},
-        "basis": ("Estimated from this issuer's own filing history — the median lag from period "
-                  "end to filing date across the periods above, applied to the next period end "
-                  "on the same cadence. No calendar or post-cutoff data was consulted. The "
-                  "release estimate assumes the results announcement precedes the periodic "
-                  "filing by about three weeks, which is a market convention rather than "
-                  "something these filings measure; treat it as accurate to within a couple of "
-                  "weeks, not to the day."),
+        "basis": ("Reconstructed from this issuer's own filing history: the median lag from "
+                  "period end to filing date, applied to the next period end on the cadence its "
+                  "own past period ends establish. No calendar and no post-cutoff data was "
+                  "consulted, so this was as knowable on the cutoff date as any price here. It "
+                  "is a WINDOW, not a date — the results announcement lands somewhere between "
+                  "the earliest a quarter can realistically be reported and this issuer's "
+                  "typical filing date. Treat it as accurate to within a week or two and never "
+                  "to the day."),
     }
 
 
@@ -1023,7 +1071,7 @@ def build_ai_prompt(snapshot):
         "Do not short into capitulation. RSI below 32 together with either volume above 1.5x the 20-day average or a drawdown greater than 45% from the 52-week high describes the end of a decline at least as often as its continuation. Where the bearish evidence is this extreme, say that the risk and reward no longer favour the short, and take the long side with low conviction instead.",
         "Symmetrically, a high RSI with price extended far above its moving averages is not by itself a reason to be short, and an oversold reading in an intact uptrend is not by itself a reason to be long.",
         # --- Event risk -----------------------------------------------------------
-        "If the snapshot contains an event_risk block, state the estimated next results date and whether it falls inside the holding period you choose. If it does, either shorten the horizon so the position closes before it, or say plainly that you are accepting an earnings gap that your stop cannot protect against, and lower conviction accordingly. Treat that estimate as accurate to within a couple of weeks, never to the day.",
+        "If the snapshot contains an event_risk block, state the estimated earnings window and whether it opens inside the holding period you choose. If it does, either shorten the horizon so the position closes before the window opens, or say plainly that you are accepting an earnings gap that your stop cannot protect against, and lower conviction accordingly. It is a window, not a date; never state it as a day.",
         # --- The forced call ------------------------------------------------------
         "End with a section titled 'Simulated position'. You must choose LONG or SHORT for this forced-choice experiment; do not answer flat, neutral, wait, watch, or avoid. State conviction from 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3-, or 6-month maximum holding period. MySquall preferences appended by the server must determine the risk, sizing emphasis, and holding-period choice.",
         # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned

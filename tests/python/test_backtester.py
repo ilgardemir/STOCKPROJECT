@@ -592,13 +592,55 @@ class EventRiskTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _facts(pairs, name="revenue"):
+    def _series(pairs):
+        return [{"value": 1000.0 + i, "unit": "USD", "period_end": end,
+                 "period_start": None, "filed": filed, "form": "10-Q",
+                 "fiscal_year": 2024, "fiscal_period": "Q1"}
+                for i, (end, filed) in enumerate(pairs)]
+
+    @classmethod
+    def _facts(cls, pairs, name="revenue"):
         """pairs: [(period_end, filed), ...] newest first, as fact_series emits them."""
-        return {name: {"concept": "Revenues", "label": "Revenues", "series": [
-            {"value": 1000.0 + i, "unit": "USD", "period_end": end,
-             "period_start": None, "filed": filed, "form": "10-Q",
-             "fiscal_year": 2024, "fiscal_period": "Q1"}
-            for i, (end, filed) in enumerate(pairs)]}}
+        return {name: {"concept": "Revenues", "label": "Revenues",
+                       "series": cls._series(pairs)}}
+
+    def test_cover_page_dates_never_define_the_cadence(self):
+        # shares_outstanding resolves to the dei cover-page fact, whose period_end is the
+        # cover date rather than the quarter end — TSLA reported 2021-10-21 against a
+        # quarter that closed 2021-09-30. Unioned in, that sorted last and became the
+        # anchor, and its ~21-day offsets interleaved with the real quarter ends to
+        # produce spurious ~70-day spacings: the measured cadence came out 72 instead of
+        # 91, and the estimate landed six days BEFORE the cutoff.
+        facts = self._facts([
+            ("2021-09-30", "2021-10-25"), ("2021-06-30", "2021-07-27"),
+            ("2021-03-31", "2021-04-28"), ("2020-12-31", "2021-02-08"),
+        ])
+        facts["shares_outstanding"] = {
+            "concept": "EntityCommonStockSharesOutstanding", "label": "Shares",
+            "series": self._series([
+                ("2021-10-21", "2021-10-25"), ("2021-07-22", "2021-07-27"),
+                ("2021-04-21", "2021-04-28"), ("2021-02-01", "2021-04-30"),
+            ])}
+        out = backtester.event_risk(facts, date(2022, 1, 14))
+        self.assertEqual(out["last_reported_period_end"], "2021-09-30")
+        self.assertGreaterEqual(out["reporting_cadence_days"], 85)
+        self.assertLessEqual(out["reporting_cadence_days"], 95)
+        self.assertEqual(out["pending_period_end"], "2021-12-31")
+        # TSLA announced Q4 2021 on 2022-01-26; the window has to contain it.
+        low, high = out["earnings_window"]
+        self.assertLessEqual(date.fromisoformat(low), date(2022, 1, 26))
+        self.assertGreaterEqual(date.fromisoformat(high), date(2022, 1, 26))
+
+    def test_days_out_is_never_negative(self):
+        # A negative "days until" reads as nonsense to a model. An already-open window
+        # says so in its own field instead of through a sign.
+        out = backtester.event_risk(self._facts([
+            ("2024-06-30", "2024-07-05"), ("2024-03-31", "2024-04-05"),
+            ("2023-12-31", "2024-01-05"), ("2023-09-30", "2023-10-05"),
+        ]), date(2024, 11, 20))
+        self.assertGreaterEqual(out["days_until_earnings_window_opens"], 0)
+        self.assertGreaterEqual(out["days_until_earnings_window_closes"], 0)
+        self.assertTrue(out["earnings_window_already_open"])
 
     def test_anchors_on_the_quarter_that_ended_but_has_not_been_filed(self):
         # INTC at 2024-07-15: last FILED covers the quarter ended 2024-03-30, but the
@@ -616,8 +658,10 @@ class EventRiskTests(unittest.TestCase):
         self.assertGreater(pending, date(2024, 3, 30))
         self.assertLess(pending, date(2024, 7, 15))
         self.assertTrue(out["pending_period_already_ended"])
-        # And the release has to land close enough to matter to a one-month hold.
-        self.assertLess(out["days_until_release_estimate"], 45)
+        # INTC reported on 2024-08-01 and fell 40% inside the month, so the window has to
+        # open close enough to matter to a one-month hold.
+        self.assertLess(out["days_until_earnings_window_opens"], 30)
+        self.assertTrue(out["falls_inside_horizon"]["1m"])
         self.assertTrue(out["falls_inside_horizon"]["3m"])
 
     def test_a_report_two_days_out_is_flagged_inside_every_horizon(self):
@@ -631,17 +675,25 @@ class EventRiskTests(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(out["pending_period_end"][:7], "2025-03")
         self.assertTrue(all(out["falls_inside_horizon"].values()))
-        self.assertLess(out["days_until_release_estimate"], 30)
+        # UNH announced on 2025-04-17, two days after this cutoff, and lost 53% inside
+        # the month. The window must contain that date — this is the case the whole block
+        # exists for.
+        low, high = out["earnings_window"]
+        self.assertLessEqual(date.fromisoformat(low), date(2025, 4, 17))
+        self.assertGreaterEqual(date.fromisoformat(high), date(2025, 4, 17))
 
-    def test_the_estimate_never_precedes_the_period_it_reports_on(self):
-        # release_estimate subtracts three weeks from the filing estimate, which for a
-        # fast filer could otherwise land before the quarter it covers has even ended.
+    def test_the_window_never_opens_before_the_period_it_reports_on(self):
+        # No filer announces a completed quarter inside two weeks of its close, so a fast
+        # filer must not produce a window opening on or before the period end itself.
         out = backtester.event_risk(self._facts([
             ("2024-09-30", "2024-10-02"), ("2024-06-30", "2024-07-02"),
             ("2024-03-31", "2024-04-02"), ("2023-12-31", "2024-01-03"),
         ]), date(2024, 11, 1))
-        self.assertGreaterEqual(date.fromisoformat(out["release_estimate"]),
-                                date.fromisoformat(out["pending_period_end"]))
+        self.assertGreater(date.fromisoformat(out["earnings_window"][0]),
+                           date.fromisoformat(out["pending_period_end"]))
+        # The window is ordered, never inverted.
+        self.assertLessEqual(date.fromisoformat(out["earnings_window"][0]),
+                             date.fromisoformat(out["earnings_window"][1]))
 
     def test_annual_period_ends_do_not_stretch_the_cadence(self):
         # A quarterly reporter also emits annual period ends, so the raw gap set mixes
