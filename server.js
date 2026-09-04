@@ -1248,8 +1248,30 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
    * profile's risk setting already allows.
    */
   const convictionScale = [0.4, 0.7, 1.0, 1.3, 1.6][decision.conviction - 1] ?? 1;
+
+  /*
+   * A scheduled results date inside the holding window is sized for, not stopped for.
+   *
+   * The prompt asks the model to shorten the horizon or say it accepts the gap, and
+   * measurably it does neither: UNH 2025-04-15 held a 3-month long straight through an
+   * earnings window the snapshot told it was open, and lost 50% of the underlying over
+   * that horizon. Across the original audit the five cutoffs with results due inside
+   * three weeks averaged -15.1% at one month against +1.4% for the other thirteen.
+   *
+   * Size is the only lever that actually answers this risk. A stop is evaluated on the
+   * close and fills at the next open, so a gap opens straight past it — UNH's own stop
+   * was 4% and the realised loss was 23% of entry. Overriding the HORIZON instead was
+   * the obvious alternative and is deliberately not done: it would silently reject the
+   * model's thesis about the event rather than the exposure to it, and a forced short
+   * hold is not automatically the better trade. Halving is a blunt number, but the
+   * uncertainty here is a multi-week window rather than a date, so precision would be
+   * false either way.
+   */
+  const eventInsideHorizon =
+    snapshot?.event_risk?.falls_inside_horizon?.[horizon] === true;
+  const eventScale = eventInsideHorizon ? 0.5 : 1;
   const positionPct = Math.round(Math.max(0.05, Math.min(0.75,
-    plan.position_pct * convictionScale)) * 100) / 100;
+    plan.position_pct * convictionScale * eventScale)) * 100) / 100;
 
   return {
     ...decision,
@@ -1259,6 +1281,8 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
     position_pct: positionPct,
     position_pct_base: plan.position_pct,
     conviction_scale: convictionScale,
+    event_inside_horizon: eventInsideHorizon,
+    event_scale: eventScale,
     instrument: plan.instrument,
     options_proxy: plan.options_proxy,
     entry_rule: "next_open",

@@ -667,8 +667,14 @@ function renderBacktestDecision(data) {
   // Conviction now moves the position, so the two stats have to be readable together —
   // "3/5" beside "35%" says nothing about why that size, and a 5 that quietly sized up
   // 1.6x would look like a profile change rather than a judgment.
-  const sizeNote = btNum(d.conviction_scale) != null && d.conviction_scale !== 1
-    ? ` <small>${d.conviction_scale}× base ${btMagnitudePct(d.position_pct_base)}</small>` : "";
+  const sizeBits = [];
+  if (btNum(d.conviction_scale) != null && d.conviction_scale !== 1)
+    sizeBits.push(`${d.conviction_scale}× conviction`);
+  // Named rather than folded silently into the number: halving for an earnings window is
+  // a risk decision the reader should be able to disagree with.
+  if (d.event_inside_horizon) sizeBits.push("½ for earnings in window");
+  const sizeNote = sizeBits.length
+    ? ` <small>${btEsc(sizeBits.join(" · "))} on base ${btMagnitudePct(d.position_pct_base)}</small>` : "";
   const bits = [
     `<div class="backtest-stat"><span>Direction</span><b>${btEsc(BT_DIRECTION_COPY[d.direction] || d.direction)}</b></div>`,
     `<div class="backtest-stat"><span>Conviction</span><b>${btEsc(d.conviction)}/5</b></div>`,

@@ -380,6 +380,42 @@ test("conviction can never size past the profile's own ceiling", () => {
   assert.ok(timid.position_pct >= 0.05, `sized ${timid.position_pct} under the floor`);
 });
 
+test("a results date inside the holding window halves the position", () => {
+  // UNH 2025-04-15 held a 3-month long straight through an earnings window the snapshot
+  // told it was open, and lost 50% of the underlying. Its stop was 4%; the realised loss
+  // was 23% of entry, because a gap opens past a stop rather than through it. Size is the
+  // only lever that answers this.
+  const snapshot = {
+    technical: { metrics: { atr_pct: 0.03 } },
+    event_risk: { falls_inside_horizon: { "1m": true, "3m": true, "6m": true } }
+  };
+  const exposed = ensureBacktestPosition(
+    { direction: "long", conviction: 3, horizon: "3m", stop_pct: 0.06 },
+    snapshot, { risk: 3, horizon: 3, style: "balanced" });
+  const clear = ensureBacktestPosition(
+    { direction: "long", conviction: 3, horizon: "3m", stop_pct: 0.06 },
+    { technical: snapshot.technical }, { risk: 3, horizon: 3, style: "balanced" });
+  assert.equal(exposed.event_inside_horizon, true);
+  assert.equal(clear.event_inside_horizon, false);
+  assert.ok(exposed.position_pct < clear.position_pct,
+    `${exposed.position_pct} should be under ${clear.position_pct}`);
+  assert.equal(exposed.position_pct, Math.round(clear.position_pct * 0.5 * 100) / 100);
+});
+
+test("an event outside the chosen horizon does not shrink the position", () => {
+  // The horizon the trade actually runs is what matters, not whether a report exists
+  // somewhere in the future. A 1-month hold that closes before the window opens is
+  // carrying none of that risk and must not be penalised for it.
+  const decision = ensureBacktestPosition(
+    { direction: "long", conviction: 3, horizon: "1m", stop_pct: 0.06 },
+    { technical: { metrics: { atr_pct: 0.03 } },
+      event_risk: { falls_inside_horizon: { "1m": false, "3m": true, "6m": true } } },
+    { risk: 3, horizon: 3, style: "balanced" });
+  assert.equal(decision.horizon, "1m");
+  assert.equal(decision.event_inside_horizon, false);
+  assert.equal(decision.event_scale, 1);
+});
+
 test("the profile caps the horizon but does not lengthen it", () => {
   // A shorter hold cannot breach a preference expressed as "how long am I willing to be
   // exposed". This used to overwrite unconditionally, so all 18 runs of the /ilgar audit
