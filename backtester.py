@@ -462,6 +462,11 @@ CADENCE_CONCEPTS = ("revenue", "net_income", "operating_income", "operating_cash
 # figure in event_risk not taken from the issuer's own history.
 EARNINGS_FLOOR_DAYS = 14
 
+# Past this, a period-end-to-filed gap is a restated comparative rather than an original
+# filing. SEC deadlines are 40 days for an accelerated filer's 10-Q and 60 for its 10-K,
+# and 90 covers a non-accelerated one; 120 leaves room without admitting a year-late row.
+LAG_CEILING_DAYS = 120
+
 
 def _is_month_end(day):
     return (day + timedelta(days=1)).day == 1
@@ -551,13 +556,24 @@ def event_risk(facts, as_of):
     if not ends:
         return None
 
-    lags = [(by_end[end] - end).days for end in ends]
+    # Only lags a genuine ORIGINAL filing can have. "Earliest filed wins" above does not
+    # catch every comparative, because fact_series keeps a bounded number of rows: once an
+    # old period end's original row falls off that window, the only row left for it is the
+    # restated comparative carried in a later report, and its lag is a full year. TSLA at
+    # 2021-11 measured a 390-day high that way, which widened the reported filing window
+    # to 2022-01-27 through 2023-01-25 — a year wide and useless on the page.
+    #
+    # The threshold is structural rather than tuned: an accelerated filer has 40 days for
+    # a 10-Q and 60 for a 10-K, and even a non-accelerated one is inside 90. Anything past
+    # LAG_CEILING_DAYS is a comparative by construction, not a slow filer.
+    lags = [lag for lag in ((by_end[end] - end).days for end in ends)
+            if lag <= LAG_CEILING_DAYS]
+    if not lags:
+        return None
     median_lag = _median(lags)
-    # Trimmed rather than raw min/max: a single restated or amended filing produces one
-    # absurd lag that would widen the window to uselessness.
     ordered_lags = sorted(lags)
-    low_lag = ordered_lags[len(ordered_lags) // 6]
-    high_lag = ordered_lags[-1 - len(ordered_lags) // 6]
+    low_lag = ordered_lags[0]
+    high_lag = ordered_lags[-1]
 
     gaps = [(ends[i] - ends[i - 1]).days for i in range(1, len(ends))]
     # Quarterly reporters also emit annual period ends, so the gap set mixes ~91 with

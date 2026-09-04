@@ -631,6 +631,26 @@ class EventRiskTests(unittest.TestCase):
         self.assertLessEqual(date.fromisoformat(low), date(2022, 1, 26))
         self.assertGreaterEqual(date.fromisoformat(high), date(2022, 1, 26))
 
+    def test_a_restated_comparative_does_not_widen_the_filing_window(self):
+        # fact_series keeps a bounded number of rows, so once an old period end's original
+        # row falls off that window the only row left for it is the comparative carried in
+        # a later report — a full year after the period closed. TSLA measured a 390-day
+        # high that way and reported a filing window from 2022-01-27 to 2023-01-25.
+        out = backtester.event_risk(self._facts([
+            ("2021-09-30", "2021-10-25"), ("2021-06-30", "2021-07-27"),
+            ("2021-03-31", "2021-04-28"), ("2020-12-31", "2021-02-08"),
+            ("2020-09-30", "2021-10-25"),   # comparative, restated 390 days later
+        ]), date(2022, 1, 14))
+        self.assertLessEqual(out["observed_filing_lag_days"]["high"],
+                             backtester.LAG_CEILING_DAYS)
+        low, high = out["expected_filing_window"]
+        span = (date.fromisoformat(high) - date.fromisoformat(low)).days
+        self.assertLess(span, 90, f"filing window spans {span} days")
+        # The window still contains TSLA's actual 2022-01-26 announcement.
+        elow, ehigh = out["earnings_window"]
+        self.assertLessEqual(date.fromisoformat(elow), date(2022, 1, 26))
+        self.assertGreaterEqual(date.fromisoformat(ehigh), date(2022, 1, 26))
+
     def test_days_out_is_never_negative(self):
         # A negative "days until" reads as nonsense to a model. An already-open window
         # says so in its own field instead of through a sign.
