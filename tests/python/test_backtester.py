@@ -352,7 +352,11 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         # The derived reads must survive the projection.
         self.assertIn("TRENDING", prompt)
         self.assertIn("AAA", prompt)
-        self.assertIn("You must choose LONG or SHORT", prompt)
+        # The forced choice itself, not one phrasing of it — the wording was shortened
+        # when the instruction block had to be cut back, and pinning a sentence made a
+        # deliberate edit look like a broken contract.
+        self.assertIn("LONG or SHORT", prompt)
+        self.assertIn("never flat, neutral, wait, watch or avoid", prompt)
         self.assertIn("entry at the next session open", prompt)
         self.assertIn("MySquall preferences", prompt)
         # Sanity: the fixture is realistic enough that a naive dump WOULD have leaked.
@@ -747,6 +751,65 @@ class EventRiskTests(unittest.TestCase):
         json.dumps(out, allow_nan=False)
 
 
+class DirectionGuardrailTests(unittest.TestCase):
+    """
+    The two direction rules, decided by the engine rather than argued in the prompt.
+
+    They were prose instructions first, and that cost real output: each conditional is a
+    computation a reasoning model performs in the budget it shares with the answer, and
+    reasoning went from ~7,900 characters across the audit set to 20,000-62,000, leaving
+    write-ups truncated or empty.
+    """
+
+    def test_reversal_shape_closes_off_the_short_side(self):
+        # NVDA 2023-01-17: price 17.66 above ma20 15.47, ma50 15.81 and ma200 16.41, with
+        # the averages still stacked 20 < 50 < 200. The write-up shorted it two weeks
+        # before a +166% run.
+        out = backtester.direction_guardrails({
+            "price": 17.66, "ma20": 15.47, "ma50": 15.81, "ma200": 16.41,
+            "rsi14": 69.5, "volume_ratio": 1.1, "distance_52w_high": -0.388})
+        self.assertTrue(out["no_short"])
+        self.assertIn("reversal", " ".join(out["no_short_reasons"]).lower())
+        self.assertFalse(out["no_long"])
+
+    def test_capitulation_closes_off_the_short_side(self):
+        # AMD 2025-04-07: RSI 27.6, volume 1.93x, 55% below the 52-week high. Shorted,
+        # then +145% over six months.
+        out = backtester.direction_guardrails({
+            "price": 83.64, "ma20": 95.0, "ma50": 106.0, "ma200": 125.0,
+            "rsi14": 27.6, "volume_ratio": 1.93, "distance_52w_high": -0.553})
+        self.assertTrue(out["no_short"])
+        joined = " ".join(out["no_short_reasons"]).lower()
+        self.assertIn("capitulation", joined)
+        self.assertIn("1.93", joined)
+
+    def test_an_orderly_downtrend_short_is_left_alone(self):
+        # META 2022-02-15 was a correct short and must not be blocked: RSI 27 but volume
+        # only 0.83x and 42.5% off the high, so neither limb of the capitulation test
+        # fires. Blocking this one would destroy the 3-for-3 the audit found on orderly
+        # downtrend shorts.
+        out = backtester.direction_guardrails({
+            "price": 219.08, "ma20": 269.27, "ma50": 305.70, "ma200": 331.05,
+            "rsi14": 27.08, "volume_ratio": 0.83, "distance_52w_high": -0.425})
+        self.assertFalse(out["no_short"])
+        self.assertEqual(out["no_short_reasons"], [])
+
+    def test_a_clean_uptrend_blocks_nothing(self):
+        out = backtester.direction_guardrails({
+            "price": 250.0, "ma20": 240.0, "ma50": 230.0, "ma200": 200.0,
+            "rsi14": 68.0, "volume_ratio": 1.0, "distance_52w_high": -0.01})
+        self.assertFalse(out["no_short"])
+        self.assertFalse(out["no_long"])
+
+    def test_missing_metrics_never_fabricate_a_rule(self):
+        for metrics in ({}, {"price": None, "rsi14": None},
+                        {"price": 10.0, "ma20": 9.0},          # ma50/ma200 absent
+                        {"rsi14": 20.0}):                       # no volume or drawdown limb
+            out = backtester.direction_guardrails(metrics)
+            self.assertFalse(out["no_short"], f"fabricated a rule from {metrics}")
+        json.dumps(backtester.direction_guardrails({}), allow_nan=False)
+
+
 class PromptProjectionTests(unittest.TestCase):
     def test_sec_facts_are_trimmed_for_the_prompt_but_not_the_snapshot(self):
         # sec_facts measured 29,000-30,300 characters of a ~37,600 character prompt:
@@ -787,10 +850,23 @@ class PromptProjectionTests(unittest.TestCase):
         # ...while the snapshot the dashboard renders still has it.
         self.assertEqual(snapshot["market_regime"]["confidence"], 92)
 
-    def test_event_risk_is_a_prompt_block(self):
+    def test_derived_blocks_reach_the_model(self):
         # A block absent from PROMPT_BLOCKS is computed, shipped to the browser, and
         # never seen by the model — silently, with nothing raising.
         self.assertIn("event_risk", backtester.PROMPT_BLOCKS)
+        self.assertIn("direction_guardrails", backtester.PROMPT_BLOCKS)
+
+    def test_the_prompt_stays_short_enough_not_to_provoke_deliberation(self):
+        # Not style policing. The instruction block is what drove reasoning from ~7,900
+        # characters to 20,000-62,000 and emptied several write-ups; thinking and answer
+        # share max_tokens. If a rule needs more room than this, it belongs in the engine
+        # as a decided flag, the way direction_guardrails does.
+        snapshot = {"ticker": "TST", "as_of": "2024-06-03",
+                    "technical": {"metrics": {}, "scores": {}}, "sec_facts": {}}
+        prompt = backtester.build_ai_prompt(snapshot)
+        instructions = prompt.split("--- FROZEN POINT-IN-TIME SNAPSHOT ---")[0]
+        self.assertLess(len(instructions), 2600,
+                        f"instruction block is {len(instructions)} chars")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,16 @@ const REASON_EFFORT = EFFORTS.includes(process.env.SQUALL_REASON_EFFORT)
 // permitted 3000 — so the latency cost is small, but it is the number to lower first if
 // analyses start feeling slow again. Cost scales with tokens actually generated, not with
 // the cap, so a bigger ceiling only costs more on the requests that genuinely needed it.
+//
+// "The model used ~1800 even when permitted 3000" is TRUE OF A GIVEN PROMPT AND NOTHING
+// ELSE, and that is the trap. A revision to /backtest-stream's prompt that spelled two
+// direction rules out as conditional tests drove reasoning from ~7,900 characters to
+// 20,000-62,000 on the same model, same effort, same cap — INTC 2024-07-15 spent 61,526
+// characters thinking and emitted an empty answer, because thinking and answer share this
+// number. `effort` is a percentage and evidently not a hard stop on the routed host, so
+// the only real defences are a prompt that does not invite deliberation and the
+// describeAiStream log line. After changing ANY prompt on a reasoning route, read that
+// line's reasoning= figure before assuming the change was free.
 const ANALYSIS_MAX  = Number.isFinite(parseInt(process.env.SQUALL_ANALYSIS_MAX, 10))
   ? parseInt(process.env.SQUALL_ANALYSIS_MAX, 10)
   : 16000;                      // total output cap — thinking and answer SHARE this
@@ -371,24 +381,19 @@ function buildBacktestAiMessages(prompt, profile) {
         "You are a point-in-time equity analyst participating in a historical blind test.",
         "The cutoff date and supplied snapshot are absolute: never use knowledge from after that date, including facts you remember independently.",
         "Never guess missing historical news, options, estimates, or outcomes. Analyze only the supplied price and SEC evidence, distinguish what was known from what was uncertain, and do not claim that a chart-pattern score proves a pattern.",
-        // Grounding rules. The routed model is a fast, high-throughput snapshot, and the
-        // failure it is most prone to is a confident figure that no field supports.
-        // Requiring every number to trace to a key is the cheapest available check,
-        // because an invented figure has no key to name.
-        "Every figure in your write-up must come from a field in the snapshot or from arithmetic on snapshot fields. If a number would help your case and is not in the snapshot, write that it is unavailable rather than supplying one. Do not state analyst targets, peer multiples, index weights, historical averages, market-share figures, or product details from memory — none of them are in the snapshot and none can be verified.",
-        "Snapshot percentages are decimal fractions: 0.152 means 15.2%. Re-check every conversion, and never restate a snapshot value as a different number.",
-        "Prefer a short report you can fully support over a long one padded with plausible detail. Omitting a section you have no data for is correct; filling it is not.",
-        // Direction guardrails. Both trace to a reasoning error found in a 18-run audit of
-        // this route, where the model listed the contradicting evidence itself and then
-        // discarded it in favour of the regime label.
-        "The market_regime label is a summary of the metrics supplied alongside it, not independent evidence, and it must never outrank them. Do not call it the most heavily weighted or most statistically significant signal — it carries no weighting at all. Where its `conflicts` list is non-empty, address each conflict explicitly instead of siding with the label.",
-        "Never short a stock trading above all three of its 20-, 50- and 200-day moving averages, no matter how bearish the regime reads: the moving-average stack lags price, so that combination is a reversal already in progress.",
-        "Never short into capitulation. RSI under 32 combined with either volume above 1.5x the 20-day average or a drawdown deeper than 45% from the 52-week high marks the end of declines at least as often as their continuation; in that case take the long side with low conviction and say why.",
-        "An empty support or resistance list means the detector found no pivot in its lookback, which is normal at a 52-week extreme. Never cite it as evidence in either direction.",
-        "If an event_risk block is present, state the estimated earnings window, say whether it opens inside your holding period, and either shorten the horizon to close before it or acknowledge that you are accepting a gap your stop cannot protect against. It is a window, never a date.",
+        // KEEP THIS SHORT, and keep tests out of it. Every conditional a system prompt
+        // states is a computation the model performs in the reasoning budget it shares
+        // with the answer. A revision that spelled the two direction rules out as prose
+        // tests drove reasoning from ~7,900 characters across the audit set to
+        // 20,000-62,000 and left several write-ups empty or truncated. The conditions are
+        // now evaluated in backtester.direction_guardrails and arrive already decided.
+        "State only figures the snapshot contains or that you compute from it. Never supply an analyst target, peer multiple, index weight or remembered average — say it is unavailable instead. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
+        "The market_regime label summarises the metrics beside it: it is not independent evidence, never outranks them, and carries no weighting. Address any entries in its `conflicts` list. An empty support or resistance list means the detector found no pivot, which is normal at a 52-week extreme and is not evidence either way.",
+        "The `direction_guardrails` block is decided by the engine. If `no_short` is true, take the long side and address its stated reasons; if `no_long` is true, take the short side.",
+        "If `event_risk` is present, say whether its earnings window opens inside your holding period, and either shorten the horizon to close before it or state that you accept a gap your stop cannot cover.",
         "This is a forced-choice backtest: finish with one explicit simulated LONG or SHORT stock position. Never answer flat, neutral, wait, watch, or avoid; express uncertainty through lower conviction and smaller MySquall-calibrated sizing.",
-        "State next-session-open entry, stop distance, target distance, and maximum holding period. Size the stop off the snapshot's own atr_pct rather than a round number — a stop tighter than roughly 2x ATR is hit by ordinary noise before any thesis resolves. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
-        "Conviction drives simulated position size, so 3 is not a neutral default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when technical, relative and fundamental evidence agree and you can name no substantial contradiction.",
+        "State next-session-open entry, stop distance, target distance, and maximum holding period. Size the stop off the snapshot's atr_pct rather than a round number. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
+        "Conviction scales simulated position size, so 3 is not a neutral default: use 1 when you are picking a side only because the format demands one, and 5 only when nothing substantial contradicts it.",
         "Do not predict with certainty or provide individualized financial advice."
       ].join(" ")
     },

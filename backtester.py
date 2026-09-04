@@ -468,6 +468,65 @@ EARNINGS_FLOOR_DAYS = 14
 LAG_CEILING_DAYS = 120
 
 
+def direction_guardrails(metrics):
+    """
+    The two direction rules, evaluated here rather than in the prompt.
+
+    Both were first written as prose instructions ("RSI below 32 together with either
+    volume above 1.5x the 20-day average or a drawdown deeper than 45%..."), and that was
+    a mistake with a measurable cost. Each conditional is a small computation, and a
+    reasoning model does it in the thinking budget: reasoning across the audit set went
+    from ~7,900 characters to 20,000-62,000, and since reasoning and answer share
+    max_tokens, the write-up arrived truncated or never started at all. INTC 2024-07-15
+    spent 61,526 characters thinking and produced an empty analysis.
+
+    This engine already does every other numerical comparison in the pipeline; there was
+    no reason for these two to be the exception. Shipping the conclusion instead of the
+    test turns three dense prompt paragraphs into one short sentence.
+
+    Both rules forbid a SHORT and neither forbids a long, which is what the evidence
+    supports — the audit found the short book was where the catastrophic misses lived
+    (NVDA +166% and AMD +145% against a short). No mirror-image long guardrail is
+    asserted, because none was measured.
+    """
+    price = finite(metrics.get("price"))
+    ma20, ma50 = finite(metrics.get("ma20")), finite(metrics.get("ma50"))
+    ma200 = finite(metrics.get("ma200"))
+    rsi = finite(metrics.get("rsi14"))
+    volume_ratio = finite(metrics.get("volume_ratio"))
+    drawdown = finite(metrics.get("distance_52w_high"))
+
+    reasons = []
+    if None not in (price, ma20, ma50, ma200) and price > ma20 and price > ma50 and price > ma200 \
+            and ma20 < ma50 < ma200:
+        reasons.append(
+            "Price is above all three moving averages while the averages themselves are "
+            "still stacked bearishly. Price crosses first and the stack re-orders weeks "
+            "later, so this is an early trend reversal, not a confirmed downtrend.")
+    if rsi is not None and rsi < 32 and (
+            (volume_ratio is not None and volume_ratio > 1.5)
+            or (drawdown is not None and drawdown < -0.45)):
+        detail = []
+        if volume_ratio is not None and volume_ratio > 1.5:
+            detail.append(f"volume at {volume_ratio:.2f}x the 20-day average")
+        if drawdown is not None and drawdown < -0.45:
+            detail.append(f"{abs(drawdown):.0%} below the 52-week high")
+        reasons.append(
+            f"Capitulation conditions: RSI {rsi:.0f} with " + " and ".join(detail) + ". "
+            "This marks the end of declines at least as often as their continuation, so "
+            "risk and reward no longer favour the short side.")
+
+    return {
+        "no_short": bool(reasons),
+        "no_short_reasons": reasons,
+        "no_long": False,
+        "basis": ("Evaluated by the engine from the pre-cutoff metrics in this snapshot, not "
+                  "by you. Where no_short is true the short side is closed off for this "
+                  "replay regardless of what the regime label reads; take the long side and "
+                  "set conviction from the rest of the evidence."),
+    }
+
+
 def _is_month_end(day):
     return (day + timedelta(days=1)).day == 1
 
@@ -1030,7 +1089,8 @@ PROMPT_BLOCKS = (
     "ticker", "company_name", "as_of", "effective_market_date", "price_basis",
     "technical", "chart_patterns", "key_levels", "price_action", "institutional",
     "market_regime", "relative", "valuation", "fundamentals",
-    "sec_facts", "filings_known_by_cutoff", "event_risk", "availability", "data_sources",
+    "sec_facts", "filings_known_by_cutoff", "event_risk", "direction_guardrails",
+    "availability", "data_sources",
 )
 
 # How many reported periods per concept reach the model, against the 10 kept in the
@@ -1073,29 +1133,25 @@ def build_ai_prompt(snapshot):
         "Use only the frozen snapshot below. Do not use or imply knowledge of any later price, filing, news, product event, macro event, or outcome.",
         "The snapshot intentionally contains no forward returns. Historical news, options flow, analyst estimates, and historical index membership are unavailable; say so instead of filling gaps from memory.",
         "Write a concise but substantive report with: setup at the cutoff, technical condition, fundamentals known by then, bull case, bear case, and a confidence/data-limitations note.",
-        # Every figure in a write-up has a key it came from. Requiring the model to keep
-        # that link is the cheapest available check on a fast model inventing a plausible
-        # number, because a fabricated figure has no key to name.
-        "Every number you state must be copied from a field in the snapshot below, or computed from snapshot fields with the arithmetic shown. Do not state a figure the snapshot does not contain — no analyst targets, no peer multiples, no index weights, no historical averages from memory. If a figure would strengthen your case and is not present, write that it is unavailable and continue.",
-        "Do not restate a snapshot value as a different number. Percentages in the snapshot are decimal fractions: 0.152 is 15.2%. Check any figure you convert.",
-        # --- Direction guardrails -------------------------------------------------
-        # Both come from a reasoning error visible in the audited prose, not from fitting
-        # to returns: in each case the model wrote down the contradicting evidence and
-        # then discarded it in favour of the regime label.
-        "The regime label summarises the same metrics supplied beside it. It is not independent evidence and must not outrank the metrics it was computed from. Never describe it as the most heavily weighted or most statistically significant signal — it carries no weighting. If the block lists conflicts, address them explicitly rather than choosing the side that matches the label.",
-        "Do not short a stock trading above all three of its 20-, 50- and 200-day moving averages, however bearish the regime label reads. Price crosses first and the moving-average stack re-orders weeks later, so a rising price through a bearishly-stacked set of averages is the signature of a reversal already underway.",
-        "Do not short into capitulation. RSI below 32 together with either volume above 1.5x the 20-day average or a drawdown greater than 45% from the 52-week high describes the end of a decline at least as often as its continuation. Where the bearish evidence is this extreme, say that the risk and reward no longer favour the short, and take the long side with low conviction instead.",
-        "Symmetrically, a high RSI with price extended far above its moving averages is not by itself a reason to be short, and an oversold reading in an intact uptrend is not by itself a reason to be long.",
-        # --- Event risk -----------------------------------------------------------
-        "If the snapshot contains an event_risk block, state the estimated earnings window and whether it opens inside the holding period you choose. If it does, either shorten the horizon so the position closes before the window opens, or say plainly that you are accepting an earnings gap that your stop cannot protect against, and lower conviction accordingly. It is a window, not a date; never state it as a day.",
-        # --- The forced call ------------------------------------------------------
-        "End with a section titled 'Simulated position'. You must choose LONG or SHORT for this forced-choice experiment; do not answer flat, neutral, wait, watch, or avoid. State conviction from 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3-, or 6-month maximum holding period. MySquall preferences appended by the server must determine the risk, sizing emphasis, and holding-period choice.",
+        #
+        # KEEP THIS LIST SHORT. Every conditional here is a small computation, and a
+        # reasoning model performs it in the thinking budget it shares with the answer.
+        # A previous revision spelled out both direction rules as prose tests ("RSI below
+        # 32 together with either volume above 1.5x..."): reasoning went from ~7,900
+        # characters across the audit set to 20,000-62,000, and the write-up arrived
+        # truncated or never started. INTC 2024-07-15 spent 61,526 characters thinking and
+        # produced an empty analysis. Anything that can be decided from the numbers is
+        # decided in the engine and shipped as a conclusion — see direction_guardrails.
+        #
+        "State only figures the snapshot contains or that you compute from it, and show the arithmetic when you compute one. Never supply an analyst target, peer multiple or remembered average; write that it is unavailable instead. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
+        "The market_regime label summarises the metrics beside it. It is not independent evidence and never outranks them, it carries no weighting, and any entries in its `conflicts` list must be addressed rather than resolved in the label's favour. Treat chart-pattern scores as candidate detectors, and an empty support or resistance list as no evidence either way.",
+        "The `direction_guardrails` block is decided by the engine, not by you. If `no_short` is true you must take the long side and address the stated reasons; if `no_long` is true you must take the short side.",
+        "If `event_risk` is present, say whether its earnings window opens inside your holding period. If it does, either shorten the horizon to close before it or state that you are accepting a gap your stop cannot cover. It is a window, never a date.",
+        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3- or 6-month maximum holding period. MySquall preferences appended by the server set the risk, sizing emphasis and holding-period choice.",
         # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned
-        # exactly 3 and none returned 1, 4 or 5, which made the field carry no information
-        # at all. Conviction now scales position size, so the anchors have to be explicit.
-        "Conviction is not a politeness scale and 3 is not a default. Use 1 when the evidence genuinely points both ways and you are choosing a side only because the format requires one; 3 when the evidence leans one way with real objections outstanding; 5 only when the technical, relative and fundamental evidence in the snapshot agree and you can name no substantial contradiction. Conviction scales the simulated position size, so a 3 you did not mean costs as much as a wrong direction.",
-        "Size the stop off this stock's own volatility, not off a round number. A stop closer than about 2x the snapshot's atr_pct will be hit by ordinary daily noise before the thesis can resolve.",
-        "Treat chart-pattern scores as candidate detectors rather than facts. This is research, not individualized financial advice.",
+        # exactly 3 and none returned 1, 4 or 5. Conviction now scales position size.
+        "Conviction 3 is not a default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when nothing substantial contradicts it. It scales the simulated position size.",
+        "Size the stop off atr_pct, not a round number — closer than about 2x atr_pct is ordinary daily noise. This is research, not individualized financial advice.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
         json.dumps(projection, separators=(",", ":"), allow_nan=False),
     ])
@@ -1193,6 +1249,7 @@ def main():
         "price_history": price_history_rows(before),
         "sec_facts": facts, "filings_known_by_cutoff": filings,
         **({"event_risk": pending_report} if pending_report else {}),
+        "direction_guardrails": direction_guardrails(technical.get("metrics") or {}),
         "availability": {
             "market_history": True, "sec_facts": bool(facts), "sec_filings": bool(filings),
             # Surfaced because a fall-through to the raw basis is otherwise invisible:
