@@ -957,7 +957,7 @@ td.pos { color: var(--up); } td.neg { color: var(--down); }
 .prose { color: var(--ink); font-size: 13.5px; line-height: 1.75; }
 .prose, .learn-note, .screen-chat-msg p, #hero p, .prose blockquote {
   font-family: var(--doc); font-size: var(--t-doc); line-height: var(--lh-doc); }
-.prose { max-width: var(--measure); }
+.prose { max-width: var(--measure); overflow-wrap: anywhere; }
 .prose h1, .prose h2, .prose h3 { font-family: var(--doc); font-size: var(--t-doc-h); line-height: 1.3; }
 .prose h2 { font-family: var(--doc); font-size: var(--t-doc-h); font-weight: 600; color: var(--ink-bright); margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
 .prose h2:first-child { margin-top: 0; }
