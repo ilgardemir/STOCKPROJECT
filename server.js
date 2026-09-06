@@ -2402,8 +2402,10 @@ const appServer = http.createServer(async (req, res) => {
             while ((nl = sseBuffer.indexOf("\n")) >= 0) {
               const line = sseBuffer.slice(0, nl);
               sseBuffer = sseBuffer.slice(nl + 1);
-              const streamErr = readAiStreamLine(line, state, (kind, t) =>
-                send(kind === "reasoning" ? "backtest_ai_thinking" : "backtest_ai_delta", { t }));
+              const streamErr = readAiStreamLine(line, state, (kind, t) => {
+                emitted = true; // Set before a later read can throw and enter retry handling.
+                send(kind === "reasoning" ? "backtest_ai_thinking" : "backtest_ai_delta", { t });
+              });
               if (streamErr) throw streamErr;
             }
           }
@@ -2532,8 +2534,10 @@ const appServer = http.createServer(async (req, res) => {
             while ((nl = sseBuf.indexOf("\n")) >= 0) {
               const line = sseBuf.slice(0, nl);
               sseBuf = sseBuf.slice(nl + 1);
-              const streamErr = readAiStreamLine(line, state, (kind, t) =>
-                send(kind === "reasoning" ? "ai_thinking" : "ai_delta", { t }));
+              const streamErr = readAiStreamLine(line, state, (kind, t) => {
+                emitted = true; // A partial response must never be replayed into the same stream.
+                send(kind === "reasoning" ? "ai_thinking" : "ai_delta", { t });
+              });
               if (streamErr) throw streamErr;
             }
           }

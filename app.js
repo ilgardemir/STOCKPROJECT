@@ -858,15 +858,25 @@ function attachTypeahead(input, box, submit) {
 attachTypeahead(document.getElementById("ticker"), document.getElementById("tickerSuggest"), runAnalysis);
 attachTypeahead(document.getElementById("heroTicker"), document.getElementById("heroSuggest"), runHeroAnalysis);
 
-function finalizePartialStream() {
+function finalizePartialStream(ticker = _stream?.ticker) {
   // A new run (or navigation) interrupts an in-flight stream — keep what arrived.
-  if (_stream && !_stream.done) {
-    const s = sessions[_stream.ticker];
-    if (s) { s.data.aiSummary = _stream.answer; s.data.aiReasoning = _stream.thinking; s.data.model = _stream.model; touchSession(s); persistSessions(); }
+  const pending = _stream && !_stream.done;
+  const s = sessions[ticker];
+  if (s && (pending || (!s.data.aiSummary && !s.data.aiError))) {
+    if (pending) {
+      s.data.aiSummary = _stream.answer;
+      s.data.aiReasoning = _stream.thinking;
+      s.data.model = _stream.model;
+    }
+    s.data.aiError = "The written analysis was interrupted and is incomplete";
+    touchSession(s); persistSessions();
+  }
+  if (pending || s) {
     setAnalysisStreaming(false);
     document.getElementById("aiModelTag")?.classList.remove("live");
   }
   _stream = null;
+  if (s && active === ticker) finalizeAiRender(s.data);
 }
 
 /* ── Skeleton loaders — mirror the real card/metric/prose shapes while data loads ── */
@@ -954,10 +964,10 @@ function runAnalysis() {
   es.addEventListener("progress", e => { const d = JSON.parse(e.data); showProgress(d.stage, d.total || 7, d.label); });
 
   es.addEventListener("error", e => {
-    if (!e.data && gotResult) {   // natural close (or drop) after data arrived — finalize quietly
-      finalizePartialStream();
+    if (!e.data && gotResult) {   // terminal events close the stream themselves; this is a drop
+      finalizePartialStream(key);
       if (_es === es) {
-        showProgressPercent(100, "Dashboard ready");
+        showProgressPercent(100, "Dashboard ready · written analysis interrupted");
         hideProgress(900);
       }
       es.close(); if (_es === es) _es = null; setAnalyzeBusy(false); return;

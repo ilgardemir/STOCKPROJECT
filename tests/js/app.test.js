@@ -111,6 +111,34 @@ const APP = new Proxy({}, { get: (_t, name) => read(String(name)) });
 const readFocus = loadApp({ focus: true });
 const FOCUS = new Proxy({}, { get: (_t, name) => readFocus(String(name)) });
 
+test("interrupted analysis preserves text with a saved warning and retry action", () => {
+  const state = loadApp();
+  state(`sessions.TEST = { data: { ticker: "TEST" }, history: [] };
+    active = "TEST";
+    _stream = { ticker: "TEST", answer: "Partial answer", thinking: "Evidence", model: "test", done: false };
+    finalizePartialStream();`);
+  assert.equal(state("sessions.TEST.data.aiSummary"), "Partial answer");
+  assert.match(state("sessions.TEST.data.aiError"), /incomplete|interrupted/i);
+  assert.match(state("aiWarnHtml(sessions.TEST.data)"), /Retry analysis/);
+  assert.match(state('localStorage.getItem(SESSION_STORAGE_KEY)'), /aiError/);
+  assert.equal(state("_stream"), null);
+});
+
+test("connection loss between dashboard and AI start replaces the waiting indicator", () => {
+  const state = loadApp();
+  state(`EventSource = function () {
+    this.handlers = {}; this.addEventListener = (name, fn) => this.handlers[name] = fn;
+    this.close = () => {}; window.testSource = this;
+  };
+  document.getElementById("ticker").value = "TEST";
+  runAnalysis();
+  testSource.handlers.result({ data: JSON.stringify({ ticker: "TEST" }) });
+  testSource.handlers.error({});`);
+  assert.match(state("sessions.TEST.data.aiError"), /incomplete|interrupted/i);
+  assert.match(state('document.getElementById("aiSummary").innerHTML'), /Retry analysis/);
+  assert.equal(state("_es"), null);
+});
+
 // Sandbox-allocated arrays carry that realm's prototype, and strict deepEqual compares
 // prototypes — round-trip anything structural before comparing it.
 const plain = value => JSON.parse(JSON.stringify(value));
