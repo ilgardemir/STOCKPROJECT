@@ -1601,6 +1601,9 @@ function deleteSession(t) {
   if (t === compareTicker) setCompareTicker(null, false);   // nothing left to compare against
   if (active === t) active = keys[idx + 1] && sessions[keys[idx + 1]] ? keys[idx + 1] : keys[idx - 1] && sessions[keys[idx - 1]] ? keys[idx - 1] : Object.keys(sessions)[0] || null;
   persistSessions(); renderTickerPills();
+  // Shared Saved chrome is present on /screener and /ilgar, but their bodies
+  // do not contain the analyzer dashboard or hero.
+  if (!IS_ANALYZER_PAGE) return;
   if (active && sessions[active]) { renderAll(sessions[active].data); syncChatSendMode(); }
   else {
     clearTickerBar();

@@ -188,6 +188,18 @@ function run(page, units, poisonId) {
 
 const PAGES = ["index.html", "screener.html", "ilgar.html", "404.html"];
 const JOBS = PAGES.map(page => [page, unitsOf(assemble(page))]);
+// Saved analyses can be removed from shared chrome on secondary pages too.
+for (const page of ["index.html", "screener.html", "ilgar.html"]) {
+  JOBS.push([page, [...unitsOf(assemble(page)), {
+    name: "delete-saved-analysis",
+    code: () => `
+      sessions.OTHER = { ...sessions.AAA, data: { ...sessions.AAA.data, ticker: "OTHER" } };
+      deleteSession("AAA");
+      deleteSession("OTHER");
+      if (Object.keys(sessions).length) throw new Error("Saved analyses were not removed");
+    `
+  }]]);
+}
 
 /*
  * Proves the harness can still fail, on every run rather than on a human
