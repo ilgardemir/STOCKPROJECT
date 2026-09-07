@@ -6,6 +6,8 @@ Sources: Finnhub (quote/profile/news) · yahooquery (history/options/fundamental
 """
 
 from yahooquery import Ticker as YQTicker
+from quant_utils import (return_windows, first_number, positive_ratio, percent_fraction, wilder_rsi,
+                         annual_cagr, adjusted_close, risk_statistics)
 import requests, json, re, sys, os, math, time, tempfile, traceback
 from html import unescape
 from html.parser import HTMLParser
@@ -83,7 +85,7 @@ def safe_divide(num, denom, default=0.0):
     r = num / denom
     return default if math.isinf(r) or math.isnan(r) else r
 
-def is_valid(val, mn=-1e9, mx=1e9):
+def is_valid(val, mn=-math.inf, mx=math.inf):
     if val is None: return False
     try:
         f = float(val)
@@ -103,11 +105,12 @@ def safe_int(v, default: int = 0) -> int:
     f = safe_float(v)
     return default if f is None else int(f)
 
-def safe_fraction(v):
-    """Normalize provider percentages (25.4) and ratios (0.254) to a fraction."""
-    value = safe_float(v)
-    if value is None: return None
-    return value / 100 if abs(value) > 2 else value
+def safe_fraction(v, unit="fraction"):
+    """Units belong to the source field, never to the size of the number."""
+    if unit not in ("fraction", "percent"):
+        raise ValueError("Unknown percentage unit")
+    return percent_fraction(v) if unit == "percent" else safe_float(v)
+
 
 def fmt(val, t="pct"):
     if val is None: return "N/A"
@@ -296,11 +299,11 @@ class YQData:
         return df
 
     def income_stmt(self, frequency="a") -> pd.DataFrame:
-        try:   return self._financial_df(self._yq.income_statement(frequency=frequency))
+        try:   return self._financial_df(self._yq.income_statement(frequency=frequency, trailing=False))
         except: return pd.DataFrame()
 
     def cashflow_stmt(self, frequency="a") -> pd.DataFrame:
-        try:   return self._financial_df(self._yq.cash_flow(frequency=frequency))
+        try:   return self._financial_df(self._yq.cash_flow(frequency=frequency, trailing=False))
         except: return pd.DataFrame()
 
     def balance_sheet_stmt(self, frequency="a") -> pd.DataFrame:
@@ -317,7 +320,7 @@ class YQData:
                 for sym in [self.sym, self.sym.upper()]:
                     try:  h = h.xs(sym, level="symbol"); break
                     except KeyError: pass
-            # Standardise column names to yfinance convention
+            # Standardise OHLCV column names for the application
             col_map = {"open":"Open","high":"High","low":"Low","close":"Close",
                        "volume":"Volume","dividends":"Dividends","splits":"Stock Splits"}
             h = h.rename(columns=col_map)
@@ -328,20 +331,80 @@ class YQData:
     # ── earnings history ──────────────────────────────────────────────────────
     def earnings_hist(self) -> pd.DataFrame:
         try:
-            raw = self._yq.earnings_history
+            raw = self._yq.earning_history
             if not isinstance(raw, pd.DataFrame) or raw.empty:
                 return pd.DataFrame()
             if hasattr(raw.index, "names") and "symbol" in raw.index.names:
                 for sym in [self.sym, self.sym.upper()]:
                     try:  raw = raw.xs(sym, level="symbol"); break
                     except KeyError: pass
-            return raw.reset_index() if not isinstance(raw.index, pd.RangeIndex) else raw
+            frame = self._financial_df(raw)
+            return frame.sort_values("quarter", ascending=False) if "quarter" in frame.columns else frame
         except:
             return pd.DataFrame()
+
+    @property
+    def earnings_trend(self) -> dict: return self._mod("earnings_trend")
 
     # ── options ───────────────────────────────────────────────────────────────
     def option_data(self, current_price: float) -> dict:
         return _fetch_options_yq(self._yq, self.sym, current_price)
+
+
+def statement_rows(df, *cols):
+    """Comparable annual observations, newest first; exclude TTM and mixed currencies."""
+    if df is None or df.empty or "asOfDate" not in df.columns:
+        return []
+    rows = []
+    for _, row in df.iterrows():
+        if row.get("periodType") != "12M":
+            continue
+        date = pd.to_datetime(row.get("asOfDate"), errors="coerce")
+        value = first_number(*(row.get(c) for c in cols))
+        if pd.notna(date) and value is not None:
+            rows.append({"end": date.strftime("%Y-%m-%d"), "val": value,
+                         "currency": str(row.get("currencyCode") or "")})
+    rows.sort(key=lambda r: r["end"], reverse=True)
+    currency = rows[0]["currency"] if rows else None
+    seen = set(); result = []
+    for row in rows:
+        if row["currency"] == currency and row["end"] not in seen:
+            result.append(row); seen.add(row["end"])
+    return result
+
+
+def matched_cash_income(cash, income):
+    cash_rows = statement_rows(cash, "OperatingCashFlow", "TotalCashFromOperatingActivities")
+    income_rows = statement_rows(income, "NetIncome", "NetIncomeCommonStockholders")
+    by_period = {(r["end"], r["currency"]): r["val"] for r in income_rows}
+    for row in cash_rows:
+        key = (row["end"], row["currency"])
+        if key in by_period and row["currency"]:
+            return row["val"], by_period[key], row["end"]
+    return None, None, None
+
+
+def estimate_evidence(module):
+    """Whitelist numeric fields, keeping horizon/currency and missing values explicit."""
+    rows = []
+    for entry in (module.get("trend") or [])[:4]:
+        if not isinstance(entry, dict):
+            continue
+        row = {k: str(entry.get(k) or "") for k in ("period", "endDate")}
+        for group, fields in {
+            "earningsEstimate": ("avg", "low", "high", "numberOfAnalysts", "yearAgoEps", "growth"),
+            "revenueEstimate": ("avg", "low", "high", "numberOfAnalysts", "yearAgoRevenue", "growth"),
+            "epsTrend": ("current", "7daysAgo", "30daysAgo", "60daysAgo", "90daysAgo"),
+            "epsRevisions": ("upLast7days", "upLast30days", "downLast7days", "downLast30days")
+        }.items():
+            data = entry.get(group) or {}
+            row[group] = {field: safe_float(data.get(field)) for field in fields}
+        trend = row["epsTrend"]
+        row["eps_revision_30d_fraction"] = positive_ratio(
+            trend["current"] - trend["30daysAgo"] if trend["current"] is not None and trend["30daysAgo"] is not None else None,
+            abs(trend["30daysAgo"]) if trend["30daysAgo"] is not None else None)
+        rows.append(row)
+    return rows
 
 
 def _stmt_val(df: pd.DataFrame, *cols) -> float | None:
@@ -764,7 +827,7 @@ def analyze_form4(cik, accession_number):
         return {"buys": codes.count("P"), "sells": codes.count("S")}
     except: return {"buys": 0, "sells": 0}
 
-def safe_extract_sec(facts, namespace, concept):
+def safe_extract_sec(facts, namespace, concept, with_dates=False):
     try:
         if namespace not in facts["facts"] or concept not in facts["facts"][namespace]:
             return None, []
@@ -789,7 +852,7 @@ def safe_extract_sec(facts, namespace, concept):
                 if 335 <= days <= 395: durations.append(x)
             except (TypeError, ValueError):
                 continue
-        if durations: annual = durations
+        annual = durations
 
         # One period may appear in several later filings. Deduplicate by period
         # end and prefer the latest filed value so restatements win.
@@ -800,7 +863,7 @@ def safe_extract_sec(facts, namespace, concept):
                 by_end[x["end"]] = x
         distinct = sorted(by_end.values(), key=lambda x: x["end"], reverse=True)
         if not distinct: return None, []
-        return distinct[0].get("val"), [x.get("val") for x in distinct[:5]]
+        return distinct[0].get("val"), (distinct[:6] if with_dates else [x.get("val") for x in distinct[:6]])
     except (KeyError, TypeError, ValueError) as exc:
         _sec_diag("xbrl_select", f"{namespace}:{concept}", False, error=exc)
         return None, []
@@ -889,7 +952,7 @@ def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
 
         for exp_str in future_exps[:2]:   # Only 2 expirations for token efficiency
             try:
-                days_out = (datetime.strptime(exp_str, "%Y-%m-%d") - TODAY).days
+                days_out = (datetime.strptime(exp_str, "%Y-%m-%d").date() - TODAY.date()).days
                 calls_df = puts_df = None
 
                 # Try slicing by (symbol, expiration, optionType)
@@ -917,6 +980,9 @@ def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
                 if calls_df is None or calls_df.empty or "strike" not in calls_df.columns:
                     continue
 
+                calls_df = calls_df.sort_values("strike").copy()
+                if puts_df is not None and "strike" in puts_df:
+                    puts_df = puts_df.sort_values("strike").copy()
                 calls_df["dist"] = abs(calls_df["strike"] - current_price)
                 atm_idx    = calls_df["dist"].idxmin()
                 atm_strike = float(calls_df.loc[atm_idx, "strike"])
@@ -926,14 +992,27 @@ def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
                 def row_to_opt(r):
                     return {"strike": safe_float(r.get("strike")), "bid": safe_float(r.get("bid")),
                             "ask": safe_float(r.get("ask")), "iv": safe_float(r.get("impliedVolatility")),
-                            "open_interest": safe_int(r.get("openInterest")),
-                            "volume": safe_int(r.get("volume")),
+                            "open_interest": safe_float(r.get("openInterest")),
+                            "volume": safe_float(r.get("volume")),
+                            "last": safe_float(r.get("lastPrice")),
+                            "last_trade_date": str(r.get("lastTradeDate") or ""),
                             "in_the_money": bool(r.get("inTheMoney", False))}
 
                 chain_data = {"expiration": exp_str, "days_to_exp": days_out,
                               "atm_strike": atm_strike,
                               "calls": [row_to_opt(r) for _, r in otm_calls.iterrows()],
                               "puts":  [row_to_opt(r) for _, r in otm_puts.iterrows()]}
+                def total(frame, column):
+                    if frame is None or frame.empty or column not in frame:
+                        return None
+                    return safe_float(pd.to_numeric(frame[column], errors="coerce").sum(min_count=1))
+                call_oi, put_oi = total(calls_df, "openInterest"), total(puts_df, "openInterest")
+                chain_data["all_strikes_summary"] = {
+                    "call_open_interest": call_oi, "put_open_interest": put_oi,
+                    "put_call_oi_ratio": positive_ratio(put_oi, call_oi),
+                    "call_volume": total(calls_df, "volume"), "put_volume": total(puts_df, "volume"),
+                    "call_contracts": len(calls_df), "put_contracts": len(puts_df) if puts_df is not None else 0,
+                    "basis": "Sums of available observations across returned strikes for this expiration; coverage may be partial. Open interest is not directional order flow."}
                 result["chains"].append(chain_data)
 
                 atm_iv = safe_float(calls_df.loc[atm_idx, "impliedVolatility"])
@@ -1110,14 +1189,15 @@ def detect_chart_patterns(hist: pd.DataFrame, current_price: float):
     close  = hist["Close"]; high = hist["High"]; low = hist["Low"]; volume = hist["Volume"]
     ma20   = close.rolling(20).mean(); ma50 = close.rolling(50).mean(); ma200 = close.rolling(200).mean()
 
-    if len(ma50.dropna()) > 30 and len(ma200.dropna()) > 30:
-        a50 = ma50.dropna().values; a200 = ma200.dropna().values
-        n = min(len(a50), len(a200))
-        for i in range(max(1, n-20), n):
-            if a50[i] > a200[i] and a50[i-1] <= a200[i-1]:
-                patterns.append("GOLDEN CROSS: 50MA crossed above 200MA recently."); break
-            if a50[i] < a200[i] and a50[i-1] >= a200[i-1]:
-                patterns.append("DEATH CROSS: 50MA crossed below 200MA recently."); break
+    aligned_ma = pd.concat([ma50.rename("fast"), ma200.rename("slow")], axis=1).dropna()
+    recent = aligned_ma.tail(21)
+    for i in range(1, len(recent)):
+        previous = recent.fast.iloc[i-1] - recent.slow.iloc[i-1]
+        current = recent.fast.iloc[i] - recent.slow.iloc[i]
+        if current > 0 and previous <= 0:
+            patterns.append("GOLDEN CROSS: 50MA crossed above 200MA recently."); break
+        if current < 0 and previous >= 0:
+            patterns.append("DEATH CROSS: 50MA crossed below 200MA recently."); break
 
     bb_mid = close.rolling(20).mean(); bb_std = close.rolling(20).std()
     bb_up  = bb_mid + 2*bb_std;        bb_lo  = bb_mid - 2*bb_std
@@ -1133,9 +1213,9 @@ def detect_chart_patterns(hist: pd.DataFrame, current_price: float):
     ema12 = close.ewm(span=12, adjust=False).mean(); ema26 = close.ewm(span=26, adjust=False).mean()
     macd  = ema12 - ema26; sig = macd.ewm(span=9, adjust=False).mean(); hist_m = macd - sig
     mv, sv, hv = safe_float(macd.iloc[-1]), safe_float(sig.iloc[-1]), safe_float(hist_m.iloc[-1])
-    if mv and sv:
-        if mv > sv and hist_m.iloc[-2] <= sig.iloc[-2]:   patterns.append("MACD BULLISH CROSSOVER: MACD just crossed above signal line.")
-        elif mv < sv and hist_m.iloc[-2] >= sig.iloc[-2]: patterns.append("MACD BEARISH CROSSOVER: MACD just crossed below signal line.")
+    if mv is not None and sv is not None:
+        if mv > sv and hist_m.iloc[-2] <= 0:   patterns.append("MACD BULLISH CROSSOVER: MACD just crossed above signal line.")
+        elif mv < sv and hist_m.iloc[-2] >= 0: patterns.append("MACD BEARISH CROSSOVER: MACD just crossed below signal line.")
         elif mv > 0 and sv > 0: patterns.append("MACD BULLISH: Both MACD and signal above zero.")
         elif mv < 0 and sv < 0: patterns.append("MACD BEARISH: Both MACD and signal below zero.")
     key_levels["macd"] = mv; key_levels["macd_signal"] = sv; key_levels["macd_hist"] = hv
@@ -1204,7 +1284,7 @@ def detect_chart_patterns(hist: pd.DataFrame, current_price: float):
     if len(volume) > 20:
         avg_v = volume.tail(20).mean(); last_v = volume.iloc[-1]
         vr    = safe_divide(last_v, avg_v)
-        if vr > 2.5:  patterns.append(f"VOLUME SURGE: {vr:.1f}x 20-day avg — possible institutional activity.")
+        if vr > 2.5:  patterns.append(f"VOLUME SURGE: {vr:.1f}x 20-day avg — unusual trading activity; participants unknown.")
         elif vr < 0.4: patterns.append(f"LOW VOLUME: {vr:.1f}x 20-day avg — weak conviction.")
 
     if len(close) >= 40:
@@ -1280,9 +1360,9 @@ def analyze_institutional(hist: pd.DataFrame) -> dict:
         slope = np.polyfit(np.arange(len(recent_obv)), recent_obv.values, 1)[0]
         out["obv_trend"] = "RISING" if slope > 0 else "FALLING"
     last20 = hist.tail(20)
-    up_v = last20.loc[last20["Close"] >= last20["Open"], "Volume"].sum()
-    dn_v = last20.loc[last20["Close"] <  last20["Open"], "Volume"].sum()
-    if (up_v+dn_v) > 0: out["up_vol_ratio"] = safe_float(up_v/(up_v+dn_v))
+    up_v = vol.where(ret > 0, 0).tail(20).sum()
+    total_v = vol.tail(20).sum()
+    if total_v > 0: out["up_vol_ratio"] = safe_float(up_v / total_v)
     avg_vol  = vol.tail(50).mean()
     rng      = (hist["High"] - hist["Low"]).replace(0, np.nan)
     close_pos= (close - hist["Low"]) / rng
@@ -1512,7 +1592,7 @@ def generate_analysis_payload(query: str) -> dict:
         company_name = (facts or {}).get("entityName", ticker)
 
         def sec_val(ns, concept):
-            return safe_extract_sec(facts, ns, concept) if facts else (None, [])
+            return safe_extract_sec(facts, ns, concept, with_dates=True) if facts else (None, [])
 
         sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
         if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
@@ -1525,9 +1605,7 @@ def generate_analysis_payload(query: str) -> dict:
             sec_equity_val, _ = sec_val("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
         sec_ocf_val,    _  = sec_val("us-gaap", "NetCashProvidedByUsedInOperatingActivities")
 
-        if len(sec_rev_hist) >= 3 and sec_rev_hist[2] and sec_rev_hist[2] > 0:
-            try: sec_rev_cagr = ((sec_rev_hist[0] / sec_rev_hist[2]) ** 0.5) - 1
-            except: pass
+        sec_rev_cagr = annual_cagr(sec_rev_hist, 3)
 
         latest_10k = next((f for f in filings if f["form"] in ("10-K", "10-K/A")), None)
         if latest_10k:
@@ -1650,10 +1728,10 @@ def generate_analysis_payload(query: str) -> dict:
         "day_high":       safe_float(fh_quote.get("h")) or safe_float(pm.get("regularMarketDayHigh")),
         "day_low":        safe_float(fh_quote.get("l")) or safe_float(pm.get("regularMarketDayLow")),
         "previous_close": safe_float(fh_quote.get("pc")) or safe_float(pm.get("regularMarketPreviousClose")),
-        "bid":            safe_float(pm.get("bid") or sd.get("bid")),
-        "ask":            safe_float(pm.get("ask") or sd.get("ask")),
-        "bid_size":       pm.get("bidSize") or sd.get("bidSize"),
-        "ask_size":       pm.get("askSize") or sd.get("askSize"),
+        "bid":            first_number(pm.get("bid"), sd.get("bid")),
+        "ask":            first_number(pm.get("ask"), sd.get("ask")),
+        "bid_size":       first_number(pm.get("bidSize"), sd.get("bidSize")),
+        "ask_size":       first_number(pm.get("askSize"), sd.get("askSize")),
         "market_state":   pm.get("marketState"),
         "currency":       fh_profile.get("currency") or pm.get("currency"),
         "exchange":       fh_profile.get("exchange") or pm.get("exchangeName") or pm.get("exchange"),
@@ -1696,43 +1774,20 @@ def generate_analysis_payload(query: str) -> dict:
     ma_50  = hist["Close"].rolling(50).mean().iloc[-1]  if not hist.empty else None
     ma_200 = hist["Close"].rolling(200).mean().iloc[-1] if not hist.empty else None
 
-    rsi_latest = 50.0
-    if not hist.empty:
-        delta    = hist["Close"].diff()
-        gain     = delta.where(delta > 0, 0.0)
-        loss     = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        rs = safe_divide(avg_gain.iloc[-1], avg_loss.iloc[-1], 1.0)
-        rsi_latest = 100 - (100 / (1 + rs))
+    rsi_latest = safe_float(wilder_rsi(hist["Close"]).iloc[-1]) if not hist.empty else None
 
     avg_volume   = hist["Volume"].rolling(20).mean().iloc[-1] if not hist.empty else 0
     latest_volume= hist["Volume"].iloc[-1]                    if not hist.empty else 0
     volume_ratio = safe_divide(latest_volume, avg_volume) if avg_volume > 0 else 1.0
 
-    cagr = annual_vol = sharpe = max_drawdown = 0.0; beta = np.nan
-    rf_rate = 0.045
-    if not hist.empty and len(hist) > 200:
-        daily_returns = hist["Close"].pct_change().dropna()
-        years = len(hist) / 252
-        cagr  = ((safe_divide(latest, hist["Close"].iloc[0])) ** (1/years)) - 1 if years > 0 else 0
-        annual_vol   = daily_returns.std() * np.sqrt(252)
-        cumulative   = (1 + daily_returns).cumprod()
-        peak         = cumulative.expanding(min_periods=1).max()
-        max_drawdown = safe_divide((cumulative - peak), peak).min()
-        try:
-            tnx = YQData("^TNX")
-            r   = safe_float(tnx.price_mod.get("regularMarketPrice"))
-            if r: rf_rate = r / 100
-        except: pass
-        sharpe = safe_divide((cagr - rf_rate), annual_vol)
-        if not spy_hist.empty:
-            spy_ret = spy_hist["Close"].pct_change().dropna()
-            aligned = pd.DataFrame({"stock": daily_returns, "spy": spy_ret}).dropna()
-            if len(aligned) > 30:
-                beta = safe_divide(aligned["stock"].cov(aligned["spy"]), aligned["spy"].var())
-
-    spy_vol = spy_hist["Close"].pct_change().dropna().std() * np.sqrt(252) if not spy_hist.empty else np.nan
+    # Risk uses adjusted closes, not the live quote or price-only chart series.
+    risk_prices, risk_spy = adjusted_close(hist), adjusted_close(spy_hist)
+    bill_hist = YQData("^IRX").history(period="5y", interval="1d") if not risk_prices.empty else pd.DataFrame()
+    bill_yields = bill_hist["Close"] / 100 if not bill_hist.empty and "Close" in bill_hist else None
+    risk = risk_statistics(risk_prices, risk_spy, bill_yields)
+    cagr, annual_vol, sharpe, max_drawdown, beta = (risk[k] for k in
+        ("cagr", "annual_volatility", "sharpe", "max_drawdown", "beta"))
+    spy_vol = risk_statistics(risk_spy).get("annual_volatility")
 
     chart_patterns, key_levels = detect_chart_patterns(hist, latest or 0)
 
@@ -1743,43 +1798,40 @@ def generate_analysis_payload(query: str) -> dict:
     market_regime = classify_market_regime(hist, price_action, institutional)
 
     # ── Valuation (yahoo modules with FMP fallback) ────────────────────────────
-    pe_trail  = safe_float(sd.get("trailingPE")     or ks.get("trailingPE")     or fh_metrics.get("peTTM") or fmp_m.get("peRatioTTM"))
-    pe_fwd    = safe_float(sd.get("forwardPE")      or ks.get("forwardPE"))
-    peg       = safe_float(ks.get("pegRatio")       or fh_metrics.get("pegTTM") or fmp_m.get("pegRatioTTM"))
-    pb        = safe_float(ks.get("priceToBook")    or fh_metrics.get("pbAnnual") or fh_metrics.get("pbQuarterly") or fmp_m.get("pbRatioTTM"))
-    ps        = safe_float(ks.get("priceToSalesTrailingTwelveMonths") or sd.get("priceToSalesTrailingTwelveMonths") or fh_metrics.get("psTTM"))
-    ev_ebitda = safe_float(ks.get("enterpriseToEbitda") or fh_metrics.get("evToEbitdaTTM") or fmp_m.get("evToEbitdaTTM") or fmp_m.get("enterpriseValueMultipleTTM"))
-    mkt_cap   = safe_float(live_quote.get("market_cap") or sd.get("marketCap") or pm.get("marketCap"))
-    ev        = safe_float(ks.get("enterpriseValue") or fmp_m.get("enterpriseValueTTM"))
-    fcf       = safe_float(fd.get("freeCashflow"))
-    rev_yf    = safe_float(fd.get("totalRevenue"))
-    fcf_margin= safe_divide(fcf, rev_yf)  if is_valid(fcf) and is_valid(rev_yf) and rev_yf else None
-    fcf_yield = safe_divide(fcf, mkt_cap) if is_valid(fcf) and is_valid(mkt_cap) and mkt_cap else None
+    pe_trail = first_number(sd.get("trailingPE"), ks.get("trailingPE"), fh_metrics.get("peTTM"), fmp_m.get("peRatioTTM"))
+    pe_fwd = first_number(sd.get("forwardPE"), ks.get("forwardPE"))
+    peg = first_number(ks.get("pegRatio"), fh_metrics.get("pegTTM"), fmp_m.get("pegRatioTTM"))
+    pb = first_number(ks.get("priceToBook"), fh_metrics.get("pbAnnual"), fh_metrics.get("pbQuarterly"), fmp_m.get("pbRatioTTM"))
+    ps = first_number(ks.get("priceToSalesTrailingTwelveMonths"), sd.get("priceToSalesTrailing12Months"), sd.get("priceToSalesTrailingTwelveMonths"), fh_metrics.get("psTTM"))
+    ev_ebitda = first_number(ks.get("enterpriseToEbitda"), fh_metrics.get("evToEbitdaTTM"), fmp_m.get("evToEbitdaTTM"), fmp_m.get("enterpriseValueMultipleTTM"))
+    mkt_cap = first_number(live_quote.get("market_cap"), sd.get("marketCap"), pm.get("marketCap"))
+    ev = first_number(ks.get("enterpriseValue"), fmp_m.get("enterpriseValueTTM"))
+    fcf, rev_yf = safe_float(fd.get("freeCashflow")), safe_float(fd.get("totalRevenue"))
+    fcf_margin = positive_ratio(fcf, rev_yf)
+    # A quoted market cap may use a different currency from the financial statements.
+    financial_currency = fd.get("financialCurrency")
+    currencies_match = bool(financial_currency and live_quote.get("currency") == financial_currency)
+    fcf_yield = positive_ratio(fcf, mkt_cap) if currencies_match else None
 
-    # ── Margins & profitability ────────────────────────────────────────────────
-    gross_m = safe_float(fd.get("grossMargins")) if safe_float(fd.get("grossMargins")) is not None else safe_fraction(fh_metrics.get("grossMarginTTM") or fmp_m.get("grossProfitMarginTTM"))
-    op_m    = safe_float(fd.get("operatingMargins")) if safe_float(fd.get("operatingMargins")) is not None else safe_fraction(fh_metrics.get("operatingMarginTTM") or fmp_m.get("operatingProfitMarginTTM"))
-    net_m   = safe_float(fd.get("profitMargins")) if safe_float(fd.get("profitMargins")) is not None else safe_fraction(fh_metrics.get("netProfitMarginTTM") or fmp_m.get("netProfitMarginTTM"))
-    roe     = safe_float(fd.get("returnOnEquity")) if safe_float(fd.get("returnOnEquity")) is not None else safe_fraction(fh_metrics.get("roeTTM") or fmp_m.get("roeTTM"))
-    roa     = safe_float(fd.get("returnOnAssets")) if safe_float(fd.get("returnOnAssets")) is not None else safe_fraction(fh_metrics.get("roaTTM") or fmp_m.get("roaTTM"))
+    # Yahoo/FMP fields are fractions; Finnhub margin/return fields are percentages.
+    gross_m = first_number(fd.get("grossMargins"), percent_fraction(fh_metrics.get("grossMarginTTM")), fmp_m.get("grossProfitMarginTTM"))
+    op_m = first_number(fd.get("operatingMargins"), percent_fraction(fh_metrics.get("operatingMarginTTM")), fmp_m.get("operatingProfitMarginTTM"))
+    net_m = first_number(fd.get("profitMargins"), percent_fraction(fh_metrics.get("netProfitMarginTTM")), fmp_m.get("netProfitMarginTTM"))
+    roe = first_number(fd.get("returnOnEquity"), percent_fraction(fh_metrics.get("roeTTM")), fmp_m.get("roeTTM"))
+    roa = first_number(fd.get("returnOnAssets"), percent_fraction(fh_metrics.get("roaTTM")), fmp_m.get("roaTTM"))
 
-    # ── Revenue growth from yahooquery income statement ────────────────────────
-    rev_1y = rev_3y = rev_5y = None; rev_shrinking = False
-    revs = _stmt_series(inc_df, "TotalRevenue", "Revenue", "Total Revenue", n=5)
-    if len(revs) >= 2 and revs[0] and revs[1]: rev_1y = safe_divide(revs[0], revs[1]) - 1
-    if len(revs) >= 4 and revs[0] and revs[3]: rev_3y = ((safe_divide(revs[0], revs[3])) ** (1/3)) - 1
-    if len(revs) >= 5 and revs[0] and revs[4]: rev_5y = ((safe_divide(revs[0], revs[4])) ** (1/4)) - 1
-    if rev_3y is not None and rev_3y < 0: rev_shrinking = True
+    revenue_rows = statement_rows(inc_df, "TotalRevenue", "Revenue", "Total Revenue")
+    rev_1y, rev_3y, rev_5y = (annual_cagr(revenue_rows, n) for n in (1, 3, 5))
+    rev_shrinking = rev_3y is not None and rev_3y < 0
 
-    # ── Financial health ──────────────────────────────────────────────────────
-    curr_ratio = safe_float(fd.get("currentRatio") or fh_metrics.get("currentRatioAnnual") or fh_metrics.get("currentRatioQuarterly") or fmp_m.get("currentRatioTTM"))
-    debt_eq    = safe_float(fd.get("debtToEquity") or fh_metrics.get("totalDebt/totalEquityAnnual") or fh_metrics.get("totalDebt/totalEquityQuarterly") or fmp_m.get("debtToEquityTTM"))
-    ocf_val    = _stmt_val(cf_df, "OperatingCashFlow", "Operating Cash Flow")
-    ni_val     = _stmt_val(inc_df, "NetIncome", "Net Income")
-    earnings_quality = safe_divide(ocf_val, ni_val) if is_valid(ocf_val) and is_valid(ni_val) and ni_val else None
+    curr_ratio = first_number(fd.get("currentRatio"), fh_metrics.get("currentRatioAnnual"), fh_metrics.get("currentRatioQuarterly"), fmp_m.get("currentRatioTTM"))
+    # Yahoo debtToEquity is percent; Finnhub/FMP ratios are multiples.
+    debt_eq = first_number(percent_fraction(fd.get("debtToEquity")), fh_metrics.get("totalDebt/totalEquityAnnual"), fh_metrics.get("totalDebt/totalEquityQuarterly"), fmp_m.get("debtToEquityTTM"))
+    ocf_val, ni_val, earnings_quality_period = matched_cash_income(cf_df, inc_df)
+    earnings_quality = positive_ratio(ocf_val, ni_val)
 
     # ── Sentiment & analyst targets ───────────────────────────────────────────
-    short_float = safe_float(ks.get("shortPercentOfFloat") or ks.get("shortPercent"))
+    short_float = safe_float(ks.get("shortPercentOfFloat"))
     target_mean = safe_float(fd.get("targetMeanPrice"))
     target_high = safe_float(fd.get("targetHighPrice"))
     target_low  = safe_float(fd.get("targetLowPrice"))
@@ -1798,15 +1850,31 @@ def generate_analysis_payload(query: str) -> dict:
             est = safe_float(row.get("epsEstimate"))
             rep = safe_float(row.get("epsActual"))
             if est is not None and rep is not None:
-                surprise = safe_divide((rep - est), abs(est)) if est != 0 else 0
-                date_val = str(row.get("period",""))[:10] or str(row.get("quarter",""))[:10]
+                surprise = positive_ratio(rep - est, abs(est))
+                date_val = str(row.get("quarter", ""))[:10] or str(row.get("period", ""))[:10]
                 recent_earnings.append({"date": date_val, "estimate": float(est),
-                                        "reported": float(rep), "surprise_pct": float(surprise)})
+                                        "reported": float(rep), "surprise_pct": surprise})
                 if rep > est: beats += 1
                 elif rep < est: misses += 1
 
+    # One optional Yahoo module; all other evidence reuses already fetched data.
+    yahoo_evidence = {
+        "source": "Yahoo Finance via yahooquery", "snapshot_date": TODAY.strftime("%Y-%m-%d"),
+        "financial_currency": financial_currency, "price_basis": "dividend-adjusted close",
+        "return_windows": return_windows(risk_prices, risk_spy),
+        "downside_basis": "Annualized RMS of negative daily returns, zero target, all window sessions in denominator",
+        "annual_revenue": revenue_rows[:6],
+        "annual_net_income": statement_rows(inc_df, "NetIncome")[:6],
+        "annual_operating_cash_flow": statement_rows(cf_df, "OperatingCashFlow")[:6],
+        "estimate_trends": estimate_evidence(yqd.earnings_trend),
+        "limitations": "Current Yahoo snapshots, not point-in-time backtest data. Missing fields are unavailable. Analyst consensus is not a guarantee."}
+
     # ── Algorithmic flags ─────────────────────────────────────────────────────
     flags, data_warnings = [], []
+    if not currencies_match:
+        data_warnings.append("FCF yield unavailable: statement and market-cap currency could not be matched.")
+    if filing_signals.get("truncated"):
+        data_warnings.append("SEC transaction counts are partial because the document-fetch cap was reached; do not infer net insider buying or selling from counts.")
     if FINNHUB_API_KEY and not finnhub.get("available"):
         data_warnings.append("Finnhub was configured but returned no usable quote, profile, metrics, or news data; Yahoo fallback data was used where available.")
     for item in SEC_DIAGNOSTICS:
@@ -1821,7 +1889,7 @@ def generate_analysis_payload(query: str) -> dict:
     if is_valid(peg, -10, 50):
         if peg < 0: flags.append("NEGATIVE PEG: negative earnings growth or anomaly.")
         elif peg > 5: flags.append(f"EXTREME PEG: {peg:.2f} — massive overvaluation or negative growth.")
-    if is_valid(debt_eq, 0, 5000) and debt_eq > 500: flags.append(f"EXTREME LEVERAGE: D/E {debt_eq:.2f} (>500).")
+    if is_valid(debt_eq, 0) and debt_eq > 5: flags.append(f"EXTREME LEVERAGE: D/E {debt_eq:.2f}x (>5x).")
     if is_valid(earnings_quality) and ni_val and ni_val > 0 and earnings_quality < 0.5:
         flags.append("RED FLAG: Earnings Quality < 0.5 — cash flow doesn't match profits.")
 
@@ -1831,13 +1899,13 @@ def generate_analysis_payload(query: str) -> dict:
         if sec_liab_val and sec_equity_val and sec_equity_val != 0:
             lev = safe_divide(sec_liab_val, sec_equity_val)
             if lev > 2.0: flags.append(f"HIGH LEVERAGE: Liabilities {lev:.1f}x Equity (SEC).")
-        if filing_signals["insider_buys"] > filing_signals["insider_sells"] > 0:
-            flags.append(f"NET INSIDER BUYING: {filing_signals['insider_buys']}B vs {filing_signals['insider_sells']}S (Form 4, 90D).")
+        if filing_signals["insider_buys"] > filing_signals["insider_sells"]:
+            flags.append(f"MORE REPORTED PURCHASE TRANSACTIONS: {filing_signals['insider_buys']}B vs {filing_signals['insider_sells']}S (Form 4 counts, {SIGNAL_WINDOW_DAYS}D; not net value).")
         elif filing_signals["insider_sells"] >= 5 and filing_signals["insider_sells"] > filing_signals["insider_buys"]:
-            flags.append(f"HEAVY INSIDER SELLING: {filing_signals['insider_sells']}S vs {filing_signals['insider_buys']}B (90D).")
+            flags.append(f"MORE REPORTED SALE TRANSACTIONS: {filing_signals['insider_sells']}S vs {filing_signals['insider_buys']}B (Form 4 counts, {SIGNAL_WINDOW_DAYS}D; not net value).")
         if filing_signals["activist_13d"]: flags.append("ACTIVIST ALERT: New 13D — large position building.")
 
-    if is_valid(peg) and rev_3y is not None:
+    if is_valid(peg, 0) and peg > 0 and rev_3y is not None:
         if peg < 1.0 and rev_shrinking: flags.append(f"FAKE VALUE: PEG {peg:.2f} but 3Y Rev CAGR negative ({rev_3y:.2%}).")
         elif peg < 1.0: flags.append(f"FUNDAMENTAL VALUE: PEG {peg:.2f} (< 1.0).")
         elif peg > 2.0 and rev_3y < 0.05: flags.append(f"EXPENSIVE STABILITY: PEG {peg:.2f} with {rev_3y:.2%} 3Y growth.")
@@ -1847,13 +1915,13 @@ def generate_analysis_payload(query: str) -> dict:
         elif latest < ma_50 < ma_200: flags.append("BEARISH ALIGNMENT: Price < 50MA < 200MA.")
         elif latest > ma_50 and latest < ma_200: flags.append("RECOVERY MODE: Price > 50MA but < 200MA.")
 
-    if rsi_latest > 75:    flags.append("EXTREME OVERBOUGHT: RSI > 75.")
-    elif rsi_latest >= 65: flags.append("MOMENTUM STRETCH: RSI ≥ 65.")
-    elif rsi_latest < 25:  flags.append("EXTREME OVERSOLD: RSI < 25.")
+    if rsi_latest is not None and rsi_latest > 75:    flags.append("EXTREME OVERBOUGHT: RSI > 75.")
+    elif rsi_latest is not None and rsi_latest >= 65: flags.append("MOMENTUM STRETCH: RSI ≥ 65.")
+    elif rsi_latest is not None and rsi_latest < 25:  flags.append("EXTREME OVERSOLD: RSI < 25.")
 
     if daily_change > 0 and volume_ratio < 0.85: flags.append(f"WEAK CONFIRMATION: Up day on {volume_ratio:.2f}x avg vol.")
     if pct_from_5y_high < -0.50: flags.append(f"CYCLE LOWS: {pct_from_5y_high:.1%} from 5Y high.")
-    if is_valid(spy_vol) and spy_vol > 0 and (annual_vol/spy_vol) > 2.5:
+    if is_valid(annual_vol) and is_valid(spy_vol) and spy_vol > 0 and (annual_vol/spy_vol) > 2.5:
         flags.append(f"EXTREME RISK: {annual_vol/spy_vol:.1f}x more volatile than SPY.")
     if is_valid(short_float) and short_float > 0.10: flags.append(f"HIGH SHORT INTEREST: {short_float:.1%} of float.")
     if misses >= 3: flags.append(f"EARNINGS: Missed estimates {misses}/4 recent quarters.")
@@ -1864,8 +1932,8 @@ def generate_analysis_payload(query: str) -> dict:
                "RANGE / TRANSITION":"STRUCTURE TRANSITION"}[price_action["trend"]]
         flags.append(f"{cls}: {price_action['trend_basis']}")
     for ev in price_action.get("events", []): flags.append(ev)
-    if institutional.get("net_bias") == "ACCUMULATION":  flags.append("INSTITUTIONAL ACCUMULATION: volume footprint → net buying.")
-    elif institutional.get("net_bias") == "DISTRIBUTION": flags.append("INSTITUTIONAL DISTRIBUTION: volume footprint → net selling.")
+    if institutional.get("net_bias") == "ACCUMULATION":  flags.append("ACCUMULATION PROXY: price/volume pattern; participant identity unknown.")
+    elif institutional.get("net_bias") == "DISTRIBUTION": flags.append("DISTRIBUTION PROXY: price/volume pattern; participant identity unknown.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # BUILD OPTIMISED AI PROMPT  (compact — ~40% fewer input tokens than v1)
@@ -1889,12 +1957,13 @@ Rev CAGR 3Y (SEC): {fmt(sec_rev_cagr,'pct')}
 
     # FMP cross-check (compact block, only if available)
     if fmp:
-        fmp_rev_ttm = safe_float(fmp_inc.get("revenue"))
-        fmp_ni_ttm  = safe_float(fmp_inc.get("netIncome"))
-        fmp_fcf_ttm = safe_float(fmp_cf.get("freeCashFlow"))
+        fmp_rev_annual = safe_float(fmp_inc.get("revenue"))
+        fmp_ni_annual  = safe_float(fmp_inc.get("netIncome"))
+        fmp_fcf_annual = safe_float(fmp_cf.get("freeCashFlow"))
         ai_prompt += f"""
-### 2b. FMP CROSS-CHECK (TTM)
-Rev/NI/FCF: {fmt(fmp_rev_ttm,'usd')} / {fmt(fmp_ni_ttm,'usd')} / {fmt(fmp_fcf_ttm,'usd')}
+### 2b. FMP CROSS-CHECK (annual statements; TTM multiples)
+Statement dates: income {fmp_inc.get("date", "unavailable")}; cash flow {fmp_cf.get("date", "unavailable")}
+Rev/NI/FCF: {fmt(fmp_rev_annual,'usd')} / {fmt(fmp_ni_annual,'usd')} / {fmt(fmp_fcf_annual,'usd')}
 P/E: {fmt(fmp_m.get('peRatioTTM'),'ratio')} | EV/EBITDA: {fmt(fmp_m.get('evToEbitdaTTM'),'ratio')} | ROE: {fmt(fmp_m.get('roeTTM'),'pct')} | D/E: {fmt(fmp_m.get('debtToEquityTTM'),'ratio')}
 """
 
@@ -1909,14 +1978,15 @@ Margins (Gross/Op/Net): {fmt(gross_m,'pct')} / {fmt(op_m,'pct')} / {fmt(net_m,'p
 Rev Growth (1Y/3Y/5Y): {fmt(rev_1y,'pct')} / {fmt(rev_3y,'pct')} / {fmt(rev_5y,'pct')}
 
 ### 5. FINANCIAL HEALTH
-Current Ratio: {fmt(curr_ratio,'ratio')} | D/E: {fmt(debt_eq,'ratio')} | Earnings Quality (OCF/NI): {fmt(earnings_quality,'ratio')}
+Current Ratio: {fmt(curr_ratio,'ratio')} | D/E: {fmt(debt_eq,'ratio')} | Earnings Quality (annual OCF/NI, {earnings_quality_period or "unavailable"}): {fmt(earnings_quality,'ratio')}
 
 ### 6. PRICE & MOMENTUM ({TODAY_STR})
 Price: {fmt(latest,'usd')} ({fmt(daily_change,'pct')} today) | Bid/Ask: {fmt(live_quote.get('bid'),'usd')}/{fmt(live_quote.get('ask'),'usd')} | Market: {live_quote.get('market_state','N/A')}
 52W Range: {fmt(low_52w,'usd')}–{fmt(high_52w,'usd')} ({fmt(pct_from_52_high,'pct')} from high)
 MA50/MA200: {fmt(ma_50,'usd')} / {fmt(ma_200,'usd')} | BB: {fmt(key_levels.get('bb_upper'),'usd')}↑ / {fmt(key_levels.get('bb_lower'),'usd')}↓
 RSI(14): {fmt(rsi_latest,'ratio')} | MACD/Signal: {fmt(key_levels.get('macd'),'ratio')}/{fmt(key_levels.get('macd_signal'),'ratio')}
-5Y CAGR/MaxDD/Sharpe/Beta/AnnVol: {fmt(cagr,'pct')} / {fmt(max_drawdown,'pct')} / {fmt(sharpe,'ratio')} / {fmt(beta,'ratio')} / {fmt(annual_vol,'pct')}
+Adjusted returns ({risk["period_start"] or "unavailable"} to {risk["period_end"] or "unavailable"}, {risk["observations"]} observations): CAGR/MaxDD/Sharpe/Beta/AnnVol: {fmt(cagr,'pct')} / {fmt(max_drawdown,'pct')} / {fmt(sharpe,'ratio')} / {fmt(beta,'ratio')} / {fmt(annual_vol,'pct')}
+Sharpe basis: {risk["sharpe_basis"]}. CAGR needs at least one year. Missing adjusted data/rates remain unavailable.
 Volume: {fmt(volume_ratio,'ratio')}x 20D avg
 """
 
@@ -1947,7 +2017,8 @@ Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(shor
 
     if sec_available:
         ai_prompt += f"""
-### 11. SEC SIGNALS (Last 90D)
+### 11. SEC SIGNALS (Last {SIGNAL_WINDOW_DAYS}D; transaction counts, not net dollars)
+Coverage: {"TRUNCATED: newest filings only" if filing_signals.get("truncated") else "within configured scan"}; {filing_signals.get("detail_fetches", 0)} documents fetched.
 8-K: {', '.join(filing_signals['8k_events']) if filing_signals['8k_events'] else 'None'} | Form 4: {filing_signals['insider_buys']}B/{filing_signals['insider_sells']}S | Activist 13D: {'YES' if filing_signals['activist_13d'] else 'No'}
 """
 
@@ -1955,7 +2026,7 @@ Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(shor
     for f in (flags or ["NEUTRAL: No strong signals."]): ai_prompt += f"- {f}\n"
 
     ai_prompt += f"""
-### 12b. PRICE STRUCTURE & INSTITUTIONAL FOOTPRINT
+### 12b. PRICE STRUCTURE & VOLUME PROXIES (not identified institutional trades)
 Trend: {price_action.get('trend','N/A')} — {price_action.get('trend_basis','')}
 Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_action.get('recent_swing_low'),'usd')} | Events: {'; '.join(price_action.get('events',[])) or 'None'}
 """
@@ -1964,6 +2035,9 @@ Swing H/L: {fmt(price_action.get('recent_swing_high'),'usd')} / {fmt(price_actio
 
     ai_prompt += f"OBV: {institutional.get('obv_trend','N/A')} | Up-Vol%: {fmt(institutional.get('up_vol_ratio'),'pct')} | Acc/Dist days: {institutional.get('accumulation_days',0)}/{institutional.get('distribution_days',0)} | Bias: {institutional.get('net_bias','NEUTRAL')}\n"
     for s in institutional.get("signals",[]): ai_prompt += f"- {s}\n"
+
+    ai_prompt += "\n### YAHOO EVIDENCE (fractions unless explicitly labeled otherwise)\n" + json.dumps(yahoo_evidence, allow_nan=False, separators=(",", ":")) + "\n"
+    ai_prompt += "Options coverage: " + json.dumps([{"expiration": c["expiration"], "summary": c.get("all_strikes_summary")} for c in options_data.get("chains", [])], allow_nan=False) + "\n"
 
     # Separation, not "N% confidence" — see regime_for_prompt.
     _regime_prompt = regime_for_prompt(market_regime)
@@ -2070,7 +2144,7 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
                                  "net_margin": safe_float(net_m), "roe": safe_float(roe),
                                  "roa": safe_float(roa), "fcf_margin": safe_float(fcf_margin)},
             "financial_health": {"current_ratio": safe_float(curr_ratio), "debt_to_equity": safe_float(debt_eq),
-                                 "earnings_quality": safe_float(earnings_quality)},
+                                 "earnings_quality": safe_float(earnings_quality), "period_end": earnings_quality_period, "debt_to_equity_unit": "multiple"},
             "sec_fundamentals": {"revenue": safe_float(sec_rev_val), "net_income": safe_float(sec_ni_val),
                                  "assets": safe_float(sec_assets_val), "liabilities": safe_float(sec_liab_val),
                                  "equity": safe_float(sec_equity_val), "ocf": safe_float(sec_ocf_val),
@@ -2084,14 +2158,12 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
                                  "macd_signal": safe_float(key_levels.get("macd_signal")),
                                  "bb_upper": safe_float(key_levels.get("bb_upper")),
                                  "bb_lower": safe_float(key_levels.get("bb_lower"))},
-            "risk_return":      {"cagr": safe_float(cagr), "max_drawdown": safe_float(max_drawdown),
-                                 "sharpe": safe_float(sharpe), "annual_volatility": safe_float(annual_vol),
-                                 "beta": safe_float(beta)},
+            "risk_return":      risk,
             "sentiment":        {"target_mean": safe_float(target_mean), "target_high": safe_float(target_high),
                                  "target_low": safe_float(target_low), "rec_key": rec_key,
                                  "inst_ownership": safe_float(inst_own), "short_percent": safe_float(short_float)},
             "earnings_surprises": recent_earnings,
-            "key_levels":       {k: ([safe_float(x) for x in v] if isinstance(v, list) else safe_float(v))
+            "key_levels":       {k: ([safe_float(x) for x in v] if isinstance(v, list) else (v if isinstance(v, str) else safe_float(v)))
                                  for k, v in key_levels.items()}
         },
         "chart_patterns":    chart_patterns,
@@ -2123,6 +2195,7 @@ One actionable options structure using ONLY strikes/expirations from §13: strik
             "ipo": fh_profile.get("ipo"),
         },
         "price_action":      price_action,
+        "yahoo_evidence": yahoo_evidence,
         "institutional":     institutional,
         "market_regime":     market_regime,
         "algorithmic_signals": flags,

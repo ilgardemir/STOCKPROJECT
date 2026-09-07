@@ -33,7 +33,7 @@ class ScraperSafeHelperTests(unittest.TestCase):
         self.assertEqual(array.tolist(), [9.0, 0.5])
 
     def test_safe_fraction_normalizes_percentages_without_changing_ratios(self):
-        self.assertEqual(scraper.safe_fraction(25.4), 0.254)
+        self.assertEqual(scraper.safe_fraction(25.4, unit="percent"), 0.254)
         self.assertEqual(scraper.safe_fraction(0.254), 0.254)
         self.assertIsNone(scraper.safe_fraction(float("nan")))
 
@@ -197,7 +197,7 @@ class InstitutionalBiasTests(unittest.TestCase):
             "Volume": volumes,
         }, index=index)
 
-    def test_no_high_volume_days_and_falling_obv_is_not_distribution(self):
+    def test_down_day_share_uses_previous_close_even_when_candles_are_green(self):
         # A gentle drift down on dead-flat volume: OBV slopes down, but no session
         # clears the 1.4x threshold, so acc and dist are both zero. Up-volume share
         # decides instead of the tie.
@@ -206,7 +206,8 @@ class InstitutionalBiasTests(unittest.TestCase):
         self.assertEqual(out["accumulation_days"], 0)
         self.assertEqual(out["distribution_days"], 0)
         self.assertEqual(out["obv_trend"], "FALLING")
-        self.assertNotEqual(out["net_bias"], "DISTRIBUTION")
+        self.assertEqual(out["up_vol_ratio"], 0)
+        self.assertEqual(out["net_bias"], "DISTRIBUTION")
 
     def test_up_volume_share_breaks_the_tie_it_used_to_lose(self):
         # NVDA 2023-01-17 in miniature: 0/0 days, OBV falling, and 68% of volume on up

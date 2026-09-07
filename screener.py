@@ -13,6 +13,7 @@ import time
 import traceback
 from pathlib import Path
 
+from quant_utils import wilder_rsi
 import numpy as np
 import pandas as pd
 from yahooquery import Ticker
@@ -21,7 +22,7 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 6  # per-entry timestamps + `covered` set so partial runs accumulate
+CACHE_VERSION = 7  # dated-window, missing-score and current-universe rank corrections
 
 # ── Upstream backpressure ─────────────────────────────────────────────────────
 # A cold run pulls ~600 symbols twice (history + modules), which is by far the
@@ -87,20 +88,42 @@ def clamp(v, lo=0.0, hi=100.0):
 def scale(v, bad, good):
     v = finite(v)
     if v is None or bad == good:
-        return 50.0
+        return float("nan")
     return clamp((v - bad) / (good - bad) * 100.0)
 
 
 def band_score(v, ideal_low, ideal_high, outer_low, outer_high):
     """Score a value highest inside an accepted band and taper to zero outside it."""
     v = finite(v)
-    if v is None or v <= outer_low or v >= outer_high:
+    if v is None:
+        return float("nan")
+    if v <= outer_low or v >= outer_high:
         return 0.0
     if ideal_low <= v <= ideal_high:
         return 100.0
     if v < ideal_low:
         return scale(v, outer_low, ideal_low)
     return scale(v, outer_high, ideal_high)
+
+
+def blend(values):
+    """A composite requires evidence for every component; no neutral imputation."""
+    values = [finite(v) for v in values]
+    return float("nan") if not values or any(v is None for v in values) else sum(values) / len(values)
+
+
+def score_bound(value):
+    return clamp(value) if finite(value) is not None else float("nan")
+
+
+def valuation_score(value, bad, good):
+    value = finite(value)
+    return scale(value if value is not None and value > 0 else None, bad, good)
+
+
+def debt_score(value, bad, good):
+    value = finite(value)
+    return scale(value if value is not None and value >= 0 else None, bad, good)
 
 
 def cup_handle_fit(close, volume, trend_score):
@@ -144,7 +167,7 @@ def cup_handle_fit(close, volume, trend_score):
             volume_ratio = finite(handle_vol.mean() / cup_vol.mean()) if finite(cup_vol.mean(), 0) else None
             pivot = max(left_lip, right_lip)
             pivot_distance = finite(last / pivot - 1) if pivot else None
-            score = np.mean([
+            score = blend([
                 band_score(depth, .12, .33, .06, .48),
                 scale(symmetry, .16, .015),
                 scale(abs(bottom_pos - .5), .42, .05),
@@ -157,7 +180,7 @@ def cup_handle_fit(close, volume, trend_score):
             ])
             if score > best["score"]:
                 best = {
-                    "score": round(clamp(score), 1), "cup_depth": depth,
+                    "score": round(score_bound(score), 1), "cup_depth": depth,
                     "handle_depth": handle_depth, "pivot": pivot,
                     "cup_days": cup_len, "handle_days": handle_len
                 }
@@ -187,7 +210,7 @@ def double_bottom_fit(close, trend_score):
             rebound = (midpoint - min(first, second)) / midpoint
             latest = values[-1]
             pivot_distance = latest / midpoint - 1
-            score = np.mean([
+            score = blend([
                 scale(similarity, .10, .01),
                 band_score(rebound, .10, .32, .05, .50),
                 scale(abs(pivot_distance), .20, 0),
@@ -195,7 +218,7 @@ def double_bottom_fit(close, trend_score):
                 trend_score,
             ])
             if score > best["score"]:
-                best = {"score": round(clamp(score), 1), "low_similarity": similarity, "pivot": midpoint}
+                best = {"score": round(score_bound(score), 1), "low_similarity": similarity, "pivot": midpoint}
     return best
 
 
@@ -236,7 +259,7 @@ def get_history(tickers):
     frames = {}
     def load_batch(batch, label, retry=True):
         try:
-            hist = Ticker(batch, asynchronous=True, max_workers=12, timeout=25).history(period="1y", interval="1d")
+            hist = Ticker(batch, asynchronous=True, max_workers=12, timeout=25).history(period="2y", interval="1d", adj_ohlc=True)
             if not isinstance(hist, pd.DataFrame) or hist.empty:
                 return
             if isinstance(hist.index, pd.MultiIndex):
@@ -297,16 +320,16 @@ def history_features(df):
     tr = pd.concat([(h - l).abs(), (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
     atr14 = finite(tr.tail(14).mean() / last)
     atr60 = finite(tr.tail(60).mean() / last)
-    ret = lambda n: finite(last / c.iloc[-min(n + 1, len(c))] - 1, 0)
+    ret = lambda n: finite(last / c.iloc[-n - 1] - 1) if len(c) > n else None
     rng = lambda n: finite((h.tail(n).max() - l.tail(n).min()) / last)
     width15, width30, width60 = rng(15), rng(30), rng(60)
-    ma20, ma50, ma200 = (finite(c.tail(min(n, len(c))).mean()) for n in (20, 50, 200))
+    ma20, ma50, ma200 = (finite(c.tail(n).mean()) if len(c) >= n else None for n in (20, 50, 200))
     ma50_series = c.rolling(50).mean()
-    above_ma50 = finite((c.tail(60) > ma50_series.tail(60)).mean())
+    above_ma50 = finite((c.tail(60) > ma50_series.tail(60)).mean()) if len(c) >= 109 else None
     distance_ma20 = finite(last / ma20 - 1) if ma20 else None
     distance_ma50 = finite(last / ma50 - 1) if ma50 else None
-    high252 = finite(h.tail(252).max())
-    low252 = finite(l.tail(252).min())
+    high252 = finite(h.tail(252).max()) if len(h) >= 252 else None
+    low252 = finite(l.tail(252).min()) if len(l) >= 252 else None
     vol20 = finite(vol.tail(20).mean(), 0)
     vol60 = finite(vol.tail(60).mean(), 0)
     volume_ratio = finite(vol.iloc[-1] / vol20) if vol20 else None
@@ -318,30 +341,26 @@ def history_features(df):
     up_vol = finite(vol.where(c.diff() > 0, 0).tail(20).sum() / max(vol.tail(20).sum(), 1))
     daily = c.pct_change().dropna()
     volatility = finite(daily.tail(60).std() * math.sqrt(252))
-    delta = c.diff()
-    gains = delta.clip(lower=0).rolling(14).mean()
-    losses = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gains / losses.replace(0, np.nan)
-    rsi14 = finite((100 - 100 / (1 + rs)).iloc[-1], 100 if finite(gains.iloc[-1], 0) > 0 else 50)
+    rsi14 = finite(wilder_rsi(c).iloc[-1])
     positive_days = finite((daily.tail(60) > 0).mean())
-    rolling_peak = c.cummax()
-    max_drawdown = finite((c / rolling_peak - 1).tail(252).min())
+    window = c.tail(253)
+    max_drawdown = finite((window / window.cummax() - 1).min()) if len(c) >= 253 else None
     prior20 = finite(h.iloc[-21:-1].max()) if len(h) >= 21 else finite(h.iloc[:-1].max())
 
-    contraction_short = np.mean([
+    contraction_short = blend([
         scale(width15, 0.18, 0.04), scale(finite(atr14 / atr60) if atr60 else None, 1.15, 0.65),
         scale(dryup, 1.15, 0.60), scale(finite(last / high252 - 1) if high252 else None, -0.30, -0.02)
     ])
-    contraction_long = np.mean([
+    contraction_long = blend([
         scale(width60, 0.38, 0.10), scale(width30, 0.26, 0.07),
         scale(finite(atr14 / atr60) if atr60 else None, 1.15, 0.65), scale(dryup, 1.15, 0.60)
     ])
-    vcp = np.mean([
+    vcp = blend([
         100 if width15 is not None and width30 is not None and width60 is not None and width15 < width30 < width60 else 20,
         scale(finite(width15 / width60) if width60 else None, 0.85, 0.30), scale(dryup, 1.10, 0.55),
         scale(finite(last / high252 - 1) if high252 else None, -0.25, -0.02)
     ])
-    trend = np.mean([
+    trend = blend([
         100 if ma20 and ma50 and ma200 and last > ma20 > ma50 > ma200 else 45 if ma50 and ma200 and last > ma50 > ma200 else 10,
         scale(ret(60), -0.12, 0.28), scale(ret(252), -0.20, 0.50)
     ])
@@ -350,14 +369,14 @@ def history_features(df):
         bool(width15 and width30 and width15 < width30 * .80),
         bool(atr14 and atr60 and atr14 < atr60 * .85),
     ])
-    vcp_pattern = np.mean([
+    vcp_pattern = blend([
         scale(contraction_count, 0, 3), scale(finite(width15 / width60) if width60 else None, .75, .25),
         scale(dryup, 1.15, .55), scale(finite(atr14 / atr60) if atr60 else None, 1.10, .60),
         scale(finite(last / high252 - 1) if high252 else None, -.28, -.02), trend
     ])
     cup_fit = cup_handle_fit(c, vol, trend)
     double_fit = double_bottom_fit(c, trend)
-    flat_base = np.mean([
+    flat_base = blend([
         band_score(width60, .05, .16, .025, .25), scale(width30, .22, .06),
         scale(dryup, 1.15, .62), scale(finite(last / high252 - 1) if high252 else None, -.20, -.015),
         trend
@@ -368,30 +387,31 @@ def history_features(df):
     flag_pullback = finite(last / flag_peak - 1) if flag_peak else None
     flag_range = rng(10)
     flag_volume = finite(vol.tail(10).mean() / vol.iloc[-30:-10].mean()) if finite(vol.iloc[-30:-10].mean(), 0) else None
-    bull_flag = np.mean([
+    bull_flag = blend([
         band_score(flag_impulse, .10, .40, .04, .70), band_score(flag_pullback, -.12, -.01, -.22, .04),
         scale(flag_range, .18, .04), scale(flag_volume, 1.25, .62), trend
     ])
-    accumulation = np.mean([scale(up_vol, 0.38, 0.68), scale(obv_norm, -1.5, 1.5), scale(ret(20), -0.08, 0.12)])
-    breakout = np.mean([
+    accumulation = blend([scale(up_vol, 0.38, 0.68), scale(obv_norm, -1.5, 1.5), scale(ret(20), -0.08, 0.12)])
+    breakout = blend([
         scale(finite(last / prior20 - 1) if prior20 else None, -0.06, 0.04),
         scale(volume_ratio, 0.70, 2.0), scale(ret(20), -0.05, 0.18), trend
     ])
-    low_vol = np.mean([scale(volatility, 0.55, 0.14), scale(max_drawdown, -0.40, -0.08), scale(atr14, 0.045, 0.012)])
-    pullback = np.mean([trend, scale(abs(distance_ma20) if distance_ma20 is not None else None, 0.12, 0), scale(abs(distance_ma50) if distance_ma50 is not None else None, 0.18, 0)])
-    golden = np.mean([100 if ma50 and ma200 and ma50 > ma200 else 10, scale(finite(ma50 / ma200 - 1) if ma50 and ma200 else None, -0.08, 0.12), scale(distance_ma50, -0.12, 0.18)])
-    recovery = np.mean([scale(ret(20), -0.10, 0.16), scale(finite(last / high252 - 1) if high252 else None, -0.55, -0.10), scale(distance_ma20, -0.10, 0.10)])
-    stable = np.mean([scale(above_ma50, 0.30, 0.90), scale(max_drawdown, -0.40, -0.08), scale(volatility, 0.55, 0.16)])
-    efficient = np.mean([scale(ret(60), -0.12, 0.30), scale(finite(ret(60) / volatility) if volatility else None, -0.3, 1.2)])
-    momentum_short = np.mean([scale(ret(10), -.08, .15), scale(ret(20), -.10, .24), scale(rsi14, 35, 70)])
-    momentum_medium = np.mean([trend, scale(ret(60), -.12, .30), scale(positive_days, .38, .62)])
-    momentum_long = np.mean([scale(ret(126), -.18, .40), scale(ret(252), -.25, .65), stable])
+    low_vol = blend([scale(volatility, 0.55, 0.14), scale(max_drawdown, -0.40, -0.08), scale(atr14, 0.045, 0.012)])
+    pullback = blend([trend, scale(abs(distance_ma20) if distance_ma20 is not None else None, 0.12, 0), scale(abs(distance_ma50) if distance_ma50 is not None else None, 0.18, 0)])
+    golden = blend([100 if ma50 and ma200 and ma50 > ma200 else 10, scale(finite(ma50 / ma200 - 1) if ma50 and ma200 else None, -0.08, 0.12), scale(distance_ma50, -0.12, 0.18)])
+    recovery = blend([scale(ret(20), -0.10, 0.16), scale(finite(last / high252 - 1) if high252 else None, -0.55, -0.10), scale(distance_ma20, -0.10, 0.10)])
+    stable = blend([scale(above_ma50, 0.30, 0.90), scale(max_drawdown, -0.40, -0.08), scale(volatility, 0.55, 0.16)])
+    efficient = blend([scale(ret(60), -0.12, 0.30), scale(finite(ret(60) / volatility) if volatility else None, -0.3, 1.2)])
+    momentum_short = blend([scale(ret(10), -.08, .15), scale(ret(20), -.10, .24), scale(rsi14, 35, 70)])
+    momentum_medium = blend([trend, scale(ret(60), -.12, .30), scale(positive_days, .38, .62)])
+    momentum_long = blend([scale(ret(126), -.18, .40), scale(ret(252), -.25, .65), stable])
 
-    return {
+    result = {
         "price": last, "return_5d": ret(5), "return_20d": ret(20), "return_60d": ret(60),
         "return_126d": ret(126), "return_1y": ret(252), "rsi14": rsi14, "positive_days_60d": positive_days,
         "range_15d": width15, "range_30d": width30, "range_60d": width60,
         "atr_pct": atr14, "atr_contraction": finite(atr14 / atr60) if atr60 else None,
+        "avg_dollar_volume": finite((c * vol).tail(20).mean()),
         "volume": finite(vol.iloc[-1]), "avg_volume_20d": vol20, "volume_ratio": volume_ratio,
         "volume_dryup": dryup, "up_volume_ratio": up_vol, "volatility": volatility,
         "max_drawdown_1y": max_drawdown, "distance_52w_high": finite(last / high252 - 1) if high252 else None,
@@ -404,26 +424,28 @@ def history_features(df):
         "double_bottom_similarity": double_fit.get("low_similarity"), "double_bottom_pivot": double_fit.get("pivot"),
         "bull_flag_impulse": flag_impulse, "bull_flag_pullback": flag_pullback,
         "scores": {
-            "consolidation_short": round(clamp(contraction_short), 1),
-            "consolidation_long": round(clamp(contraction_long), 1),
-            "volatility_contraction": round(clamp(vcp), 1),
-            "uptrend": round(clamp(trend), 1), "accumulation": round(clamp(accumulation), 1),
-            "breakout": round(clamp(breakout), 1), "momentum": round(clamp(momentum_medium), 1),
-            "momentum_short": round(clamp(momentum_short), 1), "momentum_medium": round(clamp(momentum_medium), 1),
-            "momentum_long": round(clamp(momentum_long), 1),
+            "consolidation_short": round(score_bound(contraction_short), 1),
+            "consolidation_long": round(score_bound(contraction_long), 1),
+            "volatility_contraction": round(score_bound(vcp), 1),
+            "uptrend": round(score_bound(trend), 1), "accumulation": round(score_bound(accumulation), 1),
+            "breakout": round(score_bound(breakout), 1), "momentum": round(score_bound(momentum_medium), 1),
+            "momentum_short": round(score_bound(momentum_short), 1), "momentum_medium": round(score_bound(momentum_medium), 1),
+            "momentum_long": round(score_bound(momentum_long), 1),
             "near_highs": round(scale(finite(last / high252 - 1) if high252 else None, -0.30, 0), 1),
-            "low_volatility": round(clamp(low_vol), 1), "high_volatility": round(clamp(100-low_vol), 1),
-            "oversold": round(np.mean([scale(ret(20), 0.08, -0.18), scale(distance_ma20, .08, -.15)]), 1),
-            "downtrend": round(clamp(100-trend), 1), "distribution": round(clamp(100-accumulation), 1),
-            "recovery": round(clamp(recovery), 1), "pullback_to_ma": round(clamp(pullback), 1),
-            "golden_cross": round(clamp(golden), 1), "volume_surge": round(scale(volume_ratio, .6, 2.2), 1),
-            "volume_dryup": round(np.mean([scale(dryup, 1.2, .55), contraction_short]), 1),
-            "trend_stability": round(clamp(stable), 1), "risk_adjusted_momentum": round(clamp(efficient), 1),
-            "vcp": round(clamp(vcp_pattern), 1), "cup_and_handle": cup_fit["score"],
-            "flat_base": round(clamp(flat_base), 1), "double_bottom": double_fit["score"],
-            "bull_flag": round(clamp(bull_flag), 1)
+            "low_volatility": round(score_bound(low_vol), 1), "high_volatility": round(score_bound(100-low_vol), 1),
+            "oversold": round(blend([scale(ret(20), 0.08, -0.18), scale(distance_ma20, .08, -.15)]), 1),
+            "downtrend": round(score_bound(100-trend), 1), "distribution": round(score_bound(100-accumulation), 1),
+            "recovery": round(score_bound(recovery), 1), "pullback_to_ma": round(score_bound(pullback), 1),
+            "golden_cross": round(score_bound(golden), 1), "volume_surge": round(scale(volume_ratio, .6, 2.2), 1),
+            "volume_dryup": round(blend([scale(dryup, 1.2, .55), contraction_short]), 1),
+            "trend_stability": round(score_bound(stable), 1), "risk_adjusted_momentum": round(score_bound(efficient), 1),
+            "vcp": round(score_bound(vcp_pattern), 1), "cup_and_handle": cup_fit["score"],
+            "flat_base": round(score_bound(flat_base), 1), "double_bottom": double_fit["score"],
+            "bull_flag": round(score_bound(bull_flag), 1)
         }
     }
+    result["scores"] = {k: finite(v) for k, v in result["scores"].items()}
+    return result
 
 
 def read_cache():
@@ -455,6 +477,23 @@ def read_cache():
         return {}, {}
 
 
+def rank_universe(rows):
+    for row in rows:
+        row["scores"]["relative_strength"] = None
+        row["scores"]["technical_strength"] = None
+    valid = [r for r in rows if r.get("return_60d") is not None and r.get("return_1y") is not None]
+    if valid:
+        ret60 = pd.Series([r["return_60d"] for r in valid]).rank(pct=True).tolist()
+        ret1y = pd.Series([r["return_1y"] for r in valid]).rank(pct=True).tolist()
+        for row, p60, p1y in zip(valid, ret60, ret1y):
+            row["scores"]["relative_strength"] = round((p60*.55 + p1y*.45)*100, 1)
+            row["scores"]["technical_strength"] = finite(round(blend([
+                row["scores"]["uptrend"], row["scores"]["momentum_medium"],
+                row["scores"]["relative_strength"], row["scores"]["accumulation"]
+            ]), 1))
+    return rows
+
+
 def build_universe(tickers, names):
     if TEST_LIMIT:
         tickers = tickers[:TEST_LIMIT]
@@ -462,10 +501,10 @@ def build_universe(tickers, names):
     if set(tickers).issubset(set(cached_covered)):
         stage(2, "Using fresh market-data cache")
         progress(84, "Using current cached market data")
-        return [cached_rows[t] for t in tickers if t in cached_rows], True
+        return rank_universe([cached_rows[t] for t in tickers if t in cached_rows]), True
 
-    stage(1, f"Loading one year of prices for {len(tickers)} companies")
-    progress(12, f"Loading one year of prices for {len(tickers)} companies")
+    stage(1, f"Loading price history for complete one-year windows for {len(tickers)} companies")
+    progress(12, f"Loading price history for complete one-year windows for {len(tickers)} companies")
     histories = get_history(tickers)
     stage(2, "Loading sectors, valuation, and company statistics")
     progress(58, "Loading sectors, valuation, and company statistics")
@@ -494,31 +533,32 @@ def build_universe(tickers, names):
             "free_cash_flow": finite(financial.get("freeCashflow")), "total_cash": finite(financial.get("totalCash")),
             "total_debt": finite(financial.get("totalDebt")), "target_price": finite(financial.get("targetMeanPrice")),
             "recommendation_mean": finite(financial.get("recommendationMean")), "beta": finite(stats.get("beta")),
-            "short_interest": finite(stats.get("shortPercentOfFloat") or stats.get("shortPercentOfSharesOutstanding")),
+            "short_interest": finite(stats.get("shortPercentOfFloat")),
             "price_to_book": finite(stats.get("priceToBook")), "peg_ratio": finite(stats.get("pegRatio")),
             "enterprise_to_ebitda": finite(stats.get("enterpriseToEbitda")),
             "institutional_ownership": finite(stats.get("heldPercentInstitutions")), "insider_ownership": finite(stats.get("heldPercentInsiders")),
         })
-        net_cash_ratio = finite((feat["total_cash"] - feat["total_debt"]) / feat["market_cap"]) if feat["market_cap"] and feat["total_cash"] is not None and feat["total_debt"] is not None else None
-        fcf_yield = finite(feat["free_cash_flow"] / feat["market_cap"]) if feat["market_cap"] and feat["free_cash_flow"] is not None else None
+        same_currency = bool(financial.get("financialCurrency") and financial.get("financialCurrency") == price.get("currency"))
+        net_cash_ratio = finite((feat["total_cash"] - feat["total_debt"]) / feat["market_cap"]) if same_currency and feat["market_cap"] and feat["total_cash"] is not None and feat["total_debt"] is not None else None
+        fcf_yield = finite(feat["free_cash_flow"] / feat["market_cap"]) if same_currency and feat["market_cap"] and feat["free_cash_flow"] is not None else None
         analyst_upside = finite(feat["target_price"] / feat["price"] - 1) if feat["target_price"] and feat["price"] else None
-        avg_dollar_volume = finite(feat["price"] * feat["avg_volume_20d"]) if feat.get("avg_volume_20d") else None
+        avg_dollar_volume = feat.get("avg_dollar_volume")
         feat.update({"net_cash_ratio":net_cash_ratio, "fcf_yield":fcf_yield, "analyst_upside":analyst_upside,
                      "avg_dollar_volume":avg_dollar_volume})
         if feat.get("beta") is not None:
-            low_volatility = np.mean([feat["scores"]["low_volatility"], scale(feat["beta"], 1.8, .55)])
-            feat["scores"]["low_volatility"] = round(clamp(low_volatility), 1)
-            feat["scores"]["high_volatility"] = round(clamp(100-low_volatility), 1)
+            low_volatility = blend([feat["scores"]["low_volatility"], scale(feat["beta"], 1.8, .55)])
+            feat["scores"]["low_volatility"] = round(score_bound(low_volatility), 1)
+            feat["scores"]["high_volatility"] = round(score_bound(100-low_volatility), 1)
         feat["scores"].update({
-            "value": round(np.mean([scale(feat["pe"], 40, 10), scale(feat["forward_pe"], 35, 9), scale(feat["price_to_book"], 10, 1.5), scale(feat["price_to_sales"], 12, 1.5), scale(feat["enterprise_to_ebitda"], 25, 7)]), 1),
-            "growth": round(np.mean([scale(feat["revenue_growth"], -0.05, 0.30), scale(feat["earnings_growth"], -0.10, 0.40)]), 1),
-            "profitability": round(np.mean([scale(feat["profit_margin"], -0.02, .30), scale(feat["operating_margin"], 0, .35), scale(feat["gross_margin"], .10, .70), scale(feat["return_on_equity"], 0, .35)]), 1),
-            "high_margin": round(np.mean([scale(feat["profit_margin"], 0, .35), scale(feat["operating_margin"], 0, .40), scale(feat["gross_margin"], .15, .75)]), 1),
-            "balance_sheet": round(np.mean([scale(feat["debt_to_equity"], 300, 20), scale(feat["current_ratio"], .6, 2.5), scale(net_cash_ratio, -.35, .20)]), 1),
-            "cash_generation": round(np.mean([scale(fcf_yield, -.02, .10), scale(feat["profit_margin"], 0, .30)]), 1),
-            "quality": round(np.mean([scale(feat["profit_margin"], -0.02, 0.30), scale(feat["return_on_equity"], 0, .35), scale(feat["debt_to_equity"], 250, 20), scale(fcf_yield, -.02, .10)]), 1),
-            "income": round(np.mean([scale(feat["dividend_yield"], 0, 0.05), scale(feat["payout_ratio"], 1.2, .35)]), 1),
-            "analyst_upside": round(np.mean([scale(analyst_upside, -.15, .35), scale(feat["recommendation_mean"], 3.5, 1.5)]), 1),
+            "value": round(blend([valuation_score(feat["pe"], 40, 10), valuation_score(feat["forward_pe"], 35, 9), valuation_score(feat["price_to_book"], 10, 1.5), valuation_score(feat["price_to_sales"], 12, 1.5), valuation_score(feat["enterprise_to_ebitda"], 25, 7)]), 1),
+            "growth": round(blend([scale(feat["revenue_growth"], -0.05, 0.30), scale(feat["earnings_growth"], -0.10, 0.40)]), 1),
+            "profitability": round(blend([scale(feat["profit_margin"], -0.02, .30), scale(feat["operating_margin"], 0, .35), scale(feat["gross_margin"], .10, .70), scale(feat["return_on_equity"], 0, .35)]), 1),
+            "high_margin": round(blend([scale(feat["profit_margin"], 0, .35), scale(feat["operating_margin"], 0, .40), scale(feat["gross_margin"], .15, .75)]), 1),
+            "balance_sheet": round(blend([debt_score(feat["debt_to_equity"], 300, 20), scale(feat["current_ratio"], .6, 2.5), scale(net_cash_ratio, -.35, .20)]), 1),
+            "cash_generation": round(blend([scale(fcf_yield, -.02, .10), scale(feat["profit_margin"], 0, .30)]), 1),
+            "quality": round(blend([scale(feat["profit_margin"], -0.02, 0.30), scale(feat["return_on_equity"], 0, .35), debt_score(feat["debt_to_equity"], 250, 20), scale(fcf_yield, -.02, .10)]), 1),
+            "income": round(blend([scale(feat["dividend_yield"], 0, 0.05), scale(feat["payout_ratio"], 1.2, .35)]), 1),
+            "analyst_upside": round(blend([scale(analyst_upside, -.15, .35), scale(feat["recommendation_mean"], 3.5, 1.5)]), 1),
             "insider_ownership": round(scale(feat["insider_ownership"], 0, .15), 1),
             "institutional_ownership": round(scale(feat["institutional_ownership"], .25, .95), 1),
             "mega_cap": round(scale(feat["market_cap"], 10e9, 200e9), 1),
@@ -527,42 +567,32 @@ def build_universe(tickers, names):
             "earnings_growth": round(scale(feat["earnings_growth"], -.15, .50), 1),
             "high_roe": round(scale(feat["return_on_equity"], 0, .40), 1),
             "fcf_yield": round(scale(fcf_yield, -.02, .12), 1),
-            "cash_rich": round(np.mean([scale(net_cash_ratio, -.35, .25), scale(feat["current_ratio"], .6, 3)]), 1),
-            "low_debt": round(np.mean([scale(feat["debt_to_equity"], 300, 10), scale(net_cash_ratio, -.40, .20)]), 1),
-            "capital_efficiency": round(np.mean([scale(feat["return_on_equity"], 0, .40), scale(feat["operating_margin"], 0, .35), scale(fcf_yield, -.02, .10)]), 1),
-            "dividend_quality": round(np.mean([scale(feat["dividend_yield"], 0, .05), scale(feat["payout_ratio"], 1.1, .30), scale(feat["profit_margin"], 0, .28), scale(feat["debt_to_equity"], 250, 20)]), 1),
-            "liquidity": round(np.mean([scale(avg_dollar_volume, 5e6, 500e6), scale(feat["avg_volume_20d"], 100_000, 8_000_000), scale(feat["market_cap"], 5e9, 150e9)]), 1),
-            "options_liquidity_proxy": round(np.mean([scale(avg_dollar_volume, 10e6, 750e6), scale(feat["avg_volume_20d"], 250_000, 12_000_000), scale(feat["market_cap"], 8e9, 250e9)]), 1),
-            "low_beta": round(np.mean([scale(feat["beta"], 1.8, .55), feat["scores"]["low_volatility"]]), 1),
-            "high_beta": round(np.mean([scale(feat["beta"], .65, 2.0), feat["scores"]["high_volatility"]]), 1),
+            "cash_rich": round(blend([scale(net_cash_ratio, -.35, .25), scale(feat["current_ratio"], .6, 3)]), 1),
+            "low_debt": round(blend([debt_score(feat["debt_to_equity"], 300, 10), scale(net_cash_ratio, -.40, .20)]), 1),
+            "capital_efficiency": round(blend([scale(feat["return_on_equity"], 0, .40), scale(feat["operating_margin"], 0, .35), scale(fcf_yield, -.02, .10)]), 1),
+            "dividend_quality": round(blend([scale(feat["dividend_yield"], 0, .05), scale(feat["payout_ratio"], 1.1, .30), scale(feat["profit_margin"], 0, .28), debt_score(feat["debt_to_equity"], 250, 20)]), 1),
+            "liquidity": round(blend([scale(avg_dollar_volume, 5e6, 500e6), scale(feat["avg_volume_20d"], 100_000, 8_000_000), scale(feat["market_cap"], 5e9, 150e9)]), 1),
+            "options_liquidity_proxy": round(blend([scale(avg_dollar_volume, 10e6, 750e6), scale(feat["avg_volume_20d"], 250_000, 12_000_000), scale(feat["market_cap"], 8e9, 250e9)]), 1),
+            "low_beta": round(blend([scale(feat["beta"], 1.8, .55), feat["scores"]["low_volatility"]]), 1),
+            "high_beta": round(blend([scale(feat["beta"], .65, 2.0), feat["scores"]["high_volatility"]]), 1),
             "high_short_interest": round(scale(feat["short_interest"], .01, .20), 1),
         })
         s = feat["scores"]
         s.update({
-            "profitable_growth": round(np.mean([s["growth"], s["profitability"], s["cash_generation"]]), 1),
-            "garp": round(np.mean([s["growth"], s["value"], s["quality"]]), 1),
-            "quality_value": round(np.mean([s["value"], s["quality"], s["cash_generation"]]), 1),
-            "steady_compounder": round(np.mean([s["trend_stability"], s["risk_adjusted_momentum"], s["quality"], s["low_volatility"]]), 1),
-            "defensive_quality": round(np.mean([s["low_volatility"], s["balance_sheet"], s["quality"], s["income"]]), 1),
-            "speculative_growth": round(np.mean([s["growth"], s["high_volatility"], 100-s["profitability"], s["momentum_short"]]), 1),
-            "squeeze": round(np.mean([s["volatility_contraction"], s["volume_dryup"], s["consolidation_short"]]), 1),
-            "bullish_pullback": round(np.mean([s["uptrend"], s["pullback_to_ma"], scale(feat["rsi14"], 72, 43)]), 1),
-            "mean_reversion": round(np.mean([s["oversold"], s["trend_stability"], s["recovery"]]), 1),
-            "turnaround": round(np.mean([s["recovery"], s["momentum_short"], scale(feat["distance_52w_high"], -.10, -.55)]), 1),
-            "short_squeeze_setup": round(np.mean([s["high_short_interest"], s["volume_surge"], s["momentum_short"]]), 1),
+            "profitable_growth": round(blend([s["growth"], s["profitability"], s["cash_generation"]]), 1),
+            "garp": round(blend([s["growth"], s["value"], s["quality"]]), 1),
+            "quality_value": round(blend([s["value"], s["quality"], s["cash_generation"]]), 1),
+            "steady_compounder": round(blend([s["trend_stability"], s["risk_adjusted_momentum"], s["quality"], s["low_volatility"]]), 1),
+            "defensive_quality": round(blend([s["low_volatility"], s["balance_sheet"], s["quality"], s["income"]]), 1),
+            "speculative_growth": round(blend([s["growth"], s["high_volatility"], 100-s["profitability"], s["momentum_short"]]), 1),
+            "squeeze": round(blend([s["volatility_contraction"], s["volume_dryup"], s["consolidation_short"]]), 1),
+            "bullish_pullback": round(blend([s["uptrend"], s["pullback_to_ma"], scale(feat["rsi14"], 72, 43)]), 1),
+            "mean_reversion": round(blend([s["oversold"], s["trend_stability"], s["recovery"]]), 1),
+            "turnaround": round(blend([s["recovery"], s["momentum_short"], scale(feat["distance_52w_high"], -.10, -.55)]), 1),
+            "short_squeeze_setup": round(blend([s["high_short_interest"], s["volume_surge"], s["momentum_short"]]), 1),
         })
+        feat["scores"] = {k: finite(v) for k, v in feat["scores"].items()}
         rows.append(feat)
-    # Relative strength is intentionally universe-relative rather than a fixed return cutoff.
-    valid = [r for r in rows if r.get("return_60d") is not None and r.get("return_1y") is not None]
-    if valid:
-        ret60 = pd.Series([r["return_60d"] for r in valid]).rank(pct=True).tolist()
-        ret1y = pd.Series([r["return_1y"] for r in valid]).rank(pct=True).tolist()
-        for row, p60, p1y in zip(valid, ret60, ret1y):
-            row["scores"]["relative_strength"] = round((p60*.55 + p1y*.45)*100, 1)
-            row["scores"]["technical_strength"] = round(np.mean([
-                row["scores"]["uptrend"], row["scores"]["momentum_medium"],
-                row["scores"]["relative_strength"], row["scores"]["accumulation"]
-            ]), 1)
     # Merge rather than replace. A throttled run now returns fewer symbols by design,
     # and overwriting would drop coverage a previous run already paid Yahoo for — which
     # would fail the issubset check next time and trigger exactly the full cold pull this
@@ -591,7 +621,7 @@ def build_universe(tickers, names):
     # Serve from the merged view, not just this run's rows: a symbol a previous run
     # already fetched is still valid data we have paid for, and on a throttled run it
     # is the difference between a usable screen and a thin one.
-    return [merged_rows[t] for t in tickers if t in merged_rows], False
+    return rank_universe([merged_rows[t] for t in tickers if t in merged_rows]), False
 
 
 CONCEPT_LABELS = {
@@ -657,12 +687,12 @@ def qualifies_pattern(row, pattern):
 def concept_score(row, concept, settings):
     if concept == "consolidation":
         window = int(settings.get("consolidation_window", 30))
-        return row["scores"]["consolidation_short" if window <= 30 else "consolidation_long"]
+        return finite(row.get("scores", {}).get("consolidation_short" if window <= 30 else "consolidation_long"))
     if concept == "momentum":
         window = int(settings.get("momentum_window", 60))
         key = "momentum_short" if window <= 20 else "momentum_medium" if window <= 60 else "momentum_long"
-        return finite(row.get("scores", {}).get(key), 50)
-    return finite(row.get("scores", {}).get(concept), 50)
+        return finite(row.get("scores", {}).get(key))
+    return finite(row.get("scores", {}).get(concept))
 
 
 def passes_filters(row, filters):
@@ -678,8 +708,8 @@ def passes_filters(row, filters):
         ("market_cap_min", lambda v: row.get("market_cap") is not None and row["market_cap"] >= v),
         ("market_cap_max", lambda v: row.get("market_cap") is not None and row["market_cap"] <= v),
         ("price_min", lambda v: row["price"] >= v), ("price_max", lambda v: row["price"] <= v),
-        ("pe_max", lambda v: row.get("pe") is not None and row["pe"] <= v),
-        ("forward_pe_max", lambda v: row.get("forward_pe") is not None and row["forward_pe"] <= v),
+        ("pe_max", lambda v: row.get("pe") is not None and 0 < row["pe"] <= v),
+        ("forward_pe_max", lambda v: row.get("forward_pe") is not None and 0 < row["forward_pe"] <= v),
         ("volume_min", lambda v: row.get("avg_volume_20d") is not None and row["avg_volume_20d"] >= v),
         ("avg_dollar_volume_min", lambda v: row.get("avg_dollar_volume") is not None and row["avg_dollar_volume"] >= v),
         ("dividend_yield_min", lambda v: row.get("dividend_yield") is not None and row["dividend_yield"] >= v),
@@ -708,7 +738,7 @@ def fmt_num(v, suffix="", digits=1):
 
 def explain(row, concepts, settings):
     reasons = []
-    for c in sorted(concepts, key=lambda x: concept_score(row, x["id"], settings) * x.get("weight", 1), reverse=True)[:6]:
+    for c in sorted(concepts, key=lambda x: finite(concept_score(row, x["id"], settings), 0) * x.get("weight", 1), reverse=True)[:6]:
         cid = c["id"]
         window = int(settings.get("consolidation_window", 30))
         range_value = row.get("range_60d") if window == 60 else row.get("range_30d") if window == 30 else row.get("range_15d")
@@ -723,7 +753,7 @@ def explain(row, concepts, settings):
         elif cid in ("uptrend", "downtrend", "momentum", "risk_adjusted_momentum", "technical_strength"): reasons.append(f"Trend: 20-day {fmt_pct(row['return_20d'])}, 60-day {fmt_pct(row['return_60d'])}")
         elif cid == "relative_strength": reasons.append(f"Relative strength: {fmt_num(row.get('scores',{}).get(cid), '/100', 0)} versus {row.get('universe_label') or 'the selected universe'}")
         elif cid == "accumulation": reasons.append(f"Accumulation: {row['up_volume_ratio']:.0%} of recent volume occurred on up days")
-        elif cid == "distribution": reasons.append(f"Distribution: {(1-row['up_volume_ratio']):.0%} of recent volume occurred on down days")
+        elif cid == "distribution": reasons.append(f"Distribution: {(1-row['up_volume_ratio']):.0%} of recent volume occurred on flat or down days")
         elif cid == "breakout": reasons.append(f"Breakout quality: volume is {row['volume_ratio']:.2f}× its 20-day average")
         elif cid in ("low_volatility", "high_volatility", "trend_stability", "low_beta", "high_beta", "steady_compounder", "defensive_quality"): reasons.append(f"Risk: {fmt_pct(row.get('volatility'))} annualized volatility, {fmt_num(row.get('beta'), ' beta', 2)}, and {fmt_pct(row.get('max_drawdown_1y'))} max drawdown")
         elif cid in ("volume_surge", "volume_dryup"): reasons.append(f"Volume: today is {fmt_num(row.get('volume_ratio'), '×', 2)} the 20-day average; recent average is {fmt_num(row.get('volume_dryup'), '×', 2)} the 60-day norm")
@@ -784,7 +814,7 @@ def theme_relevance(row, theme):
         if hits["sector"]: score += 6
         score += min(8, max(0, hits["description"] - 1) * 2)
     matched.sort(key=len, reverse=True)
-    return round(clamp(score), 1), matched[:4]
+    return round(score_bound(score), 1), matched[:4]
 
 
 def screen(rows, spec):
@@ -809,7 +839,7 @@ def screen(rows, spec):
                 continue
 
         scores = [(c, concept_score(row, c.get("id"), settings)) for c in concepts if c.get("id") in CONCEPT_LABELS]
-        if not scores:
+        if not scores or any(s is None for _, s in scores):
             continue
         total_weight = sum(max(.1, finite(c.get("weight"), 1)) for c, _ in scores)
         concept_blend = sum(s * max(.1, finite(c.get("weight"), 1)) for c, s in scores) / total_weight

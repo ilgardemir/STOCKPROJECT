@@ -590,3 +590,21 @@ test("a remembered destination this ticker cannot fill falls back to the first",
     "the surviving destination must be the selected one");
   assert.ok(/class="data-section show/.test(out));
 });
+
+test("updated financial units and zero-estimate earnings render without invented percentages", () => {
+  const state = loadApp();
+  state(`renderAll({ticker:"TEST",raw_data:{
+    financial_health:{debt_to_equity:1.25,debt_to_equity_unit:"multiple"},
+    earnings_surprises:[{date:"2025-12-31",estimate:0,reported:1,surprise_pct:null}],
+    risk_return:{period_start:"2024-01-01",period_end:"2025-01-01",observations:253,
+      price_basis:"dividend-adjusted close",sharpe_basis:"Lagged bill yield"}
+  }});`);
+  const html = state('document.getElementById("dataBody").innerHTML');
+  assert.ok(html.includes("Debt / Equity (×)"));
+  assert.ok(html.includes("dividend-adjusted close"));
+  assert.ok(html.includes("2024-01-01 to 2025-01-01"));
+  const earnings = html.split('id="card-earnings"')[1].split('</details>')[0];
+  assert.ok(earnings.includes("N/A"));
+  assert.ok(earnings.includes("Beat"));
+  assert.ok(!earnings.includes("0.0%"));
+});

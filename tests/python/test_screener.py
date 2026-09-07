@@ -21,7 +21,7 @@ class ScreenerScoringTests(unittest.TestCase):
         cls.rows = json.loads(FIXTURE_PATH.read_text())
 
     def test_scale_and_band_score_are_bounded(self):
-        self.assertEqual(screener.scale(None, 0, 1), 50)
+        self.assertTrue(np.isnan(screener.scale(None, 0, 1)))
         self.assertEqual(screener.scale(-5, 0, 1), 0)
         self.assertEqual(screener.scale(5, 0, 1), 100)
         self.assertEqual(screener.band_score(5, 4, 6, 2, 8), 100)
@@ -33,7 +33,7 @@ class ScreenerScoringTests(unittest.TestCase):
         self.assertEqual(screener.concept_score(row, "consolidation", {"consolidation_window": 60}), 61)
         self.assertEqual(screener.concept_score(row, "momentum", {"momentum_window": 20}), 90)
         self.assertEqual(screener.concept_score(row, "momentum", {"momentum_window": 252}), 45)
-        self.assertEqual(screener.concept_score(row, "missing", {}), 50)
+        self.assertIsNone(screener.concept_score(row, "missing", {}))
 
     def test_weighted_screening_ranks_deterministically(self):
         spec = {

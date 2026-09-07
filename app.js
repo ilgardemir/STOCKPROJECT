@@ -1944,7 +1944,7 @@ function renderAll(d) {
       ${metric("Distrib. Days (25)", String(inst.distribution_days ?? 0), (inst.distribution_days || 0) >= 3 ? "red" : "")}
     </div>`;
     (inst.signals || []).forEach(sg => body += signalHtml(sg));
-    add("technicals", card("institutional", "Institutional Footprint", body, { source: histSrc(d) }));
+    add("technicals", card("institutional", "Price & Volume Proxies", body, { source: histSrc(d) }));
   }
 
   /* Algorithmic signals */
@@ -1971,7 +1971,7 @@ function renderAll(d) {
   /* Health */
   add("fundamentals", card("health", "Financial Health", `<div class="mgrid">
     ${metric("Current Ratio", fRatio(fh.current_ratio), isNum(fh.current_ratio) ? (fh.current_ratio >= 1.5 ? "green" : fh.current_ratio < 1 ? "red" : "amber") : "")}
-    ${metric("Debt / Equity", fRatio(fh.debt_to_equity), isNum(fh.debt_to_equity) && fh.debt_to_equity > 200 ? "red" : "")}
+    ${metric(fh.debt_to_equity_unit === "multiple" ? "Debt / Equity (×)" : "Debt / Equity (legacy units)", fRatio(fh.debt_to_equity), isNum(fh.debt_to_equity) && fh.debt_to_equity > (fh.debt_to_equity_unit === "multiple" ? 2 : 200) ? "red" : "")}
     ${metric("Earnings Quality <small>(OCF/NI)</small>", fRatio(fh.earnings_quality), isNum(fh.earnings_quality) ? (fh.earnings_quality >= 1 ? "green" : fh.earnings_quality < 0.5 ? "red" : "amber") : "")}</div>`));
 
   /* SEC fundamentals */
@@ -2004,10 +2004,10 @@ function renderAll(d) {
   add("technicals", card("tech", "Technicals & Key Levels", tech, { source: histSrc(d) }));
 
   /* Risk */
-  add("technicals", card("risk", "Risk & Return (5Y)", `<div class="mgrid">
+  add("technicals", card("risk", rr.period_start ? `Risk & Return · ${esc(rr.period_start)} to ${esc(rr.period_end)}` : "Risk & Return (saved estimate)", `<div class="mgrid">
     ${metric("CAGR", fPct(rr.cagr), signCls(rr.cagr))}${metric("Annual Volatility", fPct(rr.annual_volatility))}
     ${metric("Sharpe Ratio", fRatio(rr.sharpe), signCls(rr.sharpe))}${metric("Max Drawdown", fPct(rr.max_drawdown), signCls(rr.max_drawdown, true))}
-    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>`, { source: histSrc(d) }));
+    ${metric("Beta (vs SPY)", fRatio(rr.beta), isNum(rr.beta) && rr.beta > 1.6 ? "amber" : "")}</div>${rr.price_basis ? `<p style="margin-top:10px;font-size:12px;color:var(--ink-dim)">${esc(rr.price_basis)} · ${esc(rr.observations)} observations. Sharpe: ${esc(rr.sharpe_basis)}.</p>` : ""}`, { source: histSrc(d) }));
 
   /* Sentiment */
   let sent = `<div class="mgrid">
@@ -2021,9 +2021,9 @@ function renderAll(d) {
   /* Earnings */
   const earn = r.earnings_surprises || [];
   if (earn.length) {
-    const rows = earn.map(e => { const pos = e.surprise_pct >= 0;
+    const rows = earn.map(e => { const pos = e.reported >= e.estimate;
       return `<tr><td class="hi">${esc(e.date)}</td><td>$${e.estimate.toFixed(2)}</td><td class="hi">$${e.reported.toFixed(2)}</td>
-        <td class="${pos ? "pos" : "neg"}">${pos ? "+" : ""}${(e.surprise_pct * 100).toFixed(1)}%</td><td class="${pos ? "pos" : "neg"}">${pos ? "Beat" : "Miss"}</td></tr>`; }).join("");
+        <td class="${pos ? "pos" : "neg"}">${isNum(e.surprise_pct) ? `${e.surprise_pct >= 0 ? "+" : ""}${(e.surprise_pct * 100).toFixed(1)}%` : "N/A"}</td><td class="${pos ? "pos" : "neg"}">${e.reported === e.estimate ? "Met" : pos ? "Beat" : "Miss"}</td></tr>`; }).join("");
     add("fundamentals", card("earnings", "Recent Earnings Surprises",
       `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Estimate</th><th>Reported</th><th>Surprise</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`, { count: earn.length, source: YQ_SRC }));
   }
