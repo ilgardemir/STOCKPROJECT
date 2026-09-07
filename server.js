@@ -1140,9 +1140,10 @@ function backtestProfilePlan(raw) {
     balanced: 1, "long-term": 1, swing: 0.8, value: 0.9,
     growth: 1, income: 0.8, options: 0.5
   }[profile.style] || 1;
+  const downsideMultiplier = profile.priorities.includes("downside") ? 0.65 : 1;
   const positionPct = Math.max(0.05, Math.min(0.75,
-    BT_PROFILE_POSITION_PCT[profile.risk - 1] * styleMultiplier));
-  const riskStopCap = [0.05, 0.07, 0.10, 0.14, 0.18][profile.risk - 1];
+    BT_PROFILE_POSITION_PCT[profile.risk - 1] * styleMultiplier * downsideMultiplier));
+  const riskStopCap = Math.round(([0.05, 0.07, 0.10, 0.14, 0.18][profile.risk - 1] * (profile.priorities.includes("downside") ? 0.8 : 1)) * 100) / 100;
   const rewardRatio = [1.5, 1.75, 2, 2.25, 2.5][profile.risk - 1];
   const optionsProxy = profile.style === "options" || profile.priorities.includes("options");
 
@@ -1153,7 +1154,7 @@ function backtestProfilePlan(raw) {
     reward_ratio: rewardRatio,
     instrument: optionsProxy ? "underlying_stock_proxy" : "stock",
     options_proxy: optionsProxy,
-    profile_basis: `${profile.style} style · risk ${profile.risk}/5 · holding preference ${profile.horizon}/5`
+    profile_basis: `${profile.style} style · risk ${profile.risk}/5 · holding preference ${profile.horizon}/5${profile.priorities.includes("downside") ? " · downside priority" : ""}`
   };
 }
 

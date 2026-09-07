@@ -321,6 +321,15 @@ test("MySquall deterministically controls backtest exposure and supported horizo
   assert.equal(options.instrument, "underlying_stock_proxy");
 });
 
+test("MySquall downside priority tightens both size and stop risk", () => {
+  const base = backtestProfilePlan({ risk:3, horizon:3, style:"balanced", priorities:[] });
+  const downside = backtestProfilePlan({ risk:3, horizon:3, style:"balanced", priorities:["downside"] });
+  assert.equal(downside.position_pct, 0.23);
+  assert.equal(downside.risk_stop_cap, 0.08);
+  assert.ok(downside.position_pct < base.position_pct);
+  assert.match(downside.profile_basis, /downside priority/);
+});
+
 test("completed backtests always receive a long or short position", () => {
   const snapshot = { technical:{
     scores:{ uptrend:72, accumulation:65, momentum:70, breakout:60,

@@ -1518,3 +1518,20 @@ body.chat-view #aiScroll { display: none; }
 /* The wordmark is a link here, not the button app.js wires up — reset the anchor bits the
    shared .wordmark rule has no reason to carry. */
 header .wordmark[href] { text-decoration: none; color: inherit; }
+/* Professional polish preview: calmer chrome, clearer hierarchy, same data layout. */
+body { letter-spacing: 0; }
+#hero { gap: 18px; background: none; }
+#hero h1 { letter-spacing: .14em; }
+#hero p { font-family: var(--doc); font-size: 17px; line-height: 1.45; }
+#hero .hero-fine { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; }
+.chip, .hero-search, #analyzeBtn, #heroAnalyzeBtn { box-shadow: none; }
+.chip { border-radius: 6px; }
+.view-tab, #viewRail button, .analysis-tab-main, .analysis-tab-close { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: .01em; }
+#sTicker { font-size: 12px; letter-spacing: .12em; }
+#sCompany { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; font-weight: 600; }
+.prose, .verdict-body, .ai-section-body { font-family: var(--doc); font-size: 18px; line-height: 1.62; }
+.verdict-block { border-left-width: 3px; box-shadow: none; }
+.verdict-head { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: .04em; }
+.ai-section summary { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: .01em; }
+.metric-label, .metric-value, .card > summary { font-family: var(--mono); }
+.card > summary { font-weight: 600; }
