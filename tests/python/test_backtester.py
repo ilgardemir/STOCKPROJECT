@@ -790,7 +790,7 @@ class DirectionGuardrailTests(unittest.TestCase):
         # downtrend shorts.
         out = backtester.direction_guardrails({
             "price": 219.08, "ma20": 269.27, "ma50": 305.70, "ma200": 331.05,
-            "rsi14": 27.08, "volume_ratio": 0.83, "distance_52w_high": -0.425})
+            "rsi14": 27.34, "volume_ratio": 0.83, "distance_52w_high": -0.425})
         self.assertFalse(out["no_short"])
         self.assertEqual(out["no_short_reasons"], [])
 
