@@ -240,6 +240,18 @@ test("a half-executed app.js costs the profile, not the whole run", () => {
     "This is a degraded run, not a failed one");
 });
 
+test("the notice names the original fault, not the binding it stranded", () => {
+  const BT = loadBacktester();
+  BT.getMySquallProfile = () => { throw new ReferenceError("Cannot access 'mySquallProfile' before initialization"); };
+  // What chrome-top.html's recorder would have captured at load.
+  BT.__squallLoadError = { message: "x is not a function", source: "app.js", line: 452, column: 3,
+    text: "app.js:452 — x is not a function" };
+  startRun(BT);
+  const shown = BT.__els.get("backtestError").innerHTML;
+  assert.match(shown, /app\.js:452/,
+    "A TDZ error names the stranded binding, never the line that stranded it — report the cause");
+});
+
 test("a throw while opening the stream is reported instead of latching the button", () => {
   const BT = loadBacktester();
   BT.EventSource = function () { throw new TypeError("Failed to construct 'EventSource'"); };

@@ -341,8 +341,14 @@ function openBacktestStream(ticker, asOf) {
   const { profile, error: profileError } = readMySquallForBacktest();
   if (profile) url += `&profile=${encodeURIComponent(JSON.stringify(profile))}`;
   if (profileError) {
+    // Name the ORIGINAL failure when the recorder in chrome-top.html caught one. A TDZ
+    // error names the binding that was stranded, never the line that stranded it, so
+    // reporting only `profileError` describes the symptom and hides the cause — which is
+    // the whole reason this took three passes to find. The cause is what to act on.
+    const root = (typeof window !== "undefined" && window.__squallLoadError) || null;
     showBacktestError("Running without your MySquall profile",
-      `Squall could not read your saved preferences (${profileError}), so this run uses balanced defaults for risk, horizon and position size. The analysis itself is unaffected. Reloading the page usually restores it.`);
+      `Squall could not read your saved preferences, so this run uses balanced defaults for risk, horizon and position size. The analysis itself is unaffected. ${
+        root ? `The underlying fault is in ${root.text}` : `Reported as: ${profileError}`}. Reloading the page usually restores it.`);
   }
   const source = backtestSource = new EventSource(url);
 

@@ -1,3 +1,35 @@
+<!-- First-error recorder. Included before app.js runs, which is the whole point.
+
+     A throw at app.js's top level is the most damaging failure this front end has and
+     the least visible one: the file is a classic script shared by three pages, so
+     execution simply stops at the throwing statement. Every function DECLARATION above
+     and below it stays hoisted and callable, while each let/const below it is stranded
+     in its temporal dead zone — so the page still renders, `typeof fn === "function"`
+     still answers true, and the damage only surfaces later as an unrelated-looking
+     "Cannot access 'x' before initialization" from whichever feature touches it first.
+     That is precisely how a fault elsewhere in app.js reached the user as /ilgar
+     refusing to start, and why it cost three rounds to trace: nothing anywhere recorded
+     the ORIGINAL error, and a public site has no error reporting to consult.
+
+     Capture phase, and first-error-wins: later errors are usually consequences of the
+     first, and it is the first that names the real line. Deliberately inert — it stores
+     and does not render, so it cannot itself become a source of breakage on the one
+     path that has to survive everything. Readers show it: /ilgar folds it into its
+     MySquall notice, and window.__squallLoadError is there for a console check. -->
+<script>
+  window.__squallLoadError = null;
+  try {
+    window.addEventListener("error", function (event) {
+      if (window.__squallLoadError || !event) return;
+      var file = String((event.filename || "")).split("/").pop();
+      window.__squallLoadError = {
+        message: String(event.message || "Unknown error"),
+        source: file, line: event.lineno || 0, column: event.colno || 0,
+        text: file ? file + ":" + (event.lineno || 0) + " — " + String(event.message || "") : String(event.message || "")
+      };
+    }, true);
+  } catch (e) {}
+</script>
 <header>
   <button class="wordmark" id="homeLink" title="Back to home" aria-label="Squall — back to home" onclick="goHome()">
     <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
