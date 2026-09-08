@@ -605,11 +605,16 @@ test("zeroing the reasoning cap falls back to effort rather than sending nothing
   }
 });
 
-test("AI sampling sends a repetition damper and only routes to providers that honor it", () => {
-  // A degenerate loop is the failure this defends against; OpenRouter silently DROPS
-  // an unsupported parameter, so require_parameters is what makes the damper real.
-  assert.ok(AI_SAMPLING.frequency_penalty > 0, "frequency_penalty must be applied");
-  assert.equal(AI_SAMPLING.provider.require_parameters, true);
+test("the default config never constrains routing to a parameter the default model refuses", () => {
+  // This is the shipped-config invariant, and it is the one that takes the site down if
+  // broken. require_parameters filters the provider pool to hosts implementing EVERY
+  // parameter sent; no frontier model implements frequency_penalty, so a non-zero default
+  // paired with the frontier default model empties the pool and 404s every request with
+  // "No allowed providers are available" — an outage, not a degradation.
+  assert.equal("frequency_penalty" in AI_SAMPLING, false,
+    "the default model cannot accept frequency_penalty, so it must not be sent");
+  assert.equal("require_parameters" in AI_SAMPLING.provider, false,
+    "nothing is being required, so the pool must not be narrowed");
   assert.equal(AI_SAMPLING.provider.allow_fallbacks, true);
 });
 
@@ -631,9 +636,11 @@ test("zeroing the repetition damper also drops the provider constraint it needs"
   assert.equal(on.frequency_penalty, 0.5);
   assert.equal(on.provider.require_parameters, true);
 
-  // An out-of-range or garbage value must fall back to the default, never disable silently.
-  assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "banana" }).frequency_penalty, 0.3);
-  assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "9" }).frequency_penalty, 0.3);
+  // An out-of-range or garbage value must fall back to the default. That default is now 0
+  // (the frontier model cannot accept the parameter), so falling back means sending nothing
+  // — the safe direction: a typo costs the damper, never the whole provider pool.
+  assert.equal("frequency_penalty" in read({ SQUALL_AI_FREQ_PENALTY: "banana" }), false);
+  assert.equal("frequency_penalty" in read({ SQUALL_AI_FREQ_PENALTY: "9" }), false);
 });
 
 test("both models are env-overridable and independent of each other", () => {
@@ -648,11 +655,11 @@ test("both models are env-overridable and independent of each other", () => {
     { env: { ...process.env, encoding: undefined, ...env }, encoding: "utf8" }));
 
   const dflt = read({});
-  assert.equal(dflt.a, "deepseek/deepseek-v4-flash-0731");
+  assert.equal(dflt.a, "openai/gpt-5.6-luna");
   assert.equal(dflt.u, "deepseek/deepseek-v4-flash");
 
-  const swapped = read({ SQUALL_AI_MODEL: "openai/gpt-5.6-luna" });
-  assert.equal(swapped.a, "openai/gpt-5.6-luna");
+  const swapped = read({ SQUALL_AI_MODEL: "deepseek/deepseek-v4-flash-0731" });
+  assert.equal(swapped.a, "deepseek/deepseek-v4-flash-0731");
   assert.equal(swapped.u, dflt.u, "the utility model must not follow the analysis model");
 
   assert.equal(read({ SQUALL_UTILITY_MODEL: "x/y" }).u, "x/y");

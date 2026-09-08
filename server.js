@@ -25,8 +25,12 @@ const PORT        = process.env.PORT || 3000;
 // OpenRouter (the GPT-5.x family, Claude, Gemini) implements `frequency_penalty`,
 // and several do not accept `temperature` either, so pointing this at one while the
 // penalty is non-zero fails every request with "No allowed providers are available"
-// rather than degrading. Set SQUALL_AI_FREQ_PENALTY=0 in the same change.
-const AI_MODEL    = process.env.SQUALL_AI_MODEL || "deepseek/deepseek-v4-flash-0731";
+// rather than degrading. That is why AI_FREQ_PENALTY now defaults to 0 — see the
+// repetition-damping block below, which explains what was traded away.
+//
+// Reverting to the flash tier means restoring BOTH: set SQUALL_AI_MODEL back and
+// SQUALL_AI_FREQ_PENALTY=0.3, or the loops come back undamped.
+const AI_MODEL    = process.env.SQUALL_AI_MODEL || "openai/gpt-5.6-luna";
 // Translates/refines screener language only; no web plugin. Deliberately a separate
 // knob: this one is a cheap-and-fast job, and it should not be dragged upmarket just
 // because the analysis model was.
@@ -34,7 +38,7 @@ const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4-
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
-// ─── Reasoning + routing config (OpenRouter → DeepSeek) ──────────────────────
+// ─── Reasoning + routing config (OpenRouter) ─────────────────────────────────
 // Measured on a live JPM analysis: 16s scrape, then 209s of AI — ~114s of it spent
 // on reasoning before the first answer token, ~86s streaming the answer. That works
 // out to ~16 tok/s, which is a SLOW PROVIDER problem more than a thinking-depth one,
@@ -153,7 +157,20 @@ const envFloat = (name, dflt, lo, hi) => {
 // the whole request 404s with "No allowed providers are available". If that ever happens,
 // `SQUALL_AI_FREQ_PENALTY=0` reverts routing to exactly what it was, from the dashboard,
 // with no deploy — which is why the two are tied together rather than tunable apart.
-const AI_FREQ_PENALTY = envFloat("SQUALL_AI_FREQ_PENALTY", 0.3, 0, 2);
+//
+// THE DEFAULT IS NOW 0, AND THAT IS FORCED BY THE MODEL, NOT A JUDGEMENT THAT THE DAMPER
+// WAS USELESS. Checked against the live OpenRouter catalogue on 2026-09-08: every model
+// advertising `frequency_penalty` is in the cheap flash tier — the same tier the loops
+// come from — while no frontier model implements it at all. So the damper and a frontier
+// model are mutually exclusive, and the escape hatch above is the only reason a swap to
+// one is a dashboard change rather than an outage.
+//
+// What that trades away is measured, not assumed. On deepseek-v4-flash-0731 WITH the
+// damper at 0.3, a 15-case sweep still produced 4 corrupted runs and 2 runaways of 79k
+// and 88k characters — so the damper was not preventing the failure it was added for.
+// The bet is that a frontier model does not need it. If GPT-5.6 Luna loops anyway, the
+// answer is a better model or a lower ANALYSIS_MAX, not a penalty it cannot accept.
+const AI_FREQ_PENALTY = envFloat("SQUALL_AI_FREQ_PENALTY", 0, 0, 2);
 const AI_SAMPLING = {
   temperature: envFloat("SQUALL_AI_TEMPERATURE", 0.3, 0, 2),
   ...(AI_FREQ_PENALTY > 0
