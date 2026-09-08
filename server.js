@@ -13,8 +13,24 @@ const SCRAPER_PATH = process.env.SQUALL_SCRAPER_PATH || "./scraperFinal.py";
 const SCREENER_PATH = process.env.SQUALL_SCREENER_PATH || "./screener.py";
 const BACKTESTER_PATH = process.env.SQUALL_BACKTESTER_PATH || "./backtester.py";
 const PORT        = process.env.PORT || 3000;
-const AI_MODEL    = "deepseek/deepseek-v4-flash-0731";    // interprets the structured payload; it never searches for market/news data
-const UTILITY_MODEL = "deepseek/deepseek-v4-flash";      // translates/refines screener language only; no web plugin
+// Interprets the structured payload; it never searches for market/news data.
+// Env-overridable so a model can be swapped and rolled back from the Railway
+// dashboard, the same shape as every other knob here. That matters more than it
+// looks: a 15-case evaluation sweep costs ~23 minutes, and comparing two models
+// used to mean a deploy in each direction.
+//
+// MIND THE SAMPLING COUPLING WHEN CHANGING THIS. `require_parameters: true` rides
+// along with SQUALL_AI_FREQ_PENALTY and filters the provider pool to hosts that
+// implement EVERY parameter sent — including `temperature`. No frontier model on
+// OpenRouter (the GPT-5.x family, Claude, Gemini) implements `frequency_penalty`,
+// and several do not accept `temperature` either, so pointing this at one while the
+// penalty is non-zero fails every request with "No allowed providers are available"
+// rather than degrading. Set SQUALL_AI_FREQ_PENALTY=0 in the same change.
+const AI_MODEL    = process.env.SQUALL_AI_MODEL || "deepseek/deepseek-v4-flash-0731";
+// Translates/refines screener language only; no web plugin. Deliberately a separate
+// knob: this one is a cheap-and-fast job, and it should not be dragged upmarket just
+// because the analysis model was.
+const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4-flash";
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -2971,6 +2987,8 @@ module.exports = {
   acquirePy, readBody, validateChatPayload, limitStats,
   // AI stream termination — exported so truncation detection is testable without a provider.
   newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
+  // Model selection — exported so the env override is testable without a provider.
+  AI_MODEL, UTILITY_MODEL,
   // Reasoning budget — exported so the absolute cap can be checked without a provider.
   reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
 };

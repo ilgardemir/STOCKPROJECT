@@ -635,3 +635,27 @@ test("zeroing the repetition damper also drops the provider constraint it needs"
   assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "banana" }).frequency_penalty, 0.3);
   assert.equal(read({ SQUALL_AI_FREQ_PENALTY: "9" }).frequency_penalty, 0.3);
 });
+
+test("both models are env-overridable and independent of each other", () => {
+  // Swapping the analysis model used to mean a deploy in each direction, which made
+  // A/B-ing two models on a 23-minute sweep prohibitive. The screener's utility model
+  // is a separate knob on purpose: it does cheap translation work and should not be
+  // dragged upmarket just because the analysis model was.
+  const { execFileSync } = require("node:child_process");
+  const read = env => JSON.parse(execFileSync(process.execPath,
+    ["-e", "const s=require('./server');" +
+           "process.stdout.write(JSON.stringify({a:s.AI_MODEL,u:s.UTILITY_MODEL}))"],
+    { env: { ...process.env, encoding: undefined, ...env }, encoding: "utf8" }));
+
+  const dflt = read({});
+  assert.equal(dflt.a, "deepseek/deepseek-v4-flash-0731");
+  assert.equal(dflt.u, "deepseek/deepseek-v4-flash");
+
+  const swapped = read({ SQUALL_AI_MODEL: "openai/gpt-5.6-luna" });
+  assert.equal(swapped.a, "openai/gpt-5.6-luna");
+  assert.equal(swapped.u, dflt.u, "the utility model must not follow the analysis model");
+
+  assert.equal(read({ SQUALL_UTILITY_MODEL: "x/y" }).u, "x/y");
+  // An empty value is not a model name; it must fall back rather than send "".
+  assert.equal(read({ SQUALL_AI_MODEL: "" }).a, dflt.a);
+});
