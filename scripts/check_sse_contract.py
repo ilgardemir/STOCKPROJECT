@@ -35,7 +35,14 @@ QUOTED = re.compile(r'["\'`]' + _NAME + r'["\'`]')
 # that misses a real send — fails silent, which is the whole failure mode this file exists
 # to prevent.
 SEND_LINE = re.compile(r'\bsend\(')
-HEARD = re.compile(r'addEventListener\(\s*["\'`]' + _NAME + r'["\'`]')
+# Either the raw DOM call or the one-line `on(name, fn)` wrapper backtester.js
+# registers its listeners through. The wrapper exists so every event re-arms the
+# stream watchdog from a single place; a listener added later cannot forget to keep
+# the run alive. Matching only addEventListener made all eleven listeners invisible
+# here at once, which is a loud failure and the correct one — but the fix belongs in
+# the pattern, not in undoing the indirection. Narrow on purpose: `on(` counts only
+# when its first argument is a quoted backtest_* literal.
+HEARD = re.compile(r'(?:addEventListener|\bon)\(\s*["\'`]' + _NAME + r'["\'`]')
 
 
 def sent_events(server: str) -> set[str]:

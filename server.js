@@ -2062,6 +2062,27 @@ function sseHeaders(gate) {
   return h;
 }
 
+/**
+ * An SSE writer that cannot take the process down.
+ *
+ * These closures are called from places that are NOT on the request handler's own
+ * call stack — a child process's stderr 'data' handler, a spawn 'close' callback, a
+ * queue tick — so a throw out of res.write (ERR_STREAM_DESTROYED on a socket the
+ * peer already dropped) is an uncaught exception rather than a rejected promise. No
+ * try/catch around the handler can see it, and Node's default action is to kill the
+ * process: one client disconnecting at the wrong moment would drop every other
+ * user's in-flight stream, and the visitor who arrives while the container restarts
+ * gets a request that is never answered. Writing to a gone peer is a normal outcome
+ * and must be a no-op.
+ */
+function sseWriter(res, isConnected) {
+  return (event, data) => {
+    if (res.writableEnded || (isConnected && !isConnected())) return;
+    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); }
+    catch (error) { console.warn(`SSE write dropped (${event}): ${error && error.message}`); }
+  };
+}
+
 /** JSON denial for the POST routes, where a real status code is still available. */
 function sendDenial(res, gate, status) {
   res.writeHead(status || 429, {
@@ -2140,7 +2161,59 @@ function validateChatPayload(parsed) {
 }
 
 // ─── HTTP SERVER ──────────────────────────────────────────────────────────────
-const appServer = http.createServer(async (req, res) => {
+/*
+ * The terminal event name each SSE route's listener is actually bound to.
+ *
+ * A fail-safe that emits the wrong name is exactly as silent as emitting nothing —
+ * the browser is not listening for it — so this table is part of the same SSE
+ * name contract that scripts/check_sse_contract.py enforces.
+ */
+const SSE_FAIL_EVENTS = [
+  ["/backtest-stream", "backtest_error"],
+  ["/screen-stream",   "screen_error"],
+  ["/analyze-stream",  "error"]
+];
+
+/**
+ * Last line of defence for a request that threw.
+ *
+ * The handler is async and was handed straight to http.createServer, which does not
+ * await it. A throw anywhere in a route therefore did two invisible things at once:
+ * it abandoned that client's socket with no status and no body — and a browser
+ * EventSource facing a request that is never answered stays in CONNECTING and never
+ * fires `error`, so the page cannot tell the difference between that and a slow
+ * analysis — and it surfaced as an unhandled rejection, which in Node 15+ takes the
+ * whole process down, so the NEXT visitor's request hangs against a container that
+ * is still restarting. One bug, two ways to look like "it just spins forever".
+ *
+ * Everything here is wrapped: this function runs because something already failed,
+ * so it is the one path that cannot afford a failure path of its own.
+ */
+function failRequest(req, res, error) {
+  const where = String((req && req.url) || "").split("?")[0];
+  console.error(`REQUEST failed unhandled: ${req && req.method} ${where} — ${error && error.stack ? error.stack : error}`);
+  try {
+    if (res.writableEnded) return;
+    const sse = SSE_FAIL_EVENTS.find(([prefix]) => where.startsWith(prefix));
+    if (!res.headersSent) {
+      // An SSE denial is reported in-band at 200 for the reason documented on the
+      // limiter: EventSource cannot read a non-200 body, so a real 500 here reaches
+      // the page as an indistinguishable connection failure.
+      if (sse) res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+      else res.writeHead(500, { "Content-Type": "application/json" });
+    }
+    if (sse) res.write(`event: ${sse[1]}\ndata: ${JSON.stringify({ error: "Squall hit an unexpected error handling this request. Nothing further will arrive on this stream — try again." })}\n\n`);
+    else res.write(JSON.stringify({ error: "Squall hit an unexpected error handling this request." }));
+  } catch (_) { /* the socket is already gone; ending below is all that is left */ }
+  try { res.end(); } catch (_) {}
+}
+
+const appServer = http.createServer((req, res) => {
+  Promise.resolve().then(() => handleRequest(req, res))
+    .catch(error => failRequest(req, res, error));
+});
+
+const handleRequest = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.end(); return; }
@@ -2184,7 +2257,7 @@ const appServer = http.createServer(async (req, res) => {
     // rather than discounted as "just a follow-up".
     const gate = admit(req, "screen");
     res.writeHead(200, sseHeaders(gate));
-    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = sseWriter(res);
     if (!gate.ok) {
       // Reported in-band at HTTP 200 on purpose: EventSource cannot read a non-200 body,
       // so a real 429 here would surface in app.js as "Connection lost. Is the server
@@ -2301,9 +2374,7 @@ const appServer = http.createServer(async (req, res) => {
     const gate = admit(req, "analyze");
     res.writeHead(200, sseHeaders(gate));
     let connected = true;
-    const send = (event, data) => {
-      if (connected && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
+    const send = sseWriter(res, () => connected);
     if (!gate.ok) {
       send("backtest_error", { error:gate.message, limited:true, rule:gate.rule,
         retry_after_s:gate.retryAfter, resets_at:gate.resetsAt });
@@ -2490,8 +2561,7 @@ const appServer = http.createServer(async (req, res) => {
 
     const gate = admit(req, cached ? "analyze_cached" : "analyze");
     res.writeHead(200, sseHeaders(gate));
-    const send = (event, data) =>
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = sseWriter(res);
     if (!gate.ok) {
       send("error", { error: gate.message, limited: true, rule: gate.rule, retry_after_s: gate.retryAfter, resets_at: gate.resetsAt });
       return res.end();
@@ -2867,7 +2937,7 @@ const appServer = http.createServer(async (req, res) => {
         "Connection":    "keep-alive",
         "X-Accel-Buffering": "no"
       });
-      const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      const send = sseWriter(res);
 
       let parsed;
       try { parsed = JSON.parse(rawBody); }
@@ -2968,7 +3038,7 @@ const appServer = http.createServer(async (req, res) => {
   // is an API caller with a wrong method or path, not a person in a browser — plain text.
   sendNotFound(req, res, false);
 
-});
+};
 
 if (require.main === module) {
   loadLimitState();
@@ -2979,6 +3049,32 @@ if (require.main === module) {
   process.on("SIGTERM", () => { flushLimitState(true); process.exit(0); });
   process.on("SIGINT",  () => { flushLimitState(true); process.exit(0); });
   process.on("beforeExit", () => flushLimitState(false));
+
+  /*
+   * Stay up, and say what happened.
+   *
+   * Both of these were previously unhandled, which meant the process died without
+   * printing which route did it — and the visitor who arrived during the restart got
+   * a request the container never answered, which an EventSource renders as a
+   * progress bar that simply never moves. The single most expensive property of this
+   * deployment is that it is one process: the limiter counters, the analysis cache
+   * and both engine caches live in it (see "the replica trap" in CLAUDE.md), so a
+   * crash to report one broken socket costs every other user's stream, the day's
+   * spend accounting, and a cold cache against providers we cannot afford to hammer.
+   *
+   * Surviving an uncaughtException is normally the wrong default because the process
+   * may be in an unknown state. Here the reachable sources are I/O on a socket or
+   * child that has already gone away — the fail-safes above turn the known ones into
+   * no-ops — so the state at risk is one request's, not the server's. Anything that
+   * proves otherwise will now arrive with a stack trace attached.
+   */
+  process.on("unhandledRejection", reason => {
+    console.error(`UNHANDLED rejection: ${reason && reason.stack ? reason.stack : reason}`);
+  });
+  process.on("uncaughtException", error => {
+    console.error(`UNCAUGHT exception: ${error && error.stack ? error.stack : error}`);
+    flushLimitState(true);
+  });
 
   appServer.listen(PORT, "0.0.0.0", () => {
     console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);

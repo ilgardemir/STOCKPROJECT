@@ -2,6 +2,7 @@
 
 let backtestSource = null;
 let backtestFinished = false;
+let backtestWatchdog = null;
 let backtestAnswer = "";
 let backtestThinking = "";
 let backtestPaint = null;
@@ -241,11 +242,47 @@ function renderBacktestOutcomes(payload) {
 
 function finishBacktest(label, error = false) {
   backtestFinished = true;
+  clearTimeout(backtestWatchdog);
   const button = document.getElementById("backtestRun");
   button.disabled = false;
   button.textContent = "Run historical analysis";
   setBacktestProgress(error ? 0 : 100, label, error);
   if (backtestSource) { backtestSource.close(); backtestSource = null; }
+}
+
+function showBacktestError(title, detail) {
+  document.getElementById("backtestError").innerHTML =
+    `<div class="backtest-error"><b>${btEsc(title)}</b><span>${btEsc(detail)}</span></div>`;
+}
+
+/*
+ * A silent stream must not look like a working one.
+ *
+ * An EventSource that connects and then says nothing is, to the page, identical to
+ * one that is busy: no error fires, so every handler below simply never runs and the
+ * progress bar keeps whatever label was last written. That label is set here at 1%
+ * BEFORE the stream is opened, so the observed failure was /ilgar sitting on
+ * "Starting the historical analysis" indefinitely with the Run button latched
+ * disabled — a page reload the only way out.
+ *
+ * Two windows rather than one, because the two silences mean different things.
+ * Nothing at all is a connection fault: the server's first event is unconditional
+ * and immediate (it precedes the queue, the engine and the AI), so twenty seconds
+ * without it means the request never arrived or was never answered. A gap AFTER
+ * events have flowed is normal — the model can think for a long stretch between
+ * tokens, and the decision-extraction call late in the run is a deliberate pause —
+ * so that window is generous and only catches a genuinely dead stream.
+ */
+const BT_FIRST_EVENT_MS = 20000;
+const BT_SILENCE_MS = 90000;
+
+function armBacktestWatchdog(source, ms, title, detail) {
+  clearTimeout(backtestWatchdog);
+  backtestWatchdog = setTimeout(() => {
+    if (backtestFinished || backtestSource !== source) return;
+    showBacktestError(title, detail);
+    finishBacktest(title, true);
+  }, ms);
 }
 
 function runBacktest() {
@@ -265,53 +302,77 @@ function runBacktest() {
   const button = document.getElementById("backtestRun");
   button.disabled = true; button.textContent = "Running…";
   setBacktestProgress(1, "Starting the historical analysis");
+  try {
+    openBacktestStream(ticker, asOf);
+  } catch (error) {
+    // Nothing else can report this. The submit handler swallows the exception, so an
+    // uncaught throw here left the button disabled under a 1% bar that never moved.
+    showBacktestError("Could not start the historical analysis",
+      `The request could not be opened in this browser (${error && error.message ? error.message : error}). Reload the page and try again.`);
+    finishBacktest("Could not start the historical analysis", true);
+  }
+}
+
+function openBacktestStream(ticker, asOf) {
   let url = `/backtest-stream?ticker=${encodeURIComponent(ticker)}&as_of=${encodeURIComponent(asOf)}`;
   const profile = typeof getMySquallProfile === "function" ? getMySquallProfile() : null;
   if (profile) url += `&profile=${encodeURIComponent(JSON.stringify(profile))}`;
   const source = backtestSource = new EventSource(url);
-  source.addEventListener("backtest_progress", event => {
+
+  // Every event is proof of life, so the timer is re-armed from one place rather than
+  // per handler — a listener added later cannot forget to keep the run alive.
+  const on = (name, fn) => source.addEventListener(name, event => {
+    armBacktestWatchdog(source, BT_SILENCE_MS, "The historical analysis stopped responding",
+      "The connection stayed open but sent nothing further. Nothing was charged for the unfinished part — run it again.");
+    fn(event);
+  });
+
+  armBacktestWatchdog(source, BT_FIRST_EVENT_MS, "No response from the historical analyzer",
+    "The connection opened but the server never answered. Check that Squall is reachable, then run it again.");
+
+  on("backtest_progress", event => {
     const data = JSON.parse(event.data); setBacktestProgress(data.percent, data.label);
   });
-  source.addEventListener("backtest_snapshot", event => {
+  on("backtest_snapshot", event => {
     const data = JSON.parse(event.data); renderBacktestSnapshot(data); openBacktestAi(data.model);
   });
-  source.addEventListener("backtest_ai_start", event => {
+  on("backtest_ai_start", event => {
     const data = JSON.parse(event.data); setBacktestProgress(98, "Writing the blind historical analysis");
     if (!document.getElementById("backtestAiBody")) openBacktestAi(data.model);
   });
-  source.addEventListener("backtest_ai_thinking", event => {
+  on("backtest_ai_thinking", event => {
     backtestThinking += JSON.parse(event.data).t || ""; scheduleBacktestAiPaint();
   });
-  source.addEventListener("backtest_ai_delta", event => {
+  on("backtest_ai_delta", event => {
     backtestAnswer += JSON.parse(event.data).t || ""; scheduleBacktestAiPaint();
   });
-  source.addEventListener("backtest_ai_done", event => {
+  on("backtest_ai_done", event => {
     const data = JSON.parse(event.data);
     if (data.aiSummary) backtestAnswer = data.aiSummary;
     if (data.aiReasoning) backtestThinking = data.aiReasoning;
     paintBacktestAi();
   });
-  source.addEventListener("backtest_ai_error", event => {
+  on("backtest_ai_error", event => {
     const data = JSON.parse(event.data);
     if (!document.getElementById("backtestAiBody")) openBacktestAi("AI unavailable");
     backtestAnswer += `${backtestAnswer ? "\n\n" : ""}> ${data.error}`;
     paintBacktestAi();
   });
-  source.addEventListener("backtest_decision", event => {
+  on("backtest_decision", event => {
     renderBacktestDecision(JSON.parse(event.data));
   });
-  source.addEventListener("backtest_outcomes", event => {
+  on("backtest_outcomes", event => {
     renderBacktestOutcomes(JSON.parse(event.data));
   });
-  source.addEventListener("backtest_done", () => finishBacktest("Historical analysis complete"));
-  source.addEventListener("backtest_error", event => {
+  on("backtest_done", () => finishBacktest("Historical analysis complete"));
+  on("backtest_error", event => {
     const data = JSON.parse(event.data);
-    document.getElementById("backtestError").innerHTML = `<div class="backtest-error"><b>Historical analysis unavailable</b><span>${btEsc(data.error || "The request could not be completed.")}</span></div>`;
+    showBacktestError("Historical analysis unavailable", data.error || "The request could not be completed.");
     finishBacktest(data.error || "Historical analysis unavailable", true);
   });
   source.onerror = () => {
     if (backtestFinished || backtestSource !== source) return;
-    document.getElementById("backtestError").innerHTML = `<div class="backtest-error"><b>Connection lost</b><span>Confirm that the Squall server is running, then try again.</span></div>`;
+    showBacktestError("Connection lost", "Confirm that the Squall server is running, then try again.");
     finishBacktest("Connection lost before completion", true);
   };
 }

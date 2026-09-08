@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/js/run.js && node tests/js/pagecheck.js && node tests/js/stream-retry.test.js && python3 -m unittest discover -s tests/python -p 'test_*.py' && python3 scripts/check_concept_vocabulary.py && python3 scripts/audit_sec_pressure.py && python3 scripts/check_sse_contract.py",
-    "test:js": "node tests/js/run.js && node tests/js/pagecheck.js && node tests/js/stream-retry.test.js",
+    "test": "node tests/js/run.js && node tests/js/pagecheck.js && node tests/js/stream-retry.test.js && node tests/js/stream-failsafe.test.js && python3 -m unittest discover -s tests/python -p 'test_*.py' && python3 scripts/check_concept_vocabulary.py && python3 scripts/audit_sec_pressure.py && python3 scripts/check_sse_contract.py",
+    "test:js": "node tests/js/run.js && node tests/js/pagecheck.js && node tests/js/stream-retry.test.js && node tests/js/stream-failsafe.test.js",
     "test:py": "python3 -m unittest discover -s tests/python -p 'test_*.py'",
     "test:contracts": "python3 scripts/check_concept_vocabulary.py && python3 scripts/audit_sec_pressure.py && python3 scripts/check_sse_contract.py"
   },
