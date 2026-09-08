@@ -313,10 +313,37 @@ function runBacktest() {
   }
 }
 
+/*
+ * Reading MySquall across the script boundary, without letting app.js's health decide
+ * whether /ilgar runs at all.
+ *
+ * app.js and this file are separate <script> elements, so a throw at app.js's top level
+ * does not stop this one — it leaves app.js HALF-EXECUTED. Its function DECLARATIONS are
+ * hoisted and initialised before the first statement runs, so they all remain callable,
+ * while every `let`/`const` below the throw stays permanently in its temporal dead zone.
+ * `typeof getMySquallProfile === "function"` is therefore TRUE, and calling it throws
+ * "Cannot access 'mySquallProfile' before initialization" — which is exactly how a fault
+ * somewhere else in app.js surfaced here as /ilgar refusing to start. The typeof guard
+ * was checking the wrong thing: the CALL is what needs guarding, not the binding.
+ *
+ * MySquall is personalization, so losing it must not cost the run — but it is reported
+ * rather than dropped silently, because a backtest sized by default risk when the user set
+ * their own is a different answer, not a cosmetic difference.
+ */
+function readMySquallForBacktest() {
+  if (typeof getMySquallProfile !== "function") return { profile:null, error:null };
+  try { return { profile:getMySquallProfile(), error:null }; }
+  catch (error) { return { profile:null, error:(error && error.message) || String(error) }; }
+}
+
 function openBacktestStream(ticker, asOf) {
   let url = `/backtest-stream?ticker=${encodeURIComponent(ticker)}&as_of=${encodeURIComponent(asOf)}`;
-  const profile = typeof getMySquallProfile === "function" ? getMySquallProfile() : null;
+  const { profile, error: profileError } = readMySquallForBacktest();
   if (profile) url += `&profile=${encodeURIComponent(JSON.stringify(profile))}`;
+  if (profileError) {
+    showBacktestError("Running without your MySquall profile",
+      `Squall could not read your saved preferences (${profileError}), so this run uses balanced defaults for risk, horizon and position size. The analysis itself is unaffected. Reloading the page usually restores it.`);
+  }
   const source = backtestSource = new EventSource(url);
 
   // Every event is proof of life, so the timer is re-armed from one place rather than

@@ -223,6 +223,23 @@ test("the watchdog is reset by activity, so a working run is never cut off", () 
   assert.equal(BT.__els.get("backtestError").innerHTML, "");
 });
 
+test("a half-executed app.js costs the profile, not the whole run", () => {
+  const BT = loadBacktester();
+  // The exact shape of a top-level throw in app.js: the hoisted function declaration
+  // survives, so `typeof` still says "function", but the `let` it reads is stranded in
+  // its temporal dead zone. Guarding the binding is impossible from here; only the call
+  // can be guarded.
+  BT.getMySquallProfile = () => { throw new ReferenceError("Cannot access 'mySquallProfile' before initialization"); };
+  startRun(BT);
+
+  assert.equal(BT.__lastSource instanceof BT.EventSource, true,
+    "The stream must still open — MySquall is personalization, not a prerequisite");
+  assert.match(BT.__els.get("backtestError").textContent || BT.__els.get("backtestError").innerHTML,
+    /MySquall/, "Silently swapping in default risk and sizing would change the answer unannounced");
+  assert.doesNotMatch(BT.__els.get("backtestProgressText").textContent, /Could not start/,
+    "This is a degraded run, not a failed one");
+});
+
 test("a throw while opening the stream is reported instead of latching the button", () => {
   const BT = loadBacktester();
   BT.EventSource = function () { throw new TypeError("Failed to construct 'EventSource'"); };
