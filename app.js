@@ -406,9 +406,19 @@ function commitTheme(def) {
   const root = document.documentElement;
   root.dataset.theme = def.id;
   root.dataset.mode = def.mode;
-  themeBtn.setAttribute("aria-label", `Appearance — ${def.label} theme`);
-  setTip(themeBtn, `Appearance · ${def.label}`);
-  themeMenu.querySelectorAll(".theme-opt").forEach(b =>
+  /* The tokens above are the theme; the two lines below are only its BUTTON. Guarded
+     because this runs at load, from the top level, in a file three pages share — and a
+     throw here does not fail the theme, it strands every let/const declared below this
+     call site in its temporal dead zone while leaving the hoisted functions callable.
+     The page then renders, `typeof fn === "function"` still answers true, and the damage
+     surfaces far away as "Cannot access 'x' before initialization". Chrome that is absent
+     for any reason — a stale cached page against fresh script, an include that did not
+     expand, a blocked element — must cost its own affordance and nothing else. */
+  if (themeBtn) {
+    themeBtn.setAttribute("aria-label", `Appearance — ${def.label} theme`);
+    setTip(themeBtn, `Appearance · ${def.label}`);
+  }
+  if (themeMenu) themeMenu.querySelectorAll(".theme-opt").forEach(b =>
     b.setAttribute("aria-checked", String(b.dataset.theme === def.id)));
   try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
   // Anything that samples resolved colors (hero wind field, the cssVar cache, future
@@ -449,7 +459,7 @@ function applyTheme(id, animate) {
   } catch (e) { commitTheme(def); done(); }
 }
 
-themeMenu.innerHTML =
+if (themeMenu) themeMenu.innerHTML =
   `<div class="theme-menu-head">Theme</div>` +
   THEMES.map(t => `<button class="theme-opt" type="button" role="menuitemradio" aria-checked="false"
       data-theme="${t.id}" style="--sw-bg:${t.bg}; --sw-accent:${t.accent}">
@@ -467,7 +477,7 @@ themeMenu.innerHTML =
 })();
 
 /* Menu open/close + roving keyboard focus */
-function themeMenuOpen() { return themeMenu.classList.contains("open"); }
+function themeMenuOpen() { return Boolean(themeMenu) && themeMenu.classList.contains("open"); }
 function openThemeMenu() {
   themeMenu.classList.add("open");
   themeBtn.setAttribute("aria-expanded", "true");
@@ -489,15 +499,15 @@ function moveThemeCursor(step) {
   next.focus();
 }
 
-themeBtn.addEventListener("click", () => { themeMenuOpen() ? closeThemeMenu(false) : openThemeMenu(); });
-themeMenu.addEventListener("click", e => {
+if (themeBtn) themeBtn.addEventListener("click", () => { themeMenuOpen() ? closeThemeMenu(false) : openThemeMenu(); });
+if (themeMenu) themeMenu.addEventListener("click", e => {
   const opt = e.target.closest(".theme-opt");
   if (!opt) return;
   applyTheme(opt.dataset.theme, true);
   themeBtn.classList.remove("picked"); void themeBtn.offsetWidth; themeBtn.classList.add("picked");
   closeThemeMenu(true);
 });
-themeMenu.addEventListener("keydown", e => {
+if (themeMenu) themeMenu.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); moveThemeCursor(1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); moveThemeCursor(-1); }
   else if (e.key === "Home") { e.preventDefault(); moveThemeCursor(-[...themeMenu.querySelectorAll(".theme-opt")].indexOf(document.activeElement)); }

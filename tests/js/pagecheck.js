@@ -114,14 +114,69 @@ const SEEDED_STORAGE = {
         }
       },
       history: [], range: 252, createdAt: 1, updatedAt: 2
+    },
+    /*
+     * A SECOND tab, and a used one. One near-empty session is not the returning-visitor
+     * path, it is the first-run path with a row in it — and the difference is load-bearing,
+     * because a real store reaches code the minimal one never does: a non-empty chat
+     * `history`, a compare ticker resolving to a real session (effectiveCompare returns a
+     * pane instead of null, so the compare half of drawChart executes at all), and a
+     * MySquall profile so the profile-shaped branches are not uniformly skipped.
+     *
+     * This exists because /ilgar broke in exactly one browser and the difference turned out
+     * not to be the browser: it was that profile's localStorage, accumulated over real use,
+     * against test stores that were nearly empty. A seed the shape of a first visit cannot
+     * find a fault that needs a second one.
+     */
+    BBB: {
+      data: {
+        ticker: "BBB", company_name: "Second Tab Corp", aiSummary: "## Verdict\n**Buy** — momentum.",
+        raw_data: { technicals: { current_price: 42 }, key_levels: { resistance: [], support: [] } },
+        live_quote: { last_price: 42 },
+        price_history: Array.from({ length: 420 }, (_, i) => ({
+          date: `2023-${String((i % 12) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`,
+          open: 40 + i * 0.02, high: 41 + i * 0.02, low: 39 + i * 0.02, close: 40.5 + i * 0.02, volume: 9000 + i
+        }))
+        // No intraday_history at all — the fund/thin-name payload, where the tiers must
+        // disappear rather than resolve to an empty series.
+      },
+      history: [
+        { role: "user", content: "Why is the RSI that low?" },
+        { role: "assistant", content: "Because the 14-day window is dominated by the March drawdown.", reasoning: "checking rsi window" },
+        { role: "user", content: "And the volume?" }
+      ],
+      range: "1W", profile: { risk: 4, horizon: 2, experience: 3, depth: 4, style: "swing", priorities: ["momentum"], custom: "" },
+      profileKey: "seeded", fibAnchors: { a: 12, b: 200 }, createdAt: 3, updatedAt: 9
     }
   }),
+  "squall-saved-screeners-v1": JSON.stringify({
+    scr1: {
+      id: "scr1", query: "cheap industrials with improving margins", title: "Saved screen",
+      spec: { title: "Saved screen", concepts: [{ id: "momentum", weight: 1 }], filters: [], settings: {} },
+      result: { results: [{ ticker: "CCC", name: "Third Co", score: 71, reasons: ["momentum"] }] },
+      history: [{ role: "assistant", content: "This screen returned 1 match." }],
+      createdAt: 4, updatedAt: 5
+    }
+  }),
+  "squall-profile-v1": JSON.stringify({ risk: 4, horizon: 2, experience: 3, depth: 4,
+    style: "swing", priorities: ["momentum", "valuation"], custom: "I trade breakouts" }),
+  "squall-chart-compare-v1": "BBB",
+  "squall-analysis-runs-v1": JSON.stringify([{ ticker: "AAA", at: Date.now() }]),
+  "squall-data-section": "technicals",
+  "squall-chat-h": "120",
+  "squall-chat-think": "1",
+  "squall-split": "0.55",
   "squall-theme": "dark"
 };
 
-function run(page, units, poisonId) {
+function run(page, units, poisonId, dropIds) {
   const html = assemble(page);
   const ids = idsOf(html);
+  // Simulates chrome that is absent at runtime even though the markup declares it: a
+  // stale cached page against a fresh script, an include that did not expand, an element
+  // removed by an extension. The distinction from poisonId is the point — poisonId proves
+  // the harness can fail, dropIds proves the PAGE degrades instead of dying.
+  for (const id of dropIds || []) ids.delete(id);
   const bodyPage = (html.match(/<body[^>]*data-page\s*=\s*["']([^"']+)["']/) || [])[1] || "analyzer";
   const cache = new Map();
   const noopEl = { dataset: {}, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
@@ -192,10 +247,12 @@ const JOBS = PAGES.map(page => [page, unitsOf(assemble(page))]);
 for (const page of ["index.html", "screener.html", "ilgar.html"]) {
   JOBS.push([page, [...unitsOf(assemble(page)), {
     name: "delete-saved-analysis",
+    // Driven off whatever the seed actually contains rather than off hardcoded tickers:
+    // the seed is meant to grow as new returning-visitor state turns out to matter, and a
+    // unit that names its rows fails on the next row added rather than on a real defect.
     code: () => `
       sessions.OTHER = { ...sessions.AAA, data: { ...sessions.AAA.data, ticker: "OTHER" } };
-      deleteSession("AAA");
-      deleteSession("OTHER");
+      for (const t of Object.keys(sessions)) deleteSession(t);
       if (Object.keys(sessions).length) throw new Error("Saved analyses were not removed");
     `
   }]]);
@@ -255,5 +312,34 @@ for (const [page, scripts] of JOBS) {
     console.error(`not ok - ${r.page} threw in ${r.script}\n  ${r.error}\n${r.stack}`);
   }
 }
-console.log(`\n${JOBS.length - failed}/${JOBS.length} pages executed clean`);
+
+/*
+ * Missing chrome must cost its own affordance, not the rest of the file.
+ *
+ * app.js is a classic script shared by three pages, so a throw at its top level does not
+ * "break the theme picker" — it stops execution dead. Every function DECLARATION stays
+ * hoisted and callable while every let/const below the throw is stranded in its temporal
+ * dead zone, so the page still renders, `typeof fn === "function"` still answers true, and
+ * the failure re-emerges somewhere unrelated as "Cannot access 'x' before initialization".
+ * Two thirds of app.js sits below the theme block, including runAnalysis, the MySquall
+ * profile and the hero wind field, which is exactly the set that went dead in the wild.
+ *
+ * The ids here are the shared header's, and the elements most plausibly absent at runtime
+ * while the markup still declares them: a page cached from an older deploy against a fresh
+ * app.js, an include that did not expand, an element an extension removed. The pages above
+ * prove app.js runs when the DOM is perfect; this proves it survives when it is not.
+ */
+const FRAGILE_CHROME = ["themeBtn", "themeMenu", "profileBtn", "tickerBar", "ticker", "searchForm"];
+for (const page of ["index.html", "screener.html", "ilgar.html"]) {
+  const scripts = unitsOf(assemble(page));
+  const r = run(page, scripts, undefined, FRAGILE_CHROME);
+  if (r.ok) console.log(`ok - ${page} survives missing shared chrome (${FRAGILE_CHROME.length} ids removed)`);
+  else {
+    failed += 1;
+    console.error(`not ok - ${r.page} died on missing chrome in ${r.script}\n  ${r.error}\n${r.stack}`);
+  }
+}
+
+const total = JOBS.length + 3;
+console.log(`\n${total - failed}/${total} pages executed clean`);
 if (failed) process.exitCode = 1;
