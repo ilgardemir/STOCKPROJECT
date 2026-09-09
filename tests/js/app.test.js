@@ -632,12 +632,28 @@ test("axis steps snap to the 1 / 2 / 2.5 / 5 family", () => {
 });
 
 test("decimals represent the step exactly, including the 2.5 family", () => {
-  // 2.5 x 10^n is the case a -log10 approximation gets wrong in both directions.
-  assert.equal(APP.niceTicks(0, 1, 5).dp, 2);        // step 0.25
-  assert.equal(APP.niceTicks(0, 10, 5).dp, 1);       // step 2.5
-  assert.equal(APP.niceTicks(0, 200, 5).dp, 0);      // step 50
-  assert.equal(APP.niceTicks(0, 0.04, 5).dp, 2);     // step 0.01
-  assert.equal(APP.niceTicks(0, 0.02, 5).dp, 3);     // step 0.005
+  // 2.5 x 10^n is the case a -log10 approximation gets wrong in both directions. Each case
+  // asserts the step too, so the example cannot silently stop exercising the rung it names.
+  for (const [lo, hi, step, dp] of [
+    [0, 1.25,  0.25,  2],
+    [0, 12.5,  2.5,   1],
+    [0, 250,   50,    0],
+    [0, 0.05,  0.01,  2],
+    [0, 0.025, 0.005, 3],
+  ]) {
+    const t = APP.niceTicks(lo, hi, 5);
+    assert.equal(Number(t.step.toPrecision(6)), step, `[${lo},${hi}] step`);
+    assert.equal(t.dp, dp, `[${lo},${hi}] decimals`);
+  }
+});
+
+test("the axis stays near its target gridline count on both sides of a decade", () => {
+  /* Rounding the step up halves the count. A $916-941 pane came back with $920 and $940
+     alone because its ideal step of 10.9 was rounded to 20. */
+  for (const [lo, hi] of [[906.8, 950.4], [195, 294], [0, 100], [187.21, 187.94], [12.5, 61.3], [1, 3], [0.42, 0.98], [900, 4300]]) {
+    const n = APP.niceTicks(lo, hi, 5).ticks.length;
+    assert.ok(n >= 3 && n <= 8, `[${lo},${hi}] produced ${n} gridlines`);
+  }
 });
 
 test("every tick lands inside the range it was asked for", () => {
@@ -653,6 +669,83 @@ test("a degenerate range yields no gridlines rather than an infinite loop", () =
   assert.deepEqual(plain(APP.niceTicks(50, 50, 5).ticks), []);
   assert.deepEqual(plain(APP.niceTicks(50, 10, 5).ticks), []);
   assert.deepEqual(plain(APP.niceTicks(NaN, 10, 5).ticks), []);
+});
+
+/* ── Percent scale + the shared compare domain ──────────────────────────────── */
+
+// A rising series and a much pricier, flatter one — the shape the compare split exists for.
+const ramp = (start, step, n) => Array.from({ length: n }, (_, i) => {
+  const c = start + step * i;
+  return bar(`2024-01-${String((i % 28) + 1).padStart(2, "0")}`, c, c + 1, c - 1, c, 1000);
+});
+
+function paneFor(state, ticker, bars, range = "1Y") {
+  state(`sessions[${JSON.stringify(ticker)}] = { data: { ticker: ${JSON.stringify(ticker)},
+    price_history: ${JSON.stringify(bars)} }, history: [], range: ${JSON.stringify(range)} };`);
+  return state(`resolvePane(sessions[${JSON.stringify(ticker)}], ${JSON.stringify(ticker)}, rangeSpec("${range}"))`);
+}
+
+test("a resolved pane reports its extent in percent from its first visible bar", () => {
+  const state = loadApp();
+  const pane = paneFor(state, "UP", ramp(100, 1, 60));
+  assert.equal(pane.ok, true);
+  assert.equal(pane.base, 100);
+  // lo/hi carry the existing 1% padding, so the percent span brackets the raw 0..59% move.
+  assert.ok(pane.pct.lo < 0 && pane.pct.hi > 59, `pct span ${JSON.stringify(pane.pct)}`);
+});
+
+test("two panes at different price levels reconcile onto one percent domain", () => {
+  /* The defect this fixes: NVDA at $890 beside AMD at $95 drew two shapes on unrelated
+     absolute scales. In percent both are measured from their own first bar, so the domain
+     is the union of their MOVES, not of their prices. */
+  const state = loadApp();
+  const cheap = paneFor(state, "CHEAP", ramp(10, 0.5, 60));    // 10 -> 39.5, +295%
+  const dear = paneFor(state, "DEAR", ramp(900, 1, 60));       // 900 -> 959, +6.6%
+  const shared = state(`sharedPercentDomain([
+    resolvePane(sessions.CHEAP, "CHEAP", rangeSpec("1Y")),
+    resolvePane(sessions.DEAR, "DEAR", rangeSpec("1Y"))])`);
+  assert.ok(shared, "two usable panes must produce a domain");
+  assert.ok(shared.hi >= cheap.pct.hi - 1e-9, "the domain must cover the bigger mover");
+  assert.ok(shared.lo <= Math.min(cheap.pct.lo, dear.pct.lo) + 1e-9, "and both floors");
+  // The domain is in percent, so the $900 stock's price level does not enter it at all.
+  assert.ok(shared.hi < 400, `domain leaked absolute prices: ${JSON.stringify(shared)}`);
+});
+
+test("a pane with an unusable base drops out of the domain instead of poisoning it", () => {
+  const state = loadApp();
+  paneFor(state, "GOOD", ramp(100, 1, 60));
+  // A zero first close would make every percent infinite.
+  const zeroed = ramp(100, 1, 60).map((b, i) => i === 0 ? { ...b, open: 0, high: 0, low: 0, close: 0 } : b);
+  paneFor(state, "ZERO", zeroed);
+  const shared = state(`sharedPercentDomain([
+    resolvePane(sessions.GOOD, "GOOD", rangeSpec("1Y")),
+    resolvePane(sessions.ZERO, "ZERO", rangeSpec("1Y"))])`);
+  assert.ok(shared, "the usable pane still yields a domain");
+  assert.ok(isFinite(shared.lo) && isFinite(shared.hi), `non-finite domain ${JSON.stringify(shared)}`);
+});
+
+test("no usable pane yields no domain rather than an inverted one", () => {
+  const state = loadApp();
+  assert.equal(state("sharedPercentDomain([])"), null);
+  assert.equal(state("sharedPercentDomain([null, { ok: false }])"), null);
+});
+
+test("resolvePane reports not-ok for a series too short to chart", () => {
+  const state = loadApp();
+  const pane = paneFor(state, "THIN", ramp(50, 1, 3));
+  assert.equal(pane.ok, false);
+  assert.deepEqual(plain(pane.data), []);
+});
+
+test("the percent seed fires once and never overrides a later choice", () => {
+  const state = loadApp();
+  assert.equal(state("chartOpts.pct"), false);
+  assert.equal(state("seedPercentScaleForCompare()"), true);
+  assert.equal(state("chartOpts.pct"), true);
+  // Turned back off by hand, the seed must not switch it on again.
+  state("chartOpts.pct = false;");
+  assert.equal(state("seedPercentScaleForCompare()"), false);
+  assert.equal(state("chartOpts.pct"), false);
 });
 
 test("volume labels stay short enough for a 46px band", () => {

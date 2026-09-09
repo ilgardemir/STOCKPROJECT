@@ -158,6 +158,13 @@ const zoomActive = () => chartZoom.count !== null || chartZoom.offset !== 0;
    load-time applyTheme() repaints, and a const below that call site is a temporal dead
    zone that throws for every visitor holding a saved tab. */
 const chartPaneState = { primary: {}, compare: {} };
+/* Up here with the rest of the chart state for the same reason, and it earned its place the
+   hard way: resolvePane reads it to decide whether an in-flight Fib drag has to fit inside
+   the y-axis, and resolvePane is called from drawChart BEFORE the canvas check — so the
+   load-time applyTheme() repaint reaches it on a page that has never rendered a chart.
+   Declared beside paintChartPane, that is a temporal dead zone which throws at load and
+   takes every listener below it with it, on all four pages. pagecheck catches this. */
+const fibInteraction = { ticker: null, mode: false, pending: null, dragging: null };
 function resetZoom(key) {
   if (key !== undefined) chartZoom.key = key;
   chartZoom.count = null; chartZoom.offset = 0;
@@ -175,12 +182,29 @@ try { compareTicker = localStorage.getItem(CHART_COMPARE_KEY) || null; } catch (
 function effectiveCompare() {
   return compareTicker && compareTicker !== active && sessions[compareTicker] ? compareTicker : null;
 }
+/* Turning compare on for the first time also turns the percent scale on. Two absolute
+   price axes are never the right answer for a $890 stock beside a $95 one, and someone who
+   has just asked to compare has not yet been given a reason to go looking for a scale
+   setting. It is a one-shot default, not a lock: the flag records that the suggestion was
+   made, so switching back to dollars sticks and is never overridden again. */
+const CHART_PCT_SEEDED_KEY = "squall-chart-pct-seeded-v1";
+function seedPercentScaleForCompare() {
+  try {
+    if (localStorage.getItem(CHART_PCT_SEEDED_KEY)) return false;
+    localStorage.setItem(CHART_PCT_SEEDED_KEY, "1");
+  } catch (_) { return false; }
+  if (chartOpts.pct) return false;
+  chartOpts.pct = true;
+  return true;
+}
 function setCompareTicker(t, redraw = true) {
+  const wasComparing = Boolean(effectiveCompare());
   compareTicker = t && sessions[t] && t !== active ? t : null;
   try {
     if (compareTicker) localStorage.setItem(CHART_COMPARE_KEY, compareTicker);
     else localStorage.removeItem(CHART_COMPARE_KEY);
   } catch (_) {}
+  if (!wasComparing && effectiveCompare() && seedPercentScaleForCompare()) syncOverlayToggles();
   if (redraw) { syncChartChrome(); drawChart(); }
 }
 
@@ -2236,8 +2260,6 @@ function chartCardBody() {
       </button>
     </div>`;
 }
-const fibInteraction = { ticker: null, mode: false, pending: null, dragging: null };
-
 function manualFibLevels(anchors) {
   if (!anchors?.start || !anchors?.end || !isNum(anchors.start.price) || !isNum(anchors.end.price)) return null;
   const levels = {};
@@ -2260,7 +2282,7 @@ function toggleFibDraw() {
   const same = fibInteraction.mode && fibInteraction.ticker === active;
   fibInteraction.ticker = active; fibInteraction.mode = !same; fibInteraction.pending = null; fibInteraction.dragging = null;
   if (!same) chartOpts.fib = true;
-  document.querySelectorAll('input[data-opt="fib"]').forEach(cb => { cb.checked = chartOpts.fib; cb.closest(".toggle")?.classList.toggle("on", chartOpts.fib); });
+  syncOverlayToggles();
   syncFibControls(); drawChart();
 }
 function clearManualFib() {
@@ -2366,6 +2388,18 @@ function syncOverlayCount() {
   const n = OVERLAY_OPTS.filter(k => chartOpts[k]).length;
   document.querySelectorAll("[data-overlay-count]").forEach(el => { el.textContent = n ? String(n) : ""; });
 }
+/* Writes chartOpts back into every copy of the toggles — the inline menu and the clone
+   expandChart puts in the modal bar — plus the count badge. Anything that changes an
+   overlay from code rather than from a click has to call this, or the checkbox and the
+   chart disagree about what is switched on and only one of them is visible. */
+function syncOverlayToggles() {
+  document.querySelectorAll("input[data-opt]").forEach(cb => {
+    const on = Boolean(chartOpts[cb.dataset.opt]);
+    cb.checked = on;
+    cb.closest(".toggle")?.classList.toggle("on", on);
+  });
+  syncOverlayCount();
+}
 const overlayMenuOpen = () => document.getElementById("overlayMenu")?.classList.contains("open") || false;
 function closeOverlayMenu() {
   document.getElementById("overlayMenu")?.classList.remove("open");
@@ -2428,10 +2462,15 @@ function observeChartBox() {
    here would be a temporal dead zone for every visitor holding a saved tab. */
 function niceTicks(lo, hi, target = 5) {
   if (!isNum(lo) || !isNum(hi) || !(hi > lo)) return { ticks: [], dp: 2, step: 0 };
-  const raw = (hi - lo) / Math.max(1, target - 1);
+  /* Divided by `target`, not `target - 1`. Ticks here are INTERIOR to [lo,hi] — the range
+     comes from the data and does not land on round numbers — so a step sized for `target-1`
+     intervals loses roughly one tick at each end and consistently under-draws. A $916-941
+     pane came back with $920 and $940 alone; a $0.42-0.98 one with two lines. */
+  const raw = (hi - lo) / Math.max(1, target);
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
   const norm = raw / mag;
-  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  // Rungs placed so the count stays near the target from either side of a decade boundary.
+  const step = (norm <= 1.2 ? 1 : norm <= 2 ? 2 : norm <= 3 ? 2.5 : norm <= 6 ? 5 : 10) * mag;
   const ticks = [];
   // The epsilon is on the loop bound, not on the values: floating accumulation otherwise
   // drops the top tick roughly half the time and the axis looks short by one line.
@@ -2486,6 +2525,88 @@ function chartSlots() {
   ];
 }
 
+/* ── Pane resolution ──────────────────────────────────────────────────────────
+   Everything a pane will draw, worked out without touching a canvas: which timeframe it
+   fell back to, which bars are on screen, the indicators over them, and the price bounds
+   those bars plus their surviving overlays need.
+   This used to live inside the painter, which was right while a pane's scale was its own
+   business. It no longer is: percent mode has to put two panes on ONE domain, and that
+   cannot be decided by either pane alone. drawChart needs the answer one step before
+   anything is painted, so the resolution moved out here — one function, so the pre-pass
+   and the painter can never disagree about what is on screen or how tall it is. */
+function resolvePane(sess, ticker, primarySpec) {
+  const d = sess.data;
+  // A compare ticker need not have the tier the primary is on — a fund ships no intraday
+  // series at all — so availability is resolved per pane.
+  const spec = rangeAvailable(d, primarySpec) ? primarySpec : rangeSpec(DEFAULT_RANGE);
+  const all = seriesFor(d, spec.tf);
+  const full = Array.isArray(all) ? all.filter(p => isNum(p.close) && isNum(p.open) && isNum(p.high) && isNum(p.low)) : [];
+  if (full.length < 5) return { spec, full, win: null, data: [], ok: false };
+
+  // The tier's bar count is the DEFAULT window, not the window: zoom and pan move inside it.
+  const win = visibleWindow(full.length, spec.bars, chartZoom);
+  const data = full.slice(win.start, win.end);
+  if (data.length < 2) return { spec, full, win, data, ok: false };
+
+  /* Indicators are computed on the resolved series and then cut to the window, so on a
+     5-minute chart "MA 20" is twenty five-minute periods — the conventional reading — and
+     the first visible bar carries a real average rather than a null. */
+  const closes = full.map(p => p.close);
+  const cut = a => a.slice(win.start, win.end);
+  const bbF = bollinger(closes, 20, 2);
+  const ma = { ma20: cut(movingAvg(closes, 20)), ma50: cut(movingAvg(closes, 50)), ma200: cut(movingAvg(closes, 200)) };
+  const bb = { up: cut(bbF.up), lo: cut(bbF.lo), mid: cut(bbF.mid) };
+  const volAvg = chartOpts.vol ? cut(movingAvg(full.map(p => Number(p.volume) || 0), 20)) : null;
+
+  /* Overlay levels come from the DAILY series and are the same prices on every timeframe,
+     but the window they have to fit into is not. One session of 5-minute bars spans a
+     couple of dollars; a support level 8% away then sets the y-axis on its own and the
+     candles collapse into a sliver. The bars set the scale and a level only participates
+     if it lands near them — and a level outside that band is not drawn either, because a
+     line pinned to the top pixel is not information. */
+  const barLo = Math.min(...data.map(p => p.low)), barHi = Math.max(...data.map(p => p.high));
+  const slack = Math.max((barHi - barLo) * 0.6, barHi * 0.005);
+  const inBand = x => isNum(x) && x >= barLo - slack && x <= barHi + slack;
+
+  const kl = d.raw_data?.key_levels || {};
+  const resistance = chartOpts.sr ? (kl.resistance || []).filter(inBand) : [];
+  const support = chartOpts.sr ? (kl.support || []).filter(inBand) : [];
+  const fibAll = chartOpts.fib ? (manualFibLevels(sess.fibAnchors) || d.price_action?.fib || null) : null;
+  const fibIn = fibAll ? Object.fromEntries(Object.entries(fibAll).filter(([, x]) => inBand(x))) : null;
+  const fib = fibIn && Object.keys(fibIn).length ? fibIn : null;
+
+  const vals = [barLo, barHi];
+  if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x) && inBand(x)) vals.push(x, bb.lo[i]); });
+  resistance.forEach(x => vals.push(x));
+  support.forEach(x => vals.push(x));
+  if (fib) Object.values(fib).forEach(x => vals.push(x));
+  if (fibInteraction.ticker === ticker && fibInteraction.pending) vals.push(fibInteraction.pending.price);
+  const finite = vals.filter(isNum);
+  const lo = Math.min(...finite) * 0.99, hi = Math.max(...finite) * 1.01;
+
+  /* The pane's own extent expressed as percent from its first visible bar — the one unit
+     two panes with different price levels can be reconciled in. Null when the base is
+     unusable, which drops this pane out of the shared domain rather than poisoning it. */
+  const base = data[0].close;
+  const pct = (isNum(base) && base !== 0 && isNum(lo) && isNum(hi))
+    ? { lo: (lo - base) / base * 100, hi: (hi - base) / base * 100 } : null;
+
+  return { spec, full, win, data, ok: true, ma, bb, volAvg, resistance, support, fib, lo, hi, base, pct };
+}
+
+/* One percent domain across every pane on screen. This is the whole reason resolution
+   happens out here: a pane cannot know the other pane's range, and without that knowledge
+   "compare" draws two shapes on unrelated scales — NVDA at $890 beside AMD at $95 — which
+   is not a comparison, it is two charts sharing a border. Rebasing is per pane (each has
+   its own first visible bar) but the DOMAIN is shared, and that is what makes the two
+   shapes overlayable. */
+function sharedPercentDomain(panes) {
+  const spans = panes.map(p => p && p.ok ? p.pct : null).filter(Boolean);
+  if (!spans.length) return null;
+  const lo = Math.min(...spans.map(s => s.lo)), hi = Math.max(...spans.map(s => s.hi));
+  return (isNum(lo) && isNum(hi) && hi > lo) ? { lo, hi } : null;
+}
+
 function drawChart() {
   const sess = sessions[active]; if (!sess) return;
   // Resolve the timeframe before the series. A saved session can name a tier this payload
@@ -2500,48 +2621,40 @@ function drawChart() {
   const comparing = Boolean(effectiveCompare());
   const box = document.getElementById(window.chartExpanded ? "chartModalBody" : "chartBox");
   if (box) box.classList.toggle("comparing", comparing);
-  chartSlots().forEach(slot => {
-    const show = slot.role === "primary" || comparing;
-    if (slot.paneEl) slot.paneEl.hidden = !show;
+
+  const slots = chartSlots();
+  slots.forEach(slot => {
+    slot.show = slot.role === "primary" || comparing;
+    slot.pane = (slot.show && slot.sess) ? resolvePane(slot.sess, slot.ticker, spec) : null;
+  });
+  // Only computed when the scale is actually in percent; in dollars each pane keeps its own
+  // bounds exactly as before, and passing null is what says so.
+  const shared = chartOpts.pct ? sharedPercentDomain(slots.map(s => s.pane)) : null;
+
+  slots.forEach(slot => {
+    if (slot.paneEl) slot.paneEl.hidden = !slot.show;
     // The canvas check matters at load: applyTheme() repaints before renderAll has ever
     // built the chart card, so every element here is still null on the first call.
-    if (show && slot.sess && slot.canvas) paintChartPane(slot, spec, comparing);
+    if (slot.show && slot.sess && slot.canvas) paintChartPane(slot, spec, comparing, shared);
   });
 }
 
-function paintChartPane(slot, primarySpec, comparing) {
+function paintChartPane(slot, primarySpec, comparing, shared) {
   const sess = slot.sess, d = sess.data;
   const st = chartPaneState[slot.role];
   const canvas = slot.canvas, tipEl = slot.tip;
-  // A compare ticker need not have the tier the primary is on — a fund ships no intraday
-  // series at all — so availability is resolved per pane and the pane tag says what it
-  // actually drew rather than what was asked for.
-  const spec = rangeAvailable(d, primarySpec) ? primarySpec : rangeSpec(DEFAULT_RANGE);
-  const all = seriesFor(d, spec.tf);
+  const R = slot.pane;
+  if (!R) return;
+  const spec = R.spec;
+  // The pane tag names the interval it ACTUALLY drew rather than the one that was asked
+  // for, and is written even when there is nothing to paint below.
   const tagEl = slot.paneEl ? slot.paneEl.querySelector("[data-pane-tag]") : null;
   if (tagEl) tagEl.textContent = comparing ? (slot.ticker + (spec.id === primarySpec.id ? "" : " · " + spec.note)) : "";
-  if (!canvas || !tipEl || !Array.isArray(all) || all.length < 5) return;
+  if (!canvas || !tipEl || !R.ok) return;
 
-  const full = all.filter(p => isNum(p.close) && isNum(p.open) && isNum(p.high) && isNum(p.low));
-  if (full.length < 5) return;
-  // MAs and bands are computed on the resolved series, so on a 5-minute chart "MA 20" is
-  // twenty five-minute periods — the conventional reading. MA 200 simply yields nulls on a
-  // 78-bar view and the line renderer already skips those.
-  const closesFull = full.map(p => p.close);
-  const ma20f = movingAvg(closesFull, 20), ma50f = movingAvg(closesFull, 50), ma200f = movingAvg(closesFull, 200);
-  const bbF = bollinger(closesFull, 20, 2);
-  // Same treatment for volume: computed on the full series so the first bar of the visible
-  // window carries a real average instead of nineteen nulls.
-  const volAvgF = chartOpts.vol ? movingAvg(full.map(p => Number(p.volume) || 0), 20) : null;
-
-  // The tier's bar count is the DEFAULT window, not the window: zoom and pan move inside it.
-  const len = full.length;
-  const win = visibleWindow(len, spec.bars, chartZoom);
-  const data = full.slice(win.start, win.end);
-  if (data.length < 2) return;
-  const ma20 = ma20f.slice(win.start, win.end), ma50 = ma50f.slice(win.start, win.end), ma200 = ma200f.slice(win.start, win.end);
-  const bb = { up: bbF.up.slice(win.start, win.end), lo: bbF.lo.slice(win.start, win.end), mid: bbF.mid.slice(win.start, win.end) };
-  const volAvg = volAvgF ? volAvgF.slice(win.start, win.end) : null;
+  const full = R.full, win = R.win, data = R.data, len = full.length;
+  const ma20 = R.ma.ma20, ma50 = R.ma.ma50, ma200 = R.ma.ma200;
+  const bb = R.bb, volAvg = R.volAvg;
 
   const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
   if (!W || !H) return;
@@ -2562,40 +2675,27 @@ function paintChartPane(slot, primarySpec, comparing) {
     if (rt >= 1) st.revealT0 = 0; else reveal = 1 - Math.pow(1 - rt, 3);
   }
 
-  const kl = d.raw_data?.key_levels || {};
   const manualAnchors = sess.fibAnchors;
-  const fibAll = chartOpts.fib ? (manualFibLevels(manualAnchors) || d.price_action?.fib || null) : null;
+  const srLevels = [...R.resistance.map(x => [x, cssVar("--down")]),
+                    ...R.support.map(x => [x, cssVar("--up")])];
+  const fibVisible = R.fib;
 
-  /* Overlay levels are computed from the DAILY series and are the same prices on every
-     timeframe, but the window they have to fit into is not. One session of 5-minute bars
-     spans a couple of dollars; a support level 8% away then sets the y-axis on its own and
-     the candles collapse into a sliver at the edge of the plot. So the bars set the scale
-     and a level only participates if it lands near them. A level outside that band is not
-     drawn either — a line pinned to the top pixel of the chart is not information, and
-     silently rescaling around it loses the price action the reader came for. */
-  const barLo = Math.min(...data.map(p => p.low)), barHi = Math.max(...data.map(p => p.high));
-  const slack = Math.max((barHi - barLo) * 0.6, barHi * 0.005);
-  const inBand = x => isNum(x) && x >= barLo - slack && x <= barHi + slack;
-
-  const srLevels = chartOpts.sr ? [...(kl.resistance || []).filter(inBand).map(x => [x, cssVar("--down")]),
-                                   ...(kl.support || []).filter(inBand).map(x => [x, cssVar("--up")])] : [];
-  const fib = fibAll ? Object.fromEntries(Object.entries(fibAll).filter(([, x]) => inBand(x))) : null;
-  const fibVisible = fib && Object.keys(fib).length ? fib : null;
-
-  // price bounds (include the overlays that survived the band so nothing clips)
-  let vals = [barLo, barHi];
-  if (chartOpts.bb) bb.up.forEach((x, i) => { if (isNum(x) && inBand(x)) vals.push(x, bb.lo[i]); });
-  srLevels.forEach(l => vals.push(l[0]));
-  if (fibVisible) Object.values(fibVisible).forEach(x => vals.push(x));
-  if (fibInteraction.ticker === slot.ticker && fibInteraction.pending) vals.push(fibInteraction.pending.price);
-  vals = vals.filter(isNum);
-  const lo = Math.min(...vals) * 0.99, hi = Math.max(...vals) * 1.01;
+  /* Scale. In dollars a pane keeps its own bounds, exactly as before. In percent mode the
+     bounds are DERIVED from the shared domain instead: converting the domain back into
+     this pane's own prices means Y, Yinv, the levels, the candles and the bands all keep
+     working in price space and need no percent-awareness at all. Only the axis labels and
+     the two chips have to know, which is why the mode reaches no further than they do. */
+  const pctMode = Boolean(chartOpts.pct && shared && isNum(R.base) && R.base !== 0);
+  const toPct = v => (v - R.base) / R.base * 100;
+  const fromPct = p => R.base * (1 + p / 100);
+  const lo = pctMode ? fromPct(shared.lo) : R.lo;
+  const hi = pctMode ? fromPct(shared.hi) : R.hi;
 
   // The pane tag is an HTML label sitting over the canvas's top-left. The top gridline and
   // any S/R label near the high are drawn right there, so while comparing the plot gives up
   // a strip for it rather than letting two pieces of text share the same pixels. Nothing is
   // spent in the single-chart case, where the tag renders empty.
-  const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = comparing ? 26 : 12, padB = 30;
+  const padL = 54, padR = 14, padT = comparing ? 26 : 12, padB = 30;
   const volH = chartOpts.vol ? 46 : 0;
   const plotB = H - padB - volH;
   /* The volume band used to run from H-volH down to H-6 while the date labels drew at H-8,
@@ -2610,10 +2710,17 @@ function paintChartPane(slot, primarySpec, comparing) {
   const cw = Math.max(1, (W - padL - padR) / data.length);
   const bodyW = Math.max(1, Math.min(cw * 0.66, 13));
 
-  const axis = niceTicks(lo, hi, 5);
-  const fmtAxis = v => (axis.dp === 0 && Math.abs(v) >= 10000)
-    ? "$" + (v / 1000).toFixed(Math.abs(v) >= 1e5 ? 0 : 1) + "k"
-    : "$" + v.toLocaleString("en-US", { minimumFractionDigits: axis.dp, maximumFractionDigits: axis.dp });
+  /* Ticks are snapped in whatever unit the axis is labelled in — snapping prices and then
+     converting would give nicely-spaced dollars carrying ragged percentages. */
+  const axis = pctMode ? niceTicks(shared.lo, shared.hi, 5) : niceTicks(lo, hi, 5);
+  const fmtAxis = pctMode
+    ? v => (v >= 0 ? "+" : "") + v.toFixed(axis.dp) + "%"
+    : v => (axis.dp === 0 && Math.abs(v) >= 10000)
+      ? "$" + (v / 1000).toFixed(Math.abs(v) >= 1e5 ? 0 : 1) + "k"
+      : "$" + v.toLocaleString("en-US", { minimumFractionDigits: axis.dp, maximumFractionDigits: axis.dp });
+  // The chips report a single reading, so they carry their own precision rather than the
+  // axis's: the gridline step says how coarse the AXIS is, not how coarse the number is.
+  const fmtChip = v => pctMode ? ((toPct(v) >= 0 ? "+" : "") + toPct(v).toFixed(2) + "%") : fUsd(v);
 
   /* An opaque label in the left gutter, where the axis prices already live. The right
      gutter is 14px and widening it costs plot width on the axis a compare split has least
@@ -2635,11 +2742,9 @@ function paintChartPane(slot, primarySpec, comparing) {
   // grid + y axis
   ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.strokeStyle = cssVar("--rule"); ctx.lineWidth = 1;
   axis.ticks.forEach(val => {
-    const y = Y(val);
+    const y = Y(pctMode ? fromPct(val) : val);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
     ctx.textAlign = "left"; ctx.fillStyle = cssVar("--ink-dim"); ctx.fillText(fmtAxis(val), 6, y + 3);
-    if (chartOpts.pct) { const base = data[0].close; const pc = ((val - base) / base) * 100;
-      ctx.fillText((pc >= 0 ? "+" : "") + pc.toFixed(0) + "%", W - padR + 6, y + 3); }
   });
   /* The crosshair's time chip is opaque and lands on the date axis. Its span is computed
      here, before the axis is drawn, so the tick underneath can be SKIPPED rather than
@@ -2767,9 +2872,7 @@ function paintChartPane(slot, primarySpec, comparing) {
     ctx.strokeStyle = lastCol; ctx.globalAlpha = .7; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke();
     ctx.setLineDash([]); ctx.globalAlpha = 1;
-    // fUsd, not fmtAxis: the gridline step decides how coarse the AXIS is, and rounding the
-    // actual last trade to the nearest dollar because the gridlines are five apart is wrong.
-    gutterChip(ly, fUsd(lastBar.close), lastCol, cssVar("--chrome-0"));
+    gutterChip(ly, fmtChip(lastBar.close), lastCol, cssVar("--chrome-0"));
   }
 
   ctx.restore();   // lift the reveal clip
@@ -2928,7 +3031,7 @@ function paintChartPane(slot, primarySpec, comparing) {
     ctx.setLineDash([]); ctx.globalAlpha = 1;
     // Chips last and opaque: they sit over the gridline labels and the date ticks they
     // would otherwise have to be read through.
-    if (hy !== null) gutterChip(hy, fUsd(Yinv(hy)), cssVar("--ink"), cssVar("--chrome-0"));
+    if (hy !== null) gutterChip(hy, fmtChip(Yinv(hy)), cssVar("--ink"), cssVar("--chrome-0"));
     if (stampBox) {
       ctx.font = "10px 'IBM Plex Mono', monospace";
       ctx.fillStyle = cssVar("--ink"); ctx.fillRect(stampBox.x, H - 18, stampBox.w, 14);
