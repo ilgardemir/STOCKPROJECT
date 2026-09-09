@@ -636,7 +636,17 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && document.g
 syncProfileButton();
 
 /* ════════════════ FORMATTERS ════════════════ */
-const isNum = v => v !== null && v !== undefined && typeof v === "number" && isFinite(v);
+/* A DECLARATION, not a `const` arrow like its neighbours, and that is load-bearing rather
+   than a style slip. isNum is the one formatter reached from the chart path, and the chart
+   path runs at LOAD: applyTheme() -> commitTheme() -> drawChart() fires ~170 lines above
+   this point for any visitor whose active saved tab resolves to a derived timeframe, so
+   aggregateBars called it while a `const` was still in its temporal dead zone. That threw
+   at app.js's top level, which strands every let/const below it and leaves the hoisted
+   functions callable — the page renders, the header links still work, and everything
+   wired below the throw is silently dead. Hoisting makes the ordering unbreakable instead
+   of merely correct today; the rest of this block is only ever reached from render code
+   and can stay as it is. */
+function isNum(v) { return v !== null && v !== undefined && typeof v === "number" && isFinite(v); }
 const fPct = (v, dp = 2) => isNum(v) ? (v * 100).toFixed(dp) + "%" : "N/A";
 const fRatio = (v, dp = 2) => isNum(v) ? v.toFixed(dp) : "N/A";
 function fUsd(v) { if (!isNum(v)) return "N/A"; const a = Math.abs(v);

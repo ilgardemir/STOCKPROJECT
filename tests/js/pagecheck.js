@@ -93,7 +93,12 @@ function makeEl(id) {
  * is most visitors, and it is the one where the load-time render actually executes.
  * Deliberately shaped like a PRE-timeframe session: `range` is the old numeric bar count,
  * so the legacy migration is exercised on every run rather than only when someone thinks
- * to test an upgrade.
+ * to test an upgrade. That count is 5 (legacy "1W") rather than 252 for a specific reason:
+ * drawChart resolves the session's OWN range at its second line, so the saved range decides
+ * which timeframe the load-time render actually resolves. A daily tier reads price_history
+ * straight out of the payload and touches almost nothing; only an intraday tier runs the
+ * 30m rollup. Pairing a legacy count that migrates to a DERIVED tier with a payload that
+ * carries 5m bars is what makes the returning-visitor path exercise aggregateBars at all.
  */
 const SEEDED_STORAGE = {
   "squall-saved-analyses-v1": JSON.stringify({
@@ -113,7 +118,18 @@ const SEEDED_STORAGE = {
           }))
         }
       },
-      history: [], range: 252, createdAt: 1, updatedAt: 2
+      /*
+       * Most-recently-updated, and that is the point rather than a detail. The load-time
+       * render reaches exactly ONE session — commitTheme calls drawChart only for
+       * `sessions[active]`, and hydrateSavedSessions picks active by updatedAt — so
+       * whichever tab sorts first is the only payload the returning-visitor path executes
+       * against. Seeding the intraday tiers on a tab that is not active tests nothing:
+       * seriesFor returns [] for the 30m tier before aggregateBars is ever called, which
+       * is how a temporal dead zone inside aggregateBars stayed green here while breaking
+       * the site outright for anyone whose newest saved tab happened to carry 5m bars.
+       * The active tab must be the RICHEST one, not the sparsest.
+       */
+      history: [], range: 5, createdAt: 1, updatedAt: 12
     },
     /*
      * A SECOND tab, and a used one. One near-empty session is not the returning-visitor
