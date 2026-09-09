@@ -2417,6 +2417,45 @@ function observeChartBox() {
   _chartBoxRO.disconnect();
   _chartBoxRO.observe(box);
 }
+/* ── Axis ticks ───────────────────────────────────────────────────────────────
+   Gridlines snapped to 1 / 2 / 2.5 / 5 x 10^n. The axis used to cut [lo,hi] into four
+   equal parts and print each with `toFixed(val < 10 ? 2 : 0)` — decimals chosen from the
+   PRICE rather than from the span. Zoom a $187 stock into one session and the window is
+   seventy cents wide, so all five labels printed "$187" and the axis stopped carrying any
+   information at exactly the magnification where it matters most. The step is the only
+   number that knows how fine the scale is, so the decimals come from it.
+   Hoisted, like isNum, because the load-time applyTheme() repaints the chart: a `const`
+   here would be a temporal dead zone for every visitor holding a saved tab. */
+function niceTicks(lo, hi, target = 5) {
+  if (!isNum(lo) || !isNum(hi) || !(hi > lo)) return { ticks: [], dp: 2, step: 0 };
+  const raw = (hi - lo) / Math.max(1, target - 1);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  const ticks = [];
+  // The epsilon is on the loop bound, not on the values: floating accumulation otherwise
+  // drops the top tick roughly half the time and the axis looks short by one line.
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6 && ticks.length < 24; v += step) ticks.push(v);
+  /* Decimals that represent the step exactly — 2 for 0.25, 1 for 2.5, 0 for 50 — rather
+     than a log approximation, which gets the 2.5 x 10^n family wrong in both directions. */
+  let dp = 4;
+  for (let d = 0; d <= 4; d++) {
+    const scaled = step * Math.pow(10, d);
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) { dp = d; break; }
+  }
+  return { ticks, dp, step };
+}
+// Volume runs to ten digits and the label sits in a 46px band. fUsd's T/B/M shape without
+// the currency, since a share count is not money.
+function fVolShort(v) {
+  if (!isNum(v)) return "";
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  return String(Math.round(v));
+}
+
 function movingAvg(arr, n) { const out = new Array(arr.length).fill(null); let sum = 0;
   for (let i = 0; i < arr.length; i++) { sum += arr[i]; if (i >= n) sum -= arr[i - n]; if (i >= n - 1) out[i] = sum / n; } return out; }
 
@@ -2491,6 +2530,9 @@ function paintChartPane(slot, primarySpec, comparing) {
   const closesFull = full.map(p => p.close);
   const ma20f = movingAvg(closesFull, 20), ma50f = movingAvg(closesFull, 50), ma200f = movingAvg(closesFull, 200);
   const bbF = bollinger(closesFull, 20, 2);
+  // Same treatment for volume: computed on the full series so the first bar of the visible
+  // window carries a real average instead of nineteen nulls.
+  const volAvgF = chartOpts.vol ? movingAvg(full.map(p => Number(p.volume) || 0), 20) : null;
 
   // The tier's bar count is the DEFAULT window, not the window: zoom and pan move inside it.
   const len = full.length;
@@ -2499,6 +2541,7 @@ function paintChartPane(slot, primarySpec, comparing) {
   if (data.length < 2) return;
   const ma20 = ma20f.slice(win.start, win.end), ma50 = ma50f.slice(win.start, win.end), ma200 = ma200f.slice(win.start, win.end);
   const bb = { up: bbF.up.slice(win.start, win.end), lo: bbF.lo.slice(win.start, win.end), mid: bbF.mid.slice(win.start, win.end) };
+  const volAvg = volAvgF ? volAvgF.slice(win.start, win.end) : null;
 
   const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
   if (!W || !H) return;
@@ -2555,24 +2598,71 @@ function paintChartPane(slot, primarySpec, comparing) {
   const padL = 54, padR = chartOpts.pct ? 50 : 14, padT = comparing ? 26 : 12, padB = 30;
   const volH = chartOpts.vol ? 46 : 0;
   const plotB = H - padB - volH;
+  /* The volume band used to run from H-volH down to H-6 while the date labels drew at H-8,
+     so the axis was printed across the bottom of the bars. Giving the band its own top and
+     baseline separates them without spending any more height than volH already cost. */
+  const volTop = plotB + 10, volB = H - padB + 8;
   const X = i => padL + (i + 0.5) / data.length * (W - padL - padR);
   const Y = val => padT + (1 - (val - lo) / (hi - lo)) * (plotB - padT);
+  /* Inverse of Y. The crosshair reads a price off the pointer's own pixel rather than off
+     the hovered bar, which is what makes it a measuring line rather than a second tooltip. */
+  const Yinv = py => lo + (1 - (py - padT) / (plotB - padT)) * (hi - lo);
   const cw = Math.max(1, (W - padL - padR) / data.length);
   const bodyW = Math.max(1, Math.min(cw * 0.66, 13));
 
-  // grid + y axis ($)
-  ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.fillStyle = cssVar("--ink-dim"); ctx.strokeStyle = cssVar("--rule"); ctx.lineWidth = 1;
-  for (let g = 0; g <= 4; g++) { const val = lo + g / 4 * (hi - lo), y = Y(val);
+  const axis = niceTicks(lo, hi, 5);
+  const fmtAxis = v => (axis.dp === 0 && Math.abs(v) >= 10000)
+    ? "$" + (v / 1000).toFixed(Math.abs(v) >= 1e5 ? 0 : 1) + "k"
+    : "$" + v.toLocaleString("en-US", { minimumFractionDigits: axis.dp, maximumFractionDigits: axis.dp });
+
+  /* An opaque label in the left gutter, where the axis prices already live. The right
+     gutter is 14px and widening it costs plot width on the axis a compare split has least
+     of. Drawn over the tick labels deliberately — a chip and a gridline label sharing a
+     baseline is the collision this exists to resolve. */
+  const gutterChip = (yPx, text, bg, fg) => {
+    ctx.font = "10px 'IBM Plex Mono', monospace";
+    /* Sized to its text, not clamped to the gutter. A four-digit share price needs more
+       than the 50px between the canvas edge and padL, and a chip clamped narrower than its
+       label does not truncate it — fillText simply spills past the background onto the
+       plot. Overrunning the gutter is what every trading chart's price tag does anyway. */
+    const w = ctx.measureText(text).width + 8;
+    const x = Math.max(1, padL - 4 - w);
+    const y = Math.max(padT + 7, Math.min(plotB - 1, yPx));
+    ctx.fillStyle = bg; ctx.fillRect(x, y - 7, w, 14);
+    ctx.fillStyle = fg; ctx.textAlign = "left"; ctx.fillText(text, x + 4, y + 3);
+  };
+
+  // grid + y axis
+  ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.strokeStyle = cssVar("--rule"); ctx.lineWidth = 1;
+  axis.ticks.forEach(val => {
+    const y = Y(val);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
-    ctx.textAlign = "left"; ctx.fillText(val >= 1000 ? "$" + (val / 1000).toFixed(1) + "k" : "$" + val.toFixed(val < 10 ? 2 : 0), 6, y + 3);
+    ctx.textAlign = "left"; ctx.fillStyle = cssVar("--ink-dim"); ctx.fillText(fmtAxis(val), 6, y + 3);
     if (chartOpts.pct) { const base = data[0].close; const pc = ((val - base) / base) * 100;
-      ctx.textAlign = "left"; ctx.fillStyle = cssVar("--ink-dim"); ctx.fillText((pc >= 0 ? "+" : "") + pc.toFixed(0) + "%", W - padR + 6, y + 3); }
+      ctx.fillText((pc >= 0 ? "+" : "") + pc.toFixed(0) + "%", W - padR + 6, y + 3); }
+  });
+  /* The crosshair's time chip is opaque and lands on the date axis. Its span is computed
+     here, before the axis is drawn, so the tick underneath can be SKIPPED rather than
+     overprinted — a chip that only partly covers a label leaves a fragment of the old date
+     showing beside the new one, which reads as a rendering fault. */
+  let stampBox = null;
+  if (isNum(st.hover) && st.hover < data.length) {
+    const text = axisLabel(data[st.hover], spec.tf, true);
+    ctx.font = "10px 'IBM Plex Mono', monospace";
+    const w = ctx.measureText(text).width + 8;
+    stampBox = { text, w, x: Math.max(padL, Math.min(W - padR - w, X(st.hover) - w / 2)) };
   }
+
   // x axis (dates)
   ctx.textAlign = "center"; ctx.fillStyle = cssVar("--ink-dim");
   for (let g = 0; g <= 4; g++) {
     const i = Math.round(g / 4 * (data.length - 1));
     const label = axisLabel(data[i], spec.tf, g === 0 || g === 4);
+    if (stampBox) {
+      const lw = ctx.measureText(label).width;
+      const lx = Math.max(lw / 2 + 2, Math.min(W - lw / 2 - 2, X(i)));
+      if (lx + lw / 2 >= stampBox.x - 2 && lx - lw / 2 <= stampBox.x + stampBox.w + 2) continue;
+    }
     // Edge ticks carry the day as well as the clock, so they are the widest labels on the
     // axis and the outermost — centred on their own tick they run off the canvas and get
     // clipped mid-character. Nudge them inside instead of letting the edge eat them.
@@ -2587,9 +2677,24 @@ function paintChartPane(slot, primarySpec, comparing) {
   // volume
   if (chartOpts.vol) {
     const maxVol = Math.max(...data.map(p => p.volume || 0)) || 1;
-    data.forEach((p, i) => { const h = (p.volume || 0) / maxVol * (volH - 6);
+    const volY = v => volB - Math.max(0, Math.min(1, (Number(v) || 0) / maxVol)) * (volB - volTop);
+    data.forEach((p, i) => {
+      const y = volY(p.volume);
       ctx.fillStyle = (p.close >= p.open ? cssVar("--up") : cssVar("--down")); ctx.globalAlpha = .35;
-      ctx.fillRect(X(i) - bodyW / 2, H - 6 - h, bodyW, h); ctx.globalAlpha = 1; });
+      ctx.fillRect(X(i) - bodyW / 2, y, bodyW, volB - y); ctx.globalAlpha = 1;
+    });
+    /* The 20-period average is the reference the whole rest of the app already reasons in —
+       §6b feeds the model "volume against the 20-day average" and the dashboard quotes it —
+       so the chart was the one surface silent about it, showing bars whose only meaning was
+       "tallest in this window". On a 5-minute series it is twenty five-minute periods, the
+       same convention the price MAs follow. */
+    if (volAvg) {
+      ctx.beginPath(); let vst = false;
+      volAvg.forEach((v, i) => { if (!isNum(v)) return; vst ? ctx.lineTo(X(i), volY(v)) : ctx.moveTo(X(i), volY(v)); vst = true; });
+      ctx.strokeStyle = cssVar("--ink-dim"); ctx.lineWidth = 1; ctx.globalAlpha = .85; ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.fillStyle = cssVar("--ink-dim"); ctx.textAlign = "left";
+    ctx.fillText(fVolShort(maxVol), 6, volTop + 8);
   }
 
   // Bollinger band fill + lines
@@ -2651,6 +2756,22 @@ function paintChartPane(slot, primarySpec, comparing) {
     else { ctx.fillRect(x - bodyW / 2, top, bodyW, hgt); }
   });
 
+  /* Where it is now. Nothing marked the latest close, so "what does this trade at" meant
+     hovering the final candle — the one question a price chart should answer before it is
+     touched. Tinted by that bar's own direction so the marker agrees with the candle it
+     belongs to, and drawn after the candles so the line is never buried under one. */
+  const lastBar = data[data.length - 1];
+  if (lastBar && isNum(lastBar.close)) {
+    const lastCol = cssVar(lastBar.close >= lastBar.open ? "--up" : "--down");
+    const ly = Y(lastBar.close);
+    ctx.strokeStyle = lastCol; ctx.globalAlpha = .7; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    // fUsd, not fmtAxis: the gridline step decides how coarse the AXIS is, and rounding the
+    // actual last trade to the nearest dollar because the gridlines are five apart is wrong.
+    gutterChip(ly, fUsd(lastBar.close), lastCol, cssVar("--chrome-0"));
+  }
+
   ctx.restore();   // lift the reveal clip
   if (reveal < 1) {
     // glowing accent edge riding the reveal front — the "wind" doing the drawing
@@ -2666,13 +2787,15 @@ function paintChartPane(slot, primarySpec, comparing) {
     const p = data[i]; if (!p) return null;
     const py = e.clientY - rect.top;
     const price = Math.abs(py - Y(p.high)) <= Math.abs(py - Y(p.low)) ? p.high : p.low;
-    return { date: p.date, price, i, x: X(i), y: Y(price) };
+    // `py` is the raw pointer pixel; `price`/`y` are snapped to the nearer extreme for Fib
+    // placement. The crosshair wants the former, Fib the latter — hence both.
+    return { date: p.date, price, i, x: X(i), y: Y(price), py };
   };
   const showHover = e => {
     const hit = pointFromEvent(e); if (!hit) return;
     const i = hit.i;
     const p = data[i]; if (!p) return;
-    st.hover = i; drawChart();
+    st.hover = i; st.hoverY = hit.py; drawChart();
     tipEl.style.display = "block";
     const chg = ((p.close - p.open) / p.open) * 100;
     tipEl.innerHTML = `<b>${p.date}</b><br>O ${fUsd(p.open)} · H ${fUsd(p.high)}<br>L ${fUsd(p.low)} · C ${fUsd(p.close)}<br>
@@ -2692,7 +2815,7 @@ function paintChartPane(slot, primarySpec, comparing) {
   const setViewport = next => {
     if (next.count === win.count && next.offset === win.offset) return;
     chartZoom.count = next.count; chartZoom.offset = next.offset;
-    tipEl.style.display = "none"; st.hover = null;
+    tipEl.style.display = "none"; st.hover = null; st.hoverY = null;
     syncChartChrome(); drawChart();
   };
   // The window a gesture started from, so a pinch or a drag stays absolute against its own
@@ -2728,7 +2851,7 @@ function paintChartPane(slot, primarySpec, comparing) {
       st.drag = null; setPanning(false);
       st.pinch = { dist: Math.max(1, Math.abs(a.x - b.x)), anchor: fracFromClientX((a.x + b.x) / 2),
                    base: { count: win.count, offset: win.offset } };
-      tipEl.style.display = "none"; st.hover = null;
+      tipEl.style.display = "none"; st.hover = null; st.hoverY = null;
       try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
       return;
     }
@@ -2787,14 +2910,30 @@ function paintChartPane(slot, primarySpec, comparing) {
   canvas.onpointercancel = canvas.onpointerup;
   canvas.onmouseleave = () => {
     if (fibInteraction.dragging || st.drag || st.pinch) return;
-    tipEl.style.display = "none"; st.hover = null; drawChart();
+    tipEl.style.display = "none"; st.hover = null; st.hoverY = null; drawChart();
   };
 
-  // draw crosshair if hovering
+  /* Crosshair: two lines and two chips. It used to be a single vertical rule, which said
+     WHICH bar the pointer was on but not what price it sat at — the measurement people
+     actually take off a chart, and the reason a bare vertical reads as a decoration.
+     The horizontal follows the pointer's own pixel rather than the bar: the snap-to-high-
+     or-low in pointFromEvent exists for placing Fib anchors and would make a measuring
+     line jump between extremes as the cursor crossed the midpoint of a candle. */
   if (isNum(st.hover) && st.hover < data.length) {
     const x = X(st.hover);
-    ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .4; ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, plotB); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    const hy = isNum(st.hoverY) ? Math.max(padT, Math.min(plotB, st.hoverY)) : null;
+    ctx.strokeStyle = cssVar("--ink-dim"); ctx.globalAlpha = .45; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, plotB); ctx.stroke();
+    if (hy !== null) { ctx.beginPath(); ctx.moveTo(padL, hy); ctx.lineTo(W - padR, hy); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    // Chips last and opaque: they sit over the gridline labels and the date ticks they
+    // would otherwise have to be read through.
+    if (hy !== null) gutterChip(hy, fUsd(Yinv(hy)), cssVar("--ink"), cssVar("--chrome-0"));
+    if (stampBox) {
+      ctx.font = "10px 'IBM Plex Mono', monospace";
+      ctx.fillStyle = cssVar("--ink"); ctx.fillRect(stampBox.x, H - 18, stampBox.w, 14);
+      ctx.fillStyle = cssVar("--chrome-0"); ctx.textAlign = "left"; ctx.fillText(stampBox.text, stampBox.x + 4, H - 8);
+    }
   }
 
   // keep sweeping until the reveal completes

@@ -608,3 +608,57 @@ test("updated financial units and zero-estimate earnings render without invented
   assert.ok(earnings.includes("Beat"));
   assert.ok(!earnings.includes("0.0%"));
 });
+
+/* ── Y-axis ticks ───────────────────────────────────────────────────────────── */
+
+test("a tight intraday window gets an axis that distinguishes its gridlines", () => {
+  /* The defect this replaces: the axis cut [lo,hi] into four equal parts and printed each
+     with toFixed(val < 10 ? 2 : 0), so a $187 stock zoomed into one session printed "$187"
+     on all five lines. Decimals have to come from the step, not the price. */
+  const { ticks, dp } = APP.niceTicks(187.21, 187.94, 5);
+  assert.ok(ticks.length >= 3, `expected several gridlines, got ${ticks.length}`);
+  assert.ok(dp >= 1, "a 73-cent window needs decimals in its labels");
+  const labels = ticks.map(v => v.toFixed(dp));
+  assert.equal(new Set(labels).size, labels.length, `duplicate axis labels: ${labels.join(", ")}`);
+});
+
+test("axis steps snap to the 1 / 2 / 2.5 / 5 family", () => {
+  for (const [lo, hi] of [[0, 100], [187.21, 187.94], [12.5, 61.3], [1, 3], [0.42, 0.98], [900, 4300]]) {
+    const { step } = APP.niceTicks(lo, hi, 5);
+    const mag = Math.pow(10, Math.floor(Math.log10(step)));
+    const norm = Number((step / mag).toFixed(6));
+    assert.ok([1, 2, 2.5, 5].includes(norm), `step ${step} on [${lo},${hi}] normalises to ${norm}`);
+  }
+});
+
+test("decimals represent the step exactly, including the 2.5 family", () => {
+  // 2.5 x 10^n is the case a -log10 approximation gets wrong in both directions.
+  assert.equal(APP.niceTicks(0, 1, 5).dp, 2);        // step 0.25
+  assert.equal(APP.niceTicks(0, 10, 5).dp, 1);       // step 2.5
+  assert.equal(APP.niceTicks(0, 200, 5).dp, 0);      // step 50
+  assert.equal(APP.niceTicks(0, 0.04, 5).dp, 2);     // step 0.01
+  assert.equal(APP.niceTicks(0, 0.02, 5).dp, 3);     // step 0.005
+});
+
+test("every tick lands inside the range it was asked for", () => {
+  for (const [lo, hi] of [[187.21, 187.94], [0, 100], [12.5, 61.3], [0.42, 0.98]]) {
+    for (const v of APP.niceTicks(lo, hi, 5).ticks) {
+      assert.ok(v >= lo - 1e-9 && v <= hi + 1e-9, `tick ${v} escapes [${lo}, ${hi}]`);
+    }
+  }
+});
+
+test("a degenerate range yields no gridlines rather than an infinite loop", () => {
+  // drawChart can be handed a flat window — a halted ticker, or one bar repeated.
+  assert.deepEqual(plain(APP.niceTicks(50, 50, 5).ticks), []);
+  assert.deepEqual(plain(APP.niceTicks(50, 10, 5).ticks), []);
+  assert.deepEqual(plain(APP.niceTicks(NaN, 10, 5).ticks), []);
+});
+
+test("volume labels stay short enough for a 46px band", () => {
+  assert.equal(APP.fVolShort(1234), "1K");
+  assert.equal(APP.fVolShort(45600000), "45.6M");
+  assert.equal(APP.fVolShort(2300000000), "2.3B");
+  assert.equal(APP.fVolShort(842), "842");
+  assert.equal(APP.fVolShort(null), "");
+});
