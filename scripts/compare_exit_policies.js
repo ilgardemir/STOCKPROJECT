@@ -58,7 +58,7 @@ function summarise(label, rows, calls) {
 
 (async () => {
   const strict = [], shipped = [], oracle = [], reviewed = [];
-  let reviewCalls = 0, holds = 0, exits = 0;
+  let reviewCalls = 0, holds = 0, exits = 0, unusable = 0;
   const hasKey = !!process.env.OPENROUTER_API_KEY;
 
   for (const c of cases) {
@@ -80,7 +80,14 @@ function summarise(label, rows, calls) {
         const sim = await S.simulateTradeReviewed(dec, c.bars, async (prompt) => {
           reviewCalls++;
           const v = await S.requestBacktestReview(prompt, undefined);
-          if (v && v.action === "hold") holds++; else exits++;
+          // A rejected key, a 429 or an unparseable reply all arrive here as null, and
+          // simulateTradeReviewed correctly treats that as "take the deterministic exit".
+          // Counted separately so a run where EVERY call failed cannot be read as a
+          // reviewer that simply always chose to exit — that would be a bogus comparison
+          // reported as a real one.
+          if (v == null) unusable++;
+          else if (v.action === "hold") holds++;
+          else exits++;
           return v;
         });
         reviewed.push(ret(sim, dir));
@@ -95,13 +102,21 @@ function summarise(label, rows, calls) {
   summarise("tolerate one breach (shipped)", shipped, 0);
   if (hasKey) {
     summarise("AI re-review at each breach", reviewed, reviewCalls);
-    console.log(`\nreviewer said hold ${holds} times, exit ${exits} times`);
+    console.log(`\nreviewer said hold ${holds}, exit ${exits}, unusable ${unusable}`);
   } else {
     console.log("AI re-review at each breach     skipped - set OPENROUTER_API_KEY to run it");
   }
   summarise("oracle (unreachable ceiling)", oracle, 0);
 
   if (hasKey) {
+    if (unusable === reviewCalls) {
+      console.log(`\nNO USABLE REVIEW: all ${reviewCalls} calls failed or returned unparseable output.`);
+      console.log("The AI row above is just the deterministic exit and means nothing. Check the key,");
+      console.log("the OpenRouter balance, and any rate limit before reading this as a result.");
+      process.exitCode = 1;
+      return;
+    }
+    if (unusable) console.log(`WARNING: ${unusable} of ${reviewCalls} calls were unusable and fell back to the deterministic exit.`);
     const a = shipped.reduce((s, r) => s + r, 0) / shipped.length;
     const b = reviewed.reduce((s, r) => s + r, 0) / reviewed.length;
     console.log(`\nVERDICT: the AI re-review is ${b > a ? "AHEAD OF" : "BEHIND"} the free rule by ${pct(Math.abs(b - a))}, at a cost of ${reviewCalls} extra LLM calls.`);

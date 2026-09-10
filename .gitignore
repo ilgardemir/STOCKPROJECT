@@ -6,3 +6,6 @@ __pycache__
 *.pyc
 .claude/settings.local.json
 .superpowers/
+# Research input for scripts/compare_exit_policies.js — regenerate with
+# scripts/fetch_backtest_cases.py rather than committing ~130KB of bars.
+cases.json
