@@ -1147,11 +1147,16 @@ def build_ai_prompt(snapshot):
         "The market_regime label summarises the metrics beside it. It is not independent evidence and never outranks them, it carries no weighting, and any entries in its `conflicts` list must be addressed rather than resolved in the label's favour. Treat chart-pattern scores as candidate detectors, and an empty support or resistance list as no evidence either way.",
         "The `direction_guardrails` block is decided by the engine, not by you. If `no_short` is true you must take the long side and address the stated reasons; if `no_long` is true you must take the short side.",
         "If `event_risk` is present, say whether its earnings window opens inside your holding period. If it does, either shorten the horizon to close before it or state that you are accepting a gap your stop cannot cover. It is a window, never a date.",
-        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance, and a 1-, 3- or 6-month maximum holding period. MySquall preferences appended by the server set the risk, sizing emphasis and holding-period choice.",
+        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance (the level at which the stop starts trailing), and a 1-, 3- or 6-month maximum holding period. MySquall preferences appended by the server set the risk, sizing emphasis and holding-period choice.",
         # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned
         # exactly 3 and none returned 1, 4 or 5. Conviction now scales position size.
         "Conviction 3 is not a default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when nothing substantial contradicts it. It scales the simulated position size.",
-        "Size the stop off atr_pct, not a round number — closer than about 2x atr_pct is ordinary daily noise. This is research, not individualized financial advice.",
+        # The "closer than about 2x atr_pct" figure was removed rather than corrected to a
+        # term-scaled one: atr_pct is a DAILY range, so the right multiple depends on the
+        # holding period, and asking for sqrt(term) here would be a computation performed
+        # in the thinking budget — exactly the failure the block above documents. The
+        # engine widens a sub-noise stop itself (stopNoiseFloor in server.js).
+        "Size the stop off atr_pct, not a round number; the engine widens a stop that is inside the noise band for your holding period. This is research, not individualized financial advice.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
         json.dumps(projection, separators=(",", ":"), allow_nan=False),
     ])
