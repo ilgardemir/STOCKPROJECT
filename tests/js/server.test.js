@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
-  backtestProfilePlan, ensureBacktestPosition,
+  backtestProfilePlan, ensureBacktestPosition, stopNoiseFloor,
   LIM, COST, clientIp, clientKey, admit, buckets, globals,
   newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
   reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
@@ -453,6 +453,114 @@ test("MySquall risk settings bound an extracted stop and reward target", () => {
   assert.equal(decision.stop_pct, 0.05);
   assert.equal(decision.target_pct, 0.075);
   assert.equal(decision.position_pct, 0.10);
+});
+
+/* ── Term-scaled stop, and the trail that replaced the target ───────────────
+   atr_pct is a DAILY range, so 2.5x it is about two sessions of noise. Applied
+   unscaled to a 63-session hold it sat inside ordinary drift, and the target —
+   2x that again — was hit by drift before any thesis resolved. Measured over 18
+   cutoffs the median hold was 23 sessions against an intended 63. */
+
+test("stopNoiseFloor scales with the term and never exceeds the cap", () => {
+  // 2% daily ATR over the reference 1-month term is the unscaled 2.5x band.
+  assert.ok(Math.abs(stopNoiseFloor(0.02, 21, 0.5) - 0.05) < 1e-9);
+  // Price disperses with the square root of time; 3 months is sqrt(3) wider.
+  assert.ok(Math.abs(stopNoiseFloor(0.02, 63, 0.5) - 0.05 * Math.sqrt(3)) < 1e-9);
+  assert.ok(stopNoiseFloor(0.02, 126, 0.5) > stopNoiseFloor(0.02, 63, 0.5));
+  // The cap wins outright — a stated maximum acceptable loss is not scalable.
+  assert.equal(stopNoiseFloor(0.06, 126, 0.07), 0.07);
+  // No ATR, no floor: the pre-existing clamp is left exactly as it was.
+  assert.equal(stopNoiseFloor(null, 63, 0.1), null);
+  assert.equal(stopNoiseFloor(NaN, 63, 0.1), null);
+});
+
+test("a stop tighter than the term-scaled floor is widened, one wider is left alone", () => {
+  const snap = { technical:{ metrics:{ atr_pct:0.02 }, scores:{} } };
+  const profile = { risk:3, horizon:3, style:"balanced" };
+  // 3% on a 3-month hold is inside daily noise; the engine widens it to the floor.
+  const tight = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"3m", stop_pct:0.03, target_pct:0.06 }, snap, profile);
+  assert.ok(Math.abs(tight.stop_pct - 0.0866) < 1e-9, `widened to ${tight.stop_pct}`);
+  // Already outside the band: the model's own number stands.
+  const wide = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"3m", stop_pct:0.095, target_pct:0.19 }, snap, profile);
+  assert.equal(wide.stop_pct, 0.095);
+  // risk 3 caps at 10%, and the cap binds over both the request and the floor.
+  const capped = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"6m", stop_pct:0.40, target_pct:0.8 }, snap, profile);
+  assert.equal(capped.stop_pct, 0.10);
+});
+
+test("the horizon is resolved BEFORE the stop, so term scaling sees the real term", () => {
+  // The defect this guards: the horizon used to be resolved AFTER the stop, so a floor
+  // computed there would silently measure every trade against one default term. Nothing
+  // else in the suite can see that — the stop would still be plausible, just wrong.
+  const snap = { technical:{ metrics:{ atr_pct:0.02 }, scores:{} } };
+  const profile = { risk:5, horizon:5, style:"balanced" };
+  const short = ensureBacktestPosition({ direction:"long", conviction:3, horizon:"1m" }, snap, profile);
+  const long = ensureBacktestPosition({ direction:"long", conviction:3, horizon:"6m" }, snap, profile);
+  assert.equal(short.horizon, "1m");
+  assert.equal(long.horizon, "6m");
+  assert.ok(long.stop_pct > short.stop_pct,
+    `6m stop ${long.stop_pct} must exceed the 1m stop ${short.stop_pct}`);
+});
+
+test("the exit mode is carried on the decision, not read from env by the simulator", () => {
+  const snap = { technical:{ metrics:{ atr_pct:0.02 }, scores:{} } };
+  assert.equal(ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"3m" }, snap, null).exit_mode, "runner");
+});
+
+const runnerBars = (closes) => ({
+  dates: closes.map((_, i) => `2024-01-${String(i + 1).padStart(2, "0")}`),
+  open: closes.slice(), close: closes.slice(), spyOpen: [], spyClose: [] });
+const runnerCall = (over) => ({ direction:"long", stop_pct:0.10, target_pct:0.20,
+  horizon:"3m", exit_mode:"runner", ...over });
+
+test("the target arms a trail instead of closing the trade", () => {
+  // Runs to +30%, arming at +20%, then gives back more than the stop from the peak.
+  const sim = simulateTrade(runnerCall(), runnerBars([100, 110, 125, 130, 116, 115, 115]));
+  assert.equal(sim.exit.reason, "trail");
+  // Peak close 130 puts the trail at 117; the 116 close breaches and fills at the next open.
+  assert.equal(sim.exit.date, "2024-01-06");
+  assert.equal(sim.exit.price, 115);
+});
+
+test("an unarmed runner still exits on the fixed stop, exactly as before", () => {
+  const sim = simulateTrade(runnerCall(), runnerBars([100, 96, 89, 88, 88]));
+  assert.equal(sim.exit.reason, "stop");
+  assert.equal(sim.exit.date, "2024-01-04");
+});
+
+test("a pullback after arming does not disarm the trail", () => {
+  // Arms at 125, falls to 118 (still above the 112.5 trail), recovers, then trails
+  // off the NEW peak of 150 rather than the level it armed at.
+  const sim = simulateTrade(runnerCall(), runnerBars([100, 125, 118, 140, 150, 134, 134]));
+  assert.equal(sim.exit.reason, "trail");
+  assert.equal(sim.exit.date, "2024-01-07");
+});
+
+test("an armed trail that never breaches still ends at the horizon", () => {
+  const closes = [];
+  for (let i = 0; i < 25; i++) closes.push(100 + i * 2);
+  const sim = simulateTrade(runnerCall({ horizon:"1m" }), runnerBars(closes));
+  assert.equal(sim.exit.reason, "horizon");
+});
+
+test("the short side mirrors the trail", () => {
+  // Target is a FALL to 80, which arms at 75; the trail then sits 10% above the low.
+  const sim = simulateTrade(runnerCall({ direction:"short" }),
+    runnerBars([100, 90, 75, 70, 84, 85, 85]));
+  assert.equal(sim.exit.reason, "trail");
+  assert.equal(sim.exit.date, "2024-01-06");
+});
+
+test("an absent exit_mode keeps the legacy fixed-target exit", () => {
+  // Same precedent as an absent position_pct meaning fully invested: route decisions
+  // always arrive through ensureBacktestPosition, so the policy has exactly one owner.
+  const sim = simulateTrade({ direction:"long", stop_pct:0.10, target_pct:0.20, horizon:"3m" },
+    runnerBars([100, 110, 125, 130, 116, 115, 115]));
+  assert.equal(sim.exit.reason, "target");
 });
 
 test("simulated trade return scales with the MySquall position size", () => {

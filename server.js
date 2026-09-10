@@ -1116,6 +1116,17 @@ const BT_DIRECTIONS = new Set(["long", "short", "flat"]);
 const BT_HORIZONS = new Set(["1m", "3m", "6m"]);
 const BT_PROFILE_HORIZONS = ["1m", "1m", "3m", "6m", "6m"];
 const BT_PROFILE_POSITION_PCT = [0.10, 0.20, 0.35, 0.50, 0.65];
+// The term the 2.5x daily-ATR stop band was implicitly sized for. atr_pct is a DAILY
+// range (screener.py: tr.tail(14).mean() / last), so 2.5x it is about two sessions of
+// noise — reasonable for a 1-month trade and far inside ordinary drift for a 6-month
+// one. Measured over 18 cutoffs, the median /ilgar hold was 23 sessions against an
+// intended 63 because neither the stop nor the target scaled with the term.
+const BT_TERM_REFERENCE = 21;
+// Reverts the whole exit policy from the dashboard with no deploy — the same escape
+// hatch as SQUALL_AI_FREQ_PENALTY=0. Validated against a fixed set; a typo takes the
+// default rather than disabling the feature silently.
+const BT_EXIT_MODE = ["runner", "fixed"].includes(process.env.SQUALL_BT_EXIT_MODE)
+  ? process.env.SQUALL_BT_EXIT_MODE : "runner";
 
 /**
  * Re-checks the model's structured call against fixed enums and ranges, the same way
@@ -1232,6 +1243,25 @@ function fallbackBacktestDecision(snapshot, rawProfile) {
 }
 
 /**
+ * The width below which a stop is measuring noise rather than a broken thesis.
+ *
+ * Price disperses with the square root of time, so a fixed multiple of a single day's
+ * ATR is the wrong distance for every holding period but one. Scaling to the term is
+ * what stops a 63-session trade being closed by drift it was always going to see:
+ * NVDA 2023-01-17 exited on day 13 of a quarter it finished up 56.6%.
+ *
+ * Capped by the profile's own risk cap, so this can only raise a stop toward what
+ * MySquall already permits and never past it — the cap is a stated maximum acceptable
+ * loss, and a maximum is not scalable.
+ */
+function stopNoiseFloor(atrPct, sessions, cap) {
+  const atr = btFinite(atrPct);
+  if (atr == null) return null;
+  const scaled = 2.5 * atr * Math.sqrt(sessions / BT_TERM_REFERENCE);
+  return Math.min(Math.max(scaled, 0.03), 0.18, cap);
+}
+
+/**
  * Guarantees that every completed replay has a tradable, profile-calibrated call.
  * The model chooses direction when it returned usable JSON. MySquall deterministically
  * controls exposure and the supported holding window, so prompt compliance is not the
@@ -1246,16 +1276,6 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
     decision.decision_source = "ai";
   }
 
-  const metrics = snapshot?.technical?.metrics || {};
-  const atrPct = btFinite(metrics.atr_pct);
-  const volatilityStop = atrPct != null ? Math.max(0.03, Math.min(0.18, atrPct * 2.5)) : 0.08;
-  const requestedStop = decision.stop_pct == null ? volatilityStop : decision.stop_pct;
-  decision.stop_pct = Math.round(Math.min(requestedStop, plan.risk_stop_cap) * 10000) / 10000;
-  const profileTarget = decision.stop_pct * plan.reward_ratio;
-  const requestedTarget = decision.target_pct == null ? profileTarget : decision.target_pct;
-  decision.target_pct = Math.round(Math.min(0.50, Math.max(0.03,
-    requestedTarget, profileTarget)) * 10000) / 10000;
-
   /*
    * Horizon: the profile sets a CEILING, not a fixed term.
    *
@@ -1265,10 +1285,36 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
    * which the stock rose 13.7%. A shorter hold cannot breach a risk preference expressed
    * as "how long am I willing to be exposed", so the model keeps its own choice whenever
    * it is at or inside the profile's, and only a longer request is clamped down.
+   *
+   * Resolved BEFORE the stop, because the stop's noise floor scales with the term.
+   * Sizing the floor first would measure every trade against one default horizon and
+   * silently undo the point of scaling it — a stop that still looks plausible and is
+   * wrong, which is why that ordering has a test of its own.
    */
   const requested = BT_HORIZONS.has(decision.horizon) ? decision.horizon : plan.horizon;
   const horizon = BT_HORIZON_SESSIONS[requested] <= BT_HORIZON_SESSIONS[plan.horizon]
     ? requested : plan.horizon;
+
+  const metrics = snapshot?.technical?.metrics || {};
+  const atrPct = btFinite(metrics.atr_pct);
+  const volatilityStop = atrPct != null ? Math.max(0.03, Math.min(0.18, atrPct * 2.5)) : 0.08;
+  const requestedStop = decision.stop_pct == null ? volatilityStop : decision.stop_pct;
+  /*
+   * The floor applies to the MODEL's stop, not only to the engine's fallback.
+   *
+   * The prompt tells the model to size the stop off atr_pct, so it faithfully reproduces
+   * the same daily-versus-quarterly mismatch the engine had, and it supplies a stop on
+   * nearly every run — a floor that only caught the fallback would fix almost nothing.
+   * fallbackBacktestDecision needs no matching change for the same reason in reverse:
+   * its stop flows through this clamp too, so a second copy would only be drift risk.
+   */
+  const floor = stopNoiseFloor(atrPct, BT_HORIZON_SESSIONS[horizon], plan.risk_stop_cap);
+  const flooredStop = floor == null ? requestedStop : Math.max(requestedStop, floor);
+  decision.stop_pct = Math.round(Math.min(flooredStop, plan.risk_stop_cap) * 10000) / 10000;
+  const profileTarget = decision.stop_pct * plan.reward_ratio;
+  const requestedTarget = decision.target_pct == null ? profileTarget : decision.target_pct;
+  decision.target_pct = Math.round(Math.min(0.50, Math.max(0.03,
+    requestedTarget, profileTarget)) * 10000) / 10000;
 
   /*
    * Conviction scales exposure around the profile's own figure.
@@ -1320,6 +1366,7 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
     instrument: plan.instrument,
     options_proxy: plan.options_proxy,
     entry_rule: "next_open",
+    exit_mode: BT_EXIT_MODE,
     profile_basis: plan.profile_basis
   };
 }
@@ -3092,7 +3139,7 @@ module.exports = {
   sanitizeProfile, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
-  simulateTrade, sanitizeBacktestDecision, backtestProfilePlan,
+  simulateTrade, sanitizeBacktestDecision, backtestProfilePlan, stopNoiseFloor,
   fallbackBacktestDecision, ensureBacktestPosition,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
