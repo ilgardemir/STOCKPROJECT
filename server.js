@@ -1391,6 +1391,12 @@ function btFinite(value) {
  * and filling at the stop price assumes a fill you could not have been guaranteed
  * through a gap — and the OHLC here is back-adjusted, so those extremes are not
  * the prices that actually printed anyway.
+ *
+ * The target arms a trailing stop rather than closing the trade — see the exit loop.
+ * `decision.exit_mode` selects that; an ABSENT mode means the legacy fixed target, the
+ * same precedent as an absent position_pct meaning fully invested. It is a field rather
+ * than an env read because this function is pure, and the purity is what lets it drop
+ * into the test harness unmodified.
  */
 function simulateTrade(decision, bars) {
   const dates = (bars && bars.dates) || [];
@@ -1420,18 +1426,41 @@ function simulateTrade(decision, bars) {
   const horizonN = BT_HORIZON_SESSIONS[decision && decision.horizon] || BT_HORIZON_SESSIONS["3m"];
 
   // Both percentages are positive distances from entry; the direction decides the side.
-  const stopPrice = stopPct == null ? null : long ? entry * (1 - stopPct) : entry * (1 + stopPct);
   const targetPrice = targetPct == null ? null : long ? entry * (1 + targetPct) : entry * (1 - targetPct);
   const equity = price => BT_START_EQUITY * (1 + positionPct * (
     long ? price / entry - 1 : 1 - price / entry));
 
+  /*
+   * The target arms a trailing stop; it is not itself an exit.
+   *
+   * As a hard exit it was sized off a single day's ATR (target = stop x reward_ratio,
+   * stop = 2.5x a DAILY atr_pct), so it sat about five daily ATRs from entry while a
+   * 63-session hold disperses roughly eight on noise alone. It was therefore reached by
+   * drift before any thesis resolved: NVDA 2023-01-17 took +6.6% on day 13 of a +56.6%
+   * quarter, AMD 2025-04-07 +9.5% of +60.7%, TSLA 2023-04-20 +7.4% of +57.8%.
+   *
+   * Arming is one-way and the anchor is the best CLOSE, consistent with every other
+   * threshold here being evaluated on the close. The initial stop is deliberately
+   * untouched, which is why the worst case does not move at risk 1-3: that stop is what
+   * turned INTC 2024-07-15 into -3.0% instead of -31.4%.
+   */
+  const runnerMode = decision && decision.exit_mode === "runner";
   let exitIdx = null, exitPrice = null, exitReason = null;
   if (trading) {
+    let best = entry, armed = false;
     for (let i = 0; i < n; i++) {
       const c = btFinite(close[i]);
       if (c == null) continue;
+      best = long ? Math.max(best, c) : Math.min(best, c);
+      if (runnerMode && targetPrice != null && !armed)
+        armed = long ? best >= targetPrice : best <= targetPrice;
+      // Unarmed, the anchor is the entry and this is the original fixed stop.
+      const anchor = armed ? best : entry;
+      const stopPrice = stopPct == null ? null
+        : long ? anchor * (1 - stopPct) : anchor * (1 + stopPct);
       const hitStop = stopPrice != null && (long ? c <= stopPrice : c >= stopPrice);
-      const hitTarget = targetPrice != null && (long ? c >= targetPrice : c <= targetPrice);
+      const hitTarget = !runnerMode && targetPrice != null
+        && (long ? c >= targetPrice : c <= targetPrice);
       const hitHorizon = i + 1 >= horizonN;
       if (!hitStop && !hitTarget && !hitHorizon) continue;
       // Fill at the next session's open. On the final bar there is no next open,
@@ -1443,7 +1472,7 @@ function simulateTrade(decision, bars) {
       // Stop wins a same-close tie. Close-based evaluation makes a genuine tie
       // near-impossible (a long's stop sits below entry and its target above),
       // but resolving it toward the loss is the conservative direction.
-      exitReason = hitStop ? "stop" : hitTarget ? "target" : "horizon";
+      exitReason = hitStop ? (armed ? "trail" : "stop") : hitTarget ? "target" : "horizon";
       break;
     }
     if (exitIdx === null) {
