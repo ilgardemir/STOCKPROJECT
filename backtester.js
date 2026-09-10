@@ -776,7 +776,7 @@ function renderBacktestDecision(data) {
     sizeBits.push(`${d.conviction_scale}× conviction`);
   // Named rather than folded silently into the number: halving for an earnings window is
   // a risk decision the reader should be able to disagree with.
-  if (d.event_inside_horizon) sizeBits.push("½ for earnings in window");
+  if (d.event_imminent) sizeBits.push("½ for imminent earnings");
   const sizeNote = sizeBits.length
     ? ` <small>${btEsc(sizeBits.join(" · "))} on base ${btMagnitudePct(d.position_pct_base)}</small>` : "";
   const bits = [

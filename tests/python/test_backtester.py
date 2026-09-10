@@ -655,6 +655,28 @@ class EventRiskTests(unittest.TestCase):
         self.assertLessEqual(date.fromisoformat(elow), date(2022, 1, 26))
         self.assertGreaterEqual(date.fromisoformat(ehigh), date(2022, 1, 26))
 
+    def test_inside_three_months_is_a_tautology_and_imminent_is_not(self):
+        # The whole reason `imminent` exists. `falls_inside_horizon` asks
+        # `days_to_open <= sessions * 1.45`; at 3m that is 91.35 days, against a quarterly
+        # filer's ~91-day cadence. It is therefore true for essentially every issuer at
+        # every cutoff — measured true 13 of 13 across the completed live replays — so it
+        # can carry no information about which horizon to pick or how large to size.
+        #
+        # This cutoff sits just after a report, with the next one about two months out:
+        # the routine mid-quarter case. `falls_inside_horizon["3m"]` still says true.
+        out = backtester.event_risk(self._facts([
+            ("2024-03-31", "2024-04-25"), ("2023-12-31", "2024-01-25"),
+            ("2023-09-30", "2023-10-25"), ("2023-06-30", "2023-07-25"),
+        ]), date(2024, 5, 1))
+        self.assertIsNotNone(out)
+        self.assertTrue(out["falls_inside_horizon"]["3m"])
+        self.assertTrue(out["falls_inside_horizon"]["6m"])
+        # ...while the flag that decides sizing and informs the prompt correctly says the
+        # report is not the story here.
+        self.assertGreater(out["days_until_earnings_window_opens"],
+                           backtester.EARNINGS_IMMINENT_DAYS)
+        self.assertFalse(out["imminent"])
+
     def test_days_out_is_never_negative(self):
         # A negative "days until" reads as nonsense to a model. An already-open window
         # says so in its own field instead of through a sign.
@@ -687,6 +709,7 @@ class EventRiskTests(unittest.TestCase):
         self.assertLess(out["days_until_earnings_window_opens"], 30)
         self.assertTrue(out["falls_inside_horizon"]["1m"])
         self.assertTrue(out["falls_inside_horizon"]["3m"])
+        self.assertTrue(out["imminent"])
 
     def test_a_report_two_days_out_is_flagged_inside_every_horizon(self):
         # UNH at 2025-04-15 reported on 2025-04-17 and lost 53% inside the month. The
@@ -699,6 +722,9 @@ class EventRiskTests(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(out["pending_period_end"][:7], "2025-03")
         self.assertTrue(all(out["falls_inside_horizon"].values()))
+        # Two days out is the case `imminent` exists to catch, and the one the halving
+        # rule in ensureBacktestPosition was measured on.
+        self.assertTrue(out["imminent"])
         # UNH announced on 2025-04-17, two days after this cutoff, and lost 53% inside
         # the month. The window must contain that date — this is the case the whole block
         # exists for.

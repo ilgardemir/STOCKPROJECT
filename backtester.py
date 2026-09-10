@@ -469,6 +469,26 @@ CADENCE_CONCEPTS = ("revenue", "net_income", "operating_income", "operating_cash
 # figure in event_risk not taken from the issuer's own history.
 EARNINGS_FLOOR_DAYS = 14
 
+# How soon the results window has to open before it dominates the trade rather than
+# merely occurring during it.
+#
+# `falls_inside_horizon` cannot carry this, because at 3m it is TRUE BY CONSTRUCTION: the
+# test is `days_to_open <= sessions * 1.45`, 63 sessions is 91.35 days, and a quarterly
+# filer reports every ~91. Measured over the 13 completed live replays it was true 13/13
+# at 3m and 6m. The prompt then asked the model to "shorten the horizon to close before
+# it, or state that you are accepting a gap your stop cannot cover" — an instruction whose
+# condition always fires, offering one remedy that is an action and one that is an
+# admission of unmanaged risk. The model took the action every time: 13 of 13 replays
+# chose 1m against a 3m ceiling it was free to use.
+#
+# Three weeks is not a round number chosen here — it is the cohort the halving rule in
+# ensureBacktestPosition was actually measured on. In the original 18-run audit the five
+# cutoffs with results due inside three weeks averaged -15.1% over the following month
+# against +1.4% for the other thirteen. That evidence is about an IMMINENT report, so this
+# is the flag both the sizing rule and the prompt should read. A quarterly report inside a
+# 3-month hold is unavoidable and normal, and says nothing about the trade.
+EARNINGS_IMMINENT_DAYS = 21
+
 # Past this, a period-end-to-filed gap is a restated comparative rather than an original
 # filing. SEC deadlines are 40 days for an accelerated filer's 10-Q and 60 for its 10-K,
 # and 90 covers a non-accelerated one; 120 leaves room without admitting a year-late row.
@@ -696,8 +716,14 @@ def event_risk(facts, as_of):
         "days_until_earnings_window_closes": max(0, days_to_close),
         # A session is about 1.45 calendar days, so this asks whether the window OPENS
         # before the horizon ends — an event that lands mid-hold is the one that matters.
+        #
+        # Read this for SIZING, never for choosing a term: at 3m and 6m it is true for
+        # essentially every quarterly filer (63 * 1.45 = 91.35 days against a ~91-day
+        # cadence), so it cannot discriminate between horizons. `imminent` is the flag
+        # that carries information, and it is the only one the prompt is shown.
         "falls_inside_horizon": {label: days_to_open <= sessions * 1.45
                                  for label, sessions in HORIZONS.items()},
+        "imminent": days_to_open <= EARNINGS_IMMINENT_DAYS,
         "basis": ("Reconstructed from this issuer's own filing history: the median lag from "
                   "period end to filing date, applied to the next period end on the cadence its "
                   "own past period ends establish. No calendar and no post-cutoff data was "
@@ -1138,7 +1164,7 @@ def build_ai_prompt(snapshot):
     return "\n".join([
         f"You are performing a historical stock analysis as if today were {snapshot['as_of']}.",
         "Use only the frozen snapshot below. Do not use or imply knowledge of any later price, filing, news, product event, macro event, or outcome.",
-        "The snapshot intentionally contains no forward returns. Historical news, options flow, analyst estimates, and historical index membership are unavailable; say so instead of filling gaps from memory.",
+        "The snapshot contains no forward returns. Historical news, options flow, analyst estimates and index membership are unavailable; say so instead of filling gaps from memory.",
         "Write a concise but substantive report with: setup at the cutoff, technical condition, fundamentals known by then, bull case, bear case, and a confidence/data-limitations note.",
         #
         # KEEP THIS LIST SHORT. Every conditional here is a small computation, and a
@@ -1150,11 +1176,24 @@ def build_ai_prompt(snapshot):
         # produced an empty analysis. Anything that can be decided from the numbers is
         # decided in the engine and shipped as a conclusion — see direction_guardrails.
         #
-        "State only figures the snapshot contains or that you compute from it, and show the arithmetic when you compute one. Never supply an analyst target, peer multiple or remembered average; write that it is unavailable instead. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
-        "The market_regime label summarises the metrics beside it. It is not independent evidence and never outranks them, it carries no weighting, and any entries in its `conflicts` list must be addressed rather than resolved in the label's favour. Treat chart-pattern scores as candidate detectors, and an empty support or resistance list as no evidence either way.",
+        # These two are tightened wording, not relaxed rules — every clause that was here
+        # is still here. The room went to the holding-period anchor below.
+        "State only figures the snapshot contains or that you compute from it, showing the arithmetic. Never supply an analyst target, peer multiple or remembered average; write that it is unavailable. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
+        "The market_regime label only summarises the metrics beside it: it is not independent evidence, never outranks them, carries no weighting, and entries in its `conflicts` list must be addressed rather than resolved in the label's favour. Chart-pattern scores are candidate detectors; an empty support or resistance list is no evidence either way.",
         "The `direction_guardrails` block is decided by the engine, not by you. If `no_short` is true you must take the long side and address the stated reasons; if `no_long` is true you must take the short side.",
-        "If `event_risk` is present, say whether its earnings window opens inside your holding period. If it does, either shorten the horizon to close before it or state that you are accepting a gap your stop cannot cover. It is a window, never a date.",
-        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance (the level at which the stop starts trailing), and a 1-, 3- or 6-month maximum holding period. MySquall preferences appended by the server set the risk, sizing emphasis and holding-period choice.",
+        # `imminent` is decided in the engine, and the old wording is why. It asked
+        # whether the window opened inside the holding period — true for every quarterly
+        # filer at 3m and 6m — then offered "shorten the horizon" as the remedy. All 13
+        # completed live replays chose 1m against a 3m ceiling. See EARNINGS_IMMINENT_DAYS.
+        # "It is a window, never a date" is gone from here because event_risk.basis says
+        # it at length in the snapshot the model is already reading.
+        "If `event_risk.imminent` is true, results land in the first weeks of the hold: say whether you accept a gap no stop can cover. A report later in a longer hold is normal, not a reason to shorten.",
+        # The holding period is anchored inside this sentence for the same reason
+        # conviction is, and folded in rather than added as its own rule to stay under the
+        # length ceiling above: an unanchored menu collapses to one option. It chose 1m in
+        # 13 of 13 completed live replays, and re-running those same decisions at 3m
+        # scored 3.82% against 1.89% with the worst case unchanged.
+        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance (the level at which the stop starts trailing), and a holding period of 1, 3 or 6 months matched to the thesis rather than to the next report — 1 only if the setup resolves in weeks, 6 if it needs a full reporting cycle, never the shortest by default. MySquall preferences set the risk, sizing emphasis and holding-period ceiling.",
         # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned
         # exactly 3 and none returned 1, 4 or 5. Conviction now scales position size.
         "Conviction 3 is not a default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when nothing substantial contradicts it. It scales the simulated position size.",
@@ -1163,7 +1202,7 @@ def build_ai_prompt(snapshot):
         # holding period, and asking for sqrt(term) here would be a computation performed
         # in the thinking budget — exactly the failure the block above documents. The
         # engine widens a sub-noise stop itself (stopNoiseFloor in server.js).
-        "Size the stop off atr_pct, not a round number; the engine widens a stop that is inside the noise band for your holding period. This is research, not individualized financial advice.",
+        "Size the stop off atr_pct, not a round number; the engine widens one inside the noise band for your holding period. This is research, not individualized financial advice.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
         json.dumps(projection, separators=(",", ":"), allow_nan=False),
     ])

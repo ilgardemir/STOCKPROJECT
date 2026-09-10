@@ -456,9 +456,16 @@ function buildBacktestAiMessages(prompt, profile) {
         "State only figures the snapshot contains or that you compute from it. Never supply an analyst target, peer multiple, index weight or remembered average — say it is unavailable instead. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
         "The market_regime label summarises the metrics beside it: it is not independent evidence, never outranks them, and carries no weighting. Address any entries in its `conflicts` list. An empty support or resistance list means the detector found no pivot, which is normal at a 52-week extreme and is not evidence either way.",
         "The `direction_guardrails` block is decided by the engine. If `no_short` is true, take the long side and address its stated reasons; if `no_long` is true, take the short side.",
-        "If `event_risk` is present, say whether its earnings window opens inside your holding period, and either shorten the horizon to close before it or state that you accept a gap your stop cannot cover.",
+        // Reads `imminent`, not `falls_inside_horizon`: the latter is true for every
+        // quarterly filer at 3m and 6m, so pairing it with "shorten the horizon" made
+        // this a one-way ratchet to the minimum term. See EARNINGS_IMMINENT_DAYS.
+        "If `event_risk.imminent` is true, say whether you accept a results gap no stop can cover. A report landing later inside a longer hold is normal and is not a reason to shorten.",
         "This is a forced-choice backtest: finish with one explicit simulated LONG or SHORT stock position. Never answer flat, neutral, wait, watch, or avoid; express uncertainty through lower conviction and smaller MySquall-calibrated sizing.",
-        "State next-session-open entry, stop distance, target distance, and maximum holding period. Size the stop off the snapshot's atr_pct rather than a round number. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
+        // "maximum holding period" invited the smallest of the three. The term is now
+        // anchored the way conviction is, for the same measured reason: 13 of 13 live
+        // replays returned 1m, and the same decisions replayed at 3m scored 3.82% against
+        // 1.89% with the worst case unchanged.
+        "State next-session-open entry, stop distance, target distance, and a holding period of 1, 3 or 6 months matched to how long the thesis needs rather than to the next report — never the shortest by default. Size the stop off the snapshot's atr_pct rather than a round number. For an options-style profile, analyze the underlying stock direction because no historical option chain is supplied; never invent a contract.",
         "Conviction scales simulated position size, so 3 is not a neutral default: use 1 when you are picking a side only because the format demands one, and 5 only when nothing substantial contradicts it.",
         "Do not predict with certainty or provide individualized financial advice."
       ].join(" ")
@@ -498,6 +505,11 @@ async function requestBacktestDecision(aiPrompt, prose, profile, signal) {
         // 17 of 18 audited extractions returned exactly 3 and none returned 1, 4 or 5.
         "Report the conviction the analysis actually expressed, not a default: 1 where it picks a side reluctantly, 3 where it leans with objections outstanding, 5 where it finds no substantial contradiction. Do not answer 3 merely because the analysis is balanced in tone.",
         "Use the supplied MySquall risk tolerance, holding period, style, priorities, and custom preference when selecting direction, conviction, stop, target, and horizon.",
+        // Same failure shape as conviction collapsing to 3: "1m" is the first option in
+        // the schema above and was returned by 13 of 13 completed live replays. The
+        // analysis is now anchored too, so this only has to stop the extractor from
+        // flattening a stated 3m or 6m back to the head of the list.
+        "Report the horizon the analysis actually commits to. Do not answer 1m because it is listed first or because the analysis mentions an upcoming earnings window; a report inside a longer hold does not shorten it.",
         "If the profile prefers options, choose the underlying stock direction only; no historical option chain exists and no contract may be invented."
       ].join(" ") },
       { role: "user", content: `${aiPrompt}\n\n${formatProfile(profile) || "--- MYSQUALL USER PREFERENCES ---\nNo saved profile; use balanced defaults."}\n\n--- THE ANALYSIS YOU WROTE ---\n${prose}` }
@@ -1429,10 +1441,17 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
    * hold is not automatically the better trade. Halving is a blunt number, but the
    * uncertainty here is a multi-week window rather than a date, so precision would be
    * false either way.
+   *
+   * The trigger is `imminent`, NOT `falls_inside_horizon[horizon]`. Read the evidence
+   * above again: it is about results due inside THREE WEEKS, which is exactly what
+   * `imminent` means. `falls_inside_horizon` at 3m is `days_to_open <= 91.35` against a
+   * ~91-day reporting cadence, so it is true for essentially every quarterly filer —
+   * measured true 13 of 13 on the completed live replays. Keyed to it, the halving would
+   * fire on every single 3m and 6m trade, which is not a risk rule but a constant, and it
+   * would penalise the longer horizons this change is trying to make reachable.
    */
-  const eventInsideHorizon =
-    snapshot?.event_risk?.falls_inside_horizon?.[horizon] === true;
-  const eventScale = eventInsideHorizon ? 0.5 : 1;
+  const eventImminent = snapshot?.event_risk?.imminent === true;
+  const eventScale = eventImminent ? 0.5 : 1;
   const positionPct = Math.round(Math.max(0.05, Math.min(0.75,
     plan.position_pct * convictionScale * eventScale)) * 100) / 100;
 
@@ -1444,7 +1463,10 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
     position_pct: positionPct,
     position_pct_base: plan.position_pct,
     conviction_scale: convictionScale,
-    event_inside_horizon: eventInsideHorizon,
+    // Renamed from event_inside_horizon along with the flag it reads. The old name now
+    // describes a different, always-true condition, and a field whose name states the
+    // wrong rule is how the next reader reintroduces the bug.
+    event_imminent: eventImminent,
     event_scale: eventScale,
     instrument: plan.instrument,
     options_proxy: plan.options_proxy,
