@@ -614,6 +614,26 @@ test("breach tolerance is reported so the exit can be explained", () => {
   assert.equal(typeof sim.exit.breach_index, "number");
 });
 
+test("a horizon exit still reports the breaches tolerance absorbed", () => {
+  // Otherwise "never breached" and "breached once, absorbed" are indistinguishable —
+  // and the second is the case that both proves tolerance did work and explains why
+  // no re-review fired, since the reviewer only runs on a returned stop or trail.
+  const closes = [];
+  for (let i = 0; i < 8; i++) closes.push(100);
+  closes[3] = 88;                       // one breach of the 90 level, inside tolerance
+  for (let i = 8; i < 24; i++) closes.push(100);
+  const absorbed = simulateTrade(runnerCall({ breach_tolerance:1, horizon:"1m" }),
+    runnerBars(closes));
+  assert.equal(absorbed.exit.reason, "horizon");
+  assert.equal(absorbed.exit.breaches_seen, 1);
+  assert.equal(absorbed.exit.breach_index, null, "nothing was honoured, so nothing triggered");
+
+  const clean = simulateTrade(runnerCall({ breach_tolerance:1, horizon:"1m" }),
+    runnerBars(new Array(24).fill(100)));
+  assert.equal(clean.exit.reason, "horizon");
+  assert.equal(clean.exit.breaches_seen, 0);
+});
+
 test("an absent breach_tolerance honours the first breach, as it always did", () => {
   const sim = simulateTrade({ direction:"long", stop_pct:0.10, target_pct:null, horizon:"3m" },
     runnerBars([100, 96, 89, 88, 88]));

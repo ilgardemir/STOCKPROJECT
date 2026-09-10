@@ -1547,7 +1547,7 @@ function simulateTrade(decision, bars, skipBreaches) {
   const tolerance = Math.max(0, Math.min(5,
     Math.round(btFinite(decision && decision.breach_tolerance) || 0)));
   let exitIdx = null, exitPrice = null, exitReason = null;
-  let breachIdx = null, ignored = 0;
+  let breachIdx = null, ignored = 0, breachesSeen = 0;
   if (trading) {
     let best = entry, armed = false, breaches = 0;
     for (let i = 0; i < n; i++) {
@@ -1563,7 +1563,7 @@ function simulateTrade(decision, bars, skipBreaches) {
       const breached = stopPrice != null && (long ? c <= stopPrice : c >= stopPrice);
       // Counted per breaching close, not per unbroken run: a stock that pokes through
       // the level, recovers and breaks again has spent its tolerance on the first poke.
-      if (breached) breaches += 1;
+      if (breached) { breaches += 1; breachesSeen += 1; }
       // A bar the reviewer already ruled on and chose to hold through. Re-simulating
       // with the skip set is how the async orchestrator re-runs the trade without a
       // second copy of this exit math — the drift risk that copy would carry is the
@@ -1643,8 +1643,15 @@ function simulateTrade(decision, bars, skipBreaches) {
     // breach_index is the bar that TRIGGERED the exit, not the bar it filled on. The
     // review orchestrator needs the trigger to ask "was that breakdown real?" about the
     // right session, and it is not derivable from the fill date once tolerance is in play.
+    //
+    // breaches_seen counts every breaching close over the whole hold, honoured or not,
+    // and is reported on EVERY exit reason. Without it a horizon exit cannot be told
+    // apart from one that breached once and had it absorbed by tolerance — which is
+    // precisely the case that decides whether tolerance is doing any work, and which
+    // silently suppresses the re-review, since the reviewer is only consulted when this
+    // function actually returns a stop or trail.
     exit: trading ? { date: dates[exitIdx], price: exitPrice, reason: exitReason,
-      breach_index: breachIdx, breaches_ignored: ignored } : null,
+      breach_index: breachIdx, breaches_ignored: ignored, breaches_seen: breachesSeen } : null,
     stats
   };
 }
