@@ -5,6 +5,7 @@ const {
   sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
   backtestProfilePlan, ensureBacktestPosition, stopNoiseFloor,
+  buildReviewPrompt, sanitizeReviewVerdict, simulateTradeReviewed,
   LIM, COST, clientIp, clientKey, admit, buckets, globals,
   newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
   reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
@@ -626,6 +627,75 @@ test("an absent exit_mode keeps the legacy fixed-target exit", () => {
   const sim = simulateTrade({ direction:"long", stop_pct:0.10, target_pct:0.20, horizon:"3m" },
     runnerBars([100, 110, 125, 130, 116, 115, 115]));
   assert.equal(sim.exit.reason, "target");
+});
+
+/* ── Exit re-review (default off) ───────────────────────────────────────────
+   The seal is the whole reason this can exist: a review at bar i sees bars 0..i
+   and bar i is historical, so it is walk-forward rather than lookahead. */
+
+test("a review prompt never contains a close from after the breach", () => {
+  // The one function that could quietly turn this into lookahead. Nothing would
+  // throw if it did, and the resulting numbers would look like a great result.
+  const bars = { dates:[], open:[], close:[], volume:[], spyOpen:[], spyClose:[] };
+  for (let i = 0; i < 40; i++) {
+    bars.dates.push(`2024-02-${String(i + 1).padStart(2, "0")}`);
+    bars.open.push(100); bars.close.push(i < 20 ? 100 : 777.77); bars.volume.push(1000);
+  }
+  const prompt = buildReviewPrompt(
+    { direction:"long", stop_pct:0.1, thesis:"t" }, bars, 10, "t");
+  assert.ok(!prompt.includes("777.77"), "a post-breach close leaked into the review prompt");
+  assert.ok(prompt.includes("2024-02-11"), "the breach date itself must be present");
+});
+
+test("an unparseable or unknown review verdict is not a hold", () => {
+  // An unreadable answer must not silently increase risk.
+  assert.equal(sanitizeReviewVerdict("not json"), null);
+  assert.equal(sanitizeReviewVerdict({ action:"maybe" }), null);
+  assert.equal(sanitizeReviewVerdict({ action:"wait" }), null);
+  assert.equal(sanitizeReviewVerdict({ action:"HOLD", reason:"x" }).action, "hold");
+});
+
+test("a reviewer that says hold carries the trade past the breach", async () => {
+  const bars = runnerBars([100, 96, 89, 88, 120, 121, 121]);
+  bars.volume = bars.close.map(() => 1000);
+  const dec = runnerCall({ breach_tolerance:0 });
+  const strict = simulateTrade(dec, bars);
+  assert.equal(strict.exit.reason, "stop");
+  const reviewed = await simulateTradeReviewed(dec, bars,
+    async () => ({ action:"hold", reason:"shallow" }), 3);
+  assert.notEqual(reviewed.exit.reason, "stop");
+  assert.equal(reviewed.reviews.filter(r => r.action === "hold").length >= 1, true);
+});
+
+test("a reviewer that says exit changes nothing, and is asked only once", async () => {
+  const bars = runnerBars([100, 96, 89, 88, 88]);
+  bars.volume = bars.close.map(() => 1000);
+  const dec = runnerCall({ breach_tolerance:0 });
+  let calls = 0;
+  const reviewed = await simulateTradeReviewed(dec, bars,
+    async () => { calls++; return { action:"exit", reason:"confirmed" }; }, 3);
+  assert.equal(calls, 1);
+  assert.equal(reviewed.exit.date, simulateTrade(dec, bars).exit.date);
+});
+
+test("a failing reviewer falls back to the deterministic exit", async () => {
+  // An error path that held instead would change risk exactly when least observed.
+  const bars = runnerBars([100, 96, 89, 88, 88]);
+  bars.volume = bars.close.map(() => 1000);
+  const dec = runnerCall({ breach_tolerance:0 });
+  const reviewed = await simulateTradeReviewed(dec, bars,
+    async () => { throw new Error("provider down"); }, 3);
+  assert.equal(reviewed.exit.date, simulateTrade(dec, bars).exit.date);
+});
+
+test("the review budget is a hard cap", async () => {
+  const closes = [100]; for (let i = 1; i < 40; i++) closes.push(80 - i * 0.1);
+  const bars = runnerBars(closes);
+  bars.volume = bars.close.map(() => 1000);
+  let calls = 0;
+  await simulateTradeReviewed(runnerCall({ breach_tolerance:0 }), bars,
+    async () => { calls++; return { action:"hold", reason:"noise" }; }, 2);
+  assert.equal(calls, 2, `reviewer was called ${calls} times against a cap of 2`);
 });
 
 test("simulated trade return scales with the MySquall position size", () => {

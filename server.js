@@ -522,6 +522,55 @@ async function requestBacktestDecision(aiPrompt, prose, profile, signal) {
   return null;
 }
 
+/**
+ * One exit re-review. Extraction-shaped, not analysis-shaped: temperature 0, no
+ * reasoning budget, tiny cap. A review that cannot be parsed returns null, and
+ * simulateTradeReviewed treats that as "take the deterministic exit" rather than
+ * as a hold — an unreadable answer must not silently increase risk.
+ */
+async function requestBacktestReview(prompt, signal) {
+  const body = JSON.stringify({
+    model: AI_MODEL, temperature: 0, max_tokens: 200,
+    reasoning: { effort: "none" }, stream: false, provider: AI_PROVIDER,
+    messages: [
+      { role: "system", content: [
+        "You judge whether an open position's stop breach is a real breakdown or noise.",
+        "Reply with a single JSON object and nothing else — no prose, no code fence.",
+        'Schema: {"action":"exit"|"hold","reason":"one short sentence"}.',
+        "You are seeing every bar that existed on that date and no later one. Do not refer to anything after it.",
+        "Prefer exit when the move is confirmed by volume, breaks the 20-session mean decisively, or negates the stated thesis. Prefer hold when the breach is shallow, unconfirmed, or inside the position's ordinary daily range."
+      ].join(" ") },
+      { role: "user", content: prompt }
+    ]
+  });
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST", signal,
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}`,
+        "HTTP-Referer": "http://localhost", "X-Title": "Squall" },
+      body
+    });
+    if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
+    const json = await res.json();
+    const text = json?.choices?.[0]?.message?.content || "";
+    return sanitizeReviewVerdict(text) || sanitizeReviewVerdict(firstJsonObject(text));
+  } catch (error) {
+    if (error.name !== "AbortError") console.warn(`BACKTEST review failed: ${error.message}`);
+    return null;
+  }
+}
+
+/** Nothing the reviewer returns is trusted; an unknown action is not a hold. */
+function sanitizeReviewVerdict(raw) {
+  let obj = raw;
+  if (typeof raw === "string") { try { obj = JSON.parse(raw); } catch (_) { return null; } }
+  if (!obj || typeof obj !== "object") return null;
+  const action = String(obj.action || "").trim().toLowerCase();
+  if (action !== "exit" && action !== "hold") return null;
+  return { action, reason: String(obj.reason || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) };
+}
+
 /** First balanced {…} in a string — models fence or preface JSON despite instructions. */
 function firstJsonObject(raw) {
   const text = String(raw || "");
@@ -1428,7 +1477,7 @@ function btFinite(value) {
  * than an env read because this function is pure, and the purity is what lets it drop
  * into the test harness unmodified.
  */
-function simulateTrade(decision, bars) {
+function simulateTrade(decision, bars, skipBreaches) {
   const dates = (bars && bars.dates) || [];
   const open = (bars && bars.open) || [];
   const close = (bars && bars.close) || [];
@@ -1508,7 +1557,12 @@ function simulateTrade(decision, bars) {
       // Counted per breaching close, not per unbroken run: a stock that pokes through
       // the level, recovers and breaks again has spent its tolerance on the first poke.
       if (breached) breaches += 1;
-      const hitStop = breached && breaches > tolerance;
+      // A bar the reviewer already ruled on and chose to hold through. Re-simulating
+      // with the skip set is how the async orchestrator re-runs the trade without a
+      // second copy of this exit math — the drift risk that copy would carry is the
+      // whole reason the reviewer does not get its own loop.
+      const skipped = breached && skipBreaches && skipBreaches.has(i);
+      const hitStop = breached && !skipped && breaches > tolerance;
       const hitTarget = !runnerMode && targetPrice != null
         && (long ? c >= targetPrice : c <= targetPrice);
       // Checked even on a tolerated breach. The horizon is a hard ceiling on exposure,
@@ -1586,6 +1640,106 @@ function simulateTrade(decision, bars) {
       breach_index: breachIdx, breaches_ignored: ignored } : null,
     stats
   };
+}
+
+/* ── Exit re-review ─────────────────────────────────────────────────────────
+   An experiment, default OFF, kept because the deterministic answer above is
+   measured and this one is not.
+
+   The measurement that motivates the flag rather than the feature: an oracle
+   deciding perfectly at every breach scores 7.5% against 3.9% for exiting on
+   sight, but breach tolerance alone already reaches 6.3% for free. Modelling a
+   reviewer that agrees with the oracle only p of the time gives 5.4% at p=0.7
+   and 6.1% at p=0.9 — so even a 90%-accurate reviewer does not clear the free
+   rule, while costing roughly three extra LLM calls per trade. That model could
+   be wrong, which is what this flag exists to find out.
+
+   The seal holds by construction: a review at bar i is shown bars 0..i only, and
+   bar i is historical. This is a walk-forward decision, not lookahead. The real
+   epistemic cost is different and cannot be engineered away — a second call is
+   dated closer to the present, where the model's weights carry sharper memory of
+   what actually happened. Treat a positive result here with suspicion. */
+const BT_REVIEW_MODE = process.env.SQUALL_BT_REVIEW === "on" ? "on" : "off";
+const BT_MAX_REVIEWS = (() => {
+  const raw = parseInt(process.env.SQUALL_BT_MAX_REVIEWS, 10);
+  return Number.isFinite(raw) && raw >= 1 && raw <= 6 ? raw : 3;
+})();
+
+/**
+ * What the reviewer sees at a breach. Pure, and exported so the seal is testable.
+ *
+ * Slices to `breachIndex` INCLUSIVE and never further. A test asserts no later close
+ * appears in the string, because this is the one function that could quietly turn a
+ * walk-forward backtest into lookahead and nothing would throw if it did.
+ */
+function buildReviewPrompt(decision, bars, breachIndex, thesis) {
+  const close = (bars && bars.close) || [];
+  const dates = (bars && bars.dates) || [];
+  const volume = (bars && bars.volume) || [];
+  const i = Math.max(0, Math.min(breachIndex, close.length - 1));
+  const entry = btFinite((bars.open || [])[0]);
+  const long = decision.direction === "long";
+  const at = btFinite(close[i]);
+  const pnl = entry && at ? (long ? at / entry - 1 : 1 - at / entry) : null;
+  const since = close.slice(0, i + 1).filter(v => btFinite(v) != null).map(Number);
+  const peak = long ? Math.max(...since) : Math.min(...since);
+  const fromPeak = peak && at ? (long ? at / peak - 1 : 1 - at / peak) : null;
+  const window = since.slice(-20);
+  const ma20 = window.length ? window.reduce((a, b) => a + b, 0) / window.length : null;
+  const vols = volume.slice(0, i + 1).map(btFinite).filter(v => v != null);
+  const recentVol = vols.length ? vols[vols.length - 1] : null;
+  const avgVol = vols.length ? vols.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, vols.length) : null;
+  const pct = v => v == null ? "unavailable" : `${(v * 100).toFixed(1)}%`;
+  const path = since.slice(-15).map(v => v.toFixed(2)).join(", ");
+  return [
+    `You are reviewing an open ${long ? "LONG" : "SHORT"} position on the day its stop was breached.`,
+    `Original thesis: ${thesis || "not recorded"}`,
+    `Entry ${entry == null ? "unavailable" : entry.toFixed(2)} on ${dates[0]}. Today is ${dates[i]}, session ${i + 1} of the hold.`,
+    `Close today ${at == null ? "unavailable" : at.toFixed(2)}. Position is ${pct(pnl)} from entry and ${pct(fromPeak)} from its best close.`,
+    `Stop distance ${pct(decision.stop_pct)}. 20-session mean close ${ma20 == null ? "unavailable" : ma20.toFixed(2)}.`,
+    recentVol != null && avgVol ? `Volume today is ${(recentVol / avgVol).toFixed(2)}x its 20-session average.` : "Volume unavailable.",
+    `Last 15 closes: ${path}`,
+    "",
+    "Decide whether this breach is a genuine breakdown of the thesis or ordinary noise.",
+    'Reply with JSON only: {"action":"exit"|"hold","reason":"<one short sentence>"}'
+  ].join("\n");
+}
+
+/**
+ * Runs the trade, pausing at each breach to let an async reviewer overrule the exit.
+ *
+ * `simulateTrade` stays pure and synchronous: this re-runs it with a growing skip set
+ * rather than threading a promise through the exit loop. The cost is re-simulating from
+ * bar 0 per review, which is microseconds on a 126-bar window and buys one copy of the
+ * exit rules instead of two.
+ */
+async function simulateTradeReviewed(decision, bars, reviewer, maxReviews) {
+  const skip = new Set();
+  const log = [];
+  const cap = Math.max(0, maxReviews == null ? BT_MAX_REVIEWS : maxReviews);
+  let sim = simulateTrade(decision, bars, skip);
+  while (sim && sim.exit && log.length < cap
+    && (sim.exit.reason === "stop" || sim.exit.reason === "trail")
+    && Number.isInteger(sim.exit.breach_index) && !skip.has(sim.exit.breach_index)) {
+    let verdict;
+    try {
+      verdict = await reviewer(buildReviewPrompt(decision, bars, sim.exit.breach_index, decision.thesis),
+        sim.exit.breach_index);
+    } catch (_) {
+      // A failed review is not a licence to hold. Falling back to the deterministic
+      // exit keeps the run scoreable and keeps the flag from changing risk on error.
+      break;
+    }
+    if (!verdict || verdict.action !== "hold") {
+      log.push({ date: bars.dates[sim.exit.breach_index], action: "exit",
+        reason: (verdict && verdict.reason) || "" });
+      break;
+    }
+    log.push({ date: bars.dates[sim.exit.breach_index], action: "hold", reason: verdict.reason || "" });
+    skip.add(sim.exit.breach_index);
+    sim = simulateTrade(decision, bars, skip);
+  }
+  return sim ? { ...sim, reviews: log } : sim;
 }
 
 // Static file serving
@@ -3226,6 +3380,7 @@ module.exports = {
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
   simulateTrade, sanitizeBacktestDecision, backtestProfilePlan, stopNoiseFloor,
+  buildReviewPrompt, sanitizeReviewVerdict, simulateTradeReviewed, BT_REVIEW_MODE,
   fallbackBacktestDecision, ensureBacktestPosition,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
