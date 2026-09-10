@@ -256,7 +256,14 @@ const COST = {
   // and touches no provider, so it must not draw on the scrape ceiling. Charging then
   // refunding is not an option (there is no refund path, on purpose), so the cache is
   // checked BEFORE admission and the cheaper kind is charged from the start.
-  analyze_cached: { ai: 10, scrape: 0, screen: 0 }
+  analyze_cached: { ai: 10, scrape: 0, screen: 0 },
+  // An exit re-review is a real extra call and must be charged — but it is not an
+  // analysis. It sends a few hundred prompt tokens, caps output at 200 and runs with
+  // reasoning off, against an analysis' ~5k prompt and 16k ceiling: roughly a sixteenth
+  // of the tokens. Charging it at 10 made three reviews cost three analyses' budget for
+  // about a twelfth of the spend, which would have cut the daily ceiling from ~150
+  // analyses to ~37 and looked like the review being unaffordable rather than mispriced.
+  backtest_review: { ai: 1, scrape: 0, screen: 0 }
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2764,7 +2771,7 @@ const handleRequest = async (req, res) => {
         if (BT_REVIEW_MODE === "on" && prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
           send("backtest_progress", { percent:99, label:"Re-reviewing the exit against conditions on the day" });
           simulation = await simulateTradeReviewed(decision, outcomes.bars, async (reviewPrompt) => {
-            if (!spendAi(COST.analyze.ai).ok) throw new Error("AI budget exhausted");
+            if (!spendAi(COST.backtest_review.ai).ok) throw new Error("AI budget exhausted");
             return requestBacktestReview(reviewPrompt, aiAbort.signal);
           });
         } else {
