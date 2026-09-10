@@ -762,7 +762,10 @@ function renderBacktestDecision(data) {
   const executionPlan = [
     `Enter a ${positionLabel} ${side} ${d.options_proxy ? "position in the underlying stock proxy" : "stock position"} at the next session's open.`,
     d.stop_pct == null ? "" : `If a daily close ${stopMove} ${btMagnitudePct(d.stop_pct)} from entry, exit at the following session's open.`,
-    d.target_pct == null ? "" : `If a daily close ${targetMove} ${btMagnitudePct(d.target_pct)} from entry, exit at the following session's open.`,
+    d.target_pct == null ? ""
+      : d.exit_mode === "runner"
+        ? `If a daily close ${targetMove} ${btMagnitudePct(d.target_pct)} from entry, start trailing the stop ${btMagnitudePct(d.stop_pct)} behind the best close instead of exiting.`
+        : `If a daily close ${targetMove} ${btMagnitudePct(d.target_pct)} from entry, exit at the following session's open.`,
     `Otherwise, exit when the ${btEsc(d.horizon)} maximum holding period ends.`
   ].filter(Boolean).join(" ");
   // Conviction now moves the position, so the two stats have to be readable together —
@@ -783,7 +786,7 @@ function renderBacktestDecision(data) {
     `<div class="backtest-stat"><span>Instrument</span><b>${btEsc(instrumentLabel)}</b></div>`,
     `<div class="backtest-stat"><span>Horizon</span><b>${btEsc(d.horizon)}${d.horizon_capped ? ` <small>asked ${btEsc(d.horizon_requested)}, capped by profile</small>` : ""}</b></div>`,
     `<div class="backtest-stat"><span>Stop</span><b>${d.stop_pct == null ? "—" : btPct(-d.stop_pct)}</b></div>`,
-    `<div class="backtest-stat"><span>Target</span><b>${d.target_pct == null ? "—" : btPct(d.target_pct)}</b></div>`
+    `<div class="backtest-stat"><span>${d.exit_mode === "runner" ? "Trail arms at" : "Target"}</span><b>${d.target_pct == null ? "—" : btPct(d.target_pct)}</b></div>`
   ].join("");
   host.innerHTML = `
     <div class="backtest-section-head"><div><span>The call</span><h2>What Squall committed to</h2></div><b>Blind</b></div>
@@ -861,6 +864,11 @@ function renderBacktestCurve(simulation) {
   const EXIT_LOOK = {
     stop:    { token:"--down",    fallback:"#c25b5b", label:"stopped out" },
     target:  { token:"--up",      fallback:"#4c9a72", label:"target hit" },
+    // Arming requires the target to have been reached, so a trailing exit is always a
+    // trade that ran into profit first — it reads as --up for the same reason target does.
+    // Without this row an unknown reason falls through to `end`, and a completed trade
+    // renders as "window ended": a success reported as a truncation, with nothing thrown.
+    trail:   { token:"--up",      fallback:"#4c9a72", label:"trailing stop" },
     horizon: { token:"--ink-dim", fallback:"#8b959e", label:"horizon reached" },
     end:     { token:"--ink-dim", fallback:"#8b959e", label:"window ended" }
   };
