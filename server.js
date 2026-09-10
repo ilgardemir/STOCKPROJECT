@@ -2751,8 +2751,27 @@ const handleRequest = async (req, res) => {
         if (!connected) return;
         const decision = ensureBacktestPosition(extractedDecision, payload.snapshot, profile);
         send("backtest_decision", { decision, available:true });
-        const simulation = simulateTrade(decision, outcomes.bars);
-        send("backtest_outcomes", { outcomes, simulation });
+        /*
+         * The re-review is default OFF and charged per call.
+         *
+         * Each review is genuinely extra work rather than a retry of the same request,
+         * so the "charge once per logical request" rule does not cover it — but there is
+         * still no refund path, so it is charged BEFORE the call and a denial simply
+         * stops reviewing and keeps the deterministic exit. Budget exhaustion must
+         * degrade the experiment, never the replay.
+         */
+        let simulation;
+        if (BT_REVIEW_MODE === "on" && prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
+          send("backtest_progress", { percent:99, label:"Re-reviewing the exit against conditions on the day" });
+          simulation = await simulateTradeReviewed(decision, outcomes.bars, async (reviewPrompt) => {
+            if (!spendAi(COST.analyze.ai).ok) throw new Error("AI budget exhausted");
+            return requestBacktestReview(reviewPrompt, aiAbort.signal);
+          });
+        } else {
+          simulation = simulateTrade(decision, outcomes.bars);
+        }
+        if (!connected) return;
+        send("backtest_outcomes", { outcomes, simulation, review_mode:BT_REVIEW_MODE });
         send("backtest_done", { ok:true });
         res.end();
       };
@@ -3381,6 +3400,7 @@ module.exports = {
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
   simulateTrade, sanitizeBacktestDecision, backtestProfilePlan, stopNoiseFloor,
   buildReviewPrompt, sanitizeReviewVerdict, simulateTradeReviewed, BT_REVIEW_MODE,
+  requestBacktestReview,
   fallbackBacktestDecision, ensureBacktestPosition,
   // Abuse limits — exported so they can be exercised without starting the server.
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,

@@ -233,14 +233,20 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
     series stay index-aligned for the front end without silently shortening either.
     """
     limit = max_sessions or HORIZONS["6m"]
+    empty = {"dates": [], "open": [], "close": [], "volume": [],
+             "spyOpen": [], "spyClose": []}
     _, after = split_at_date(stock_frame, as_of)
     if after.empty:
-        return {"dates": [], "open": [], "close": [], "spyOpen": [], "spyClose": []}
+        return dict(empty)
     after = after.iloc[:limit]
 
     open_col, close_col = _column(after, "open"), _column(after, "close")
+    # Volume rides along for the exit re-review, which needs to tell a breach confirmed
+    # by participation from one on no volume at all. Absent is a normal outcome and the
+    # prompt says so rather than substituting a number.
+    volume_col = _column(after, "volume")
     if close_col is None:
-        return {"dates": [], "open": [], "close": [], "spyOpen": [], "spyClose": []}
+        return dict(empty)
 
     spy_after = pd.DataFrame()
     if isinstance(spy_frame, pd.DataFrame) and not spy_frame.empty:
@@ -252,11 +258,12 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
         number = finite(value)
         return None if number is None else round(number, 4)
 
-    dates, opens, closes, spy_opens, spy_closes = [], [], [], [], []
+    dates, opens, closes, volumes, spy_opens, spy_closes = [], [], [], [], [], []
     for stamp, row in after.iterrows():
         dates.append(stamp.date().isoformat())
         closes.append(rounded(row[close_col]))
         opens.append(rounded(row[open_col]) if open_col is not None else rounded(row[close_col]))
+        volumes.append(None if volume_col is None else finite(row[volume_col]))
         if spy_close_col is not None and stamp in spy_after.index:
             spy_row = spy_after.loc[stamp]
             spy_closes.append(rounded(spy_row[spy_close_col]))
@@ -266,7 +273,7 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
             spy_closes.append(None)
             spy_opens.append(None)
 
-    return {"dates": dates, "open": opens, "close": closes,
+    return {"dates": dates, "open": opens, "close": closes, "volume": volumes,
             "spyOpen": spy_opens, "spyClose": spy_closes}
 
 
