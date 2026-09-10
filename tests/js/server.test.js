@@ -505,6 +505,21 @@ test("the horizon is resolved BEFORE the stop, so term scaling sees the real ter
     `6m stop ${long.stop_pct} must exceed the 1m stop ${short.stop_pct}`);
 });
 
+test("breach tolerance is switched off once the stop is too wide to be noise", () => {
+  // Empirical gate: tolerance pays where stops sit at 5-9% and hurt at risk 4-5, where
+  // the cap allows 14-18% and a close through a stop that wide is a real breakdown.
+  const calm = { technical:{ metrics:{ atr_pct:0.02 }, scores:{} } };
+  const wild = { technical:{ metrics:{ atr_pct:0.07 }, scores:{} } };
+  const narrow = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"3m" }, calm, { risk:3, horizon:3, style:"balanced" });
+  assert.ok(narrow.stop_pct <= 0.10);
+  assert.equal(narrow.breach_tolerance, 1);
+  const wide = ensureBacktestPosition(
+    { direction:"long", conviction:3, horizon:"3m" }, wild, { risk:5, horizon:3, style:"balanced" });
+  assert.ok(wide.stop_pct > 0.10, `stop was ${wide.stop_pct}`);
+  assert.equal(wide.breach_tolerance, 0);
+});
+
 test("the exit mode is carried on the decision, not read from env by the simulator", () => {
   const snap = { technical:{ metrics:{ atr_pct:0.02 }, scores:{} } };
   assert.equal(ensureBacktestPosition(
@@ -553,6 +568,56 @@ test("the short side mirrors the trail", () => {
     runnerBars([100, 90, 75, 70, 84, 85, 85]));
   assert.equal(sim.exit.reason, "trail");
   assert.equal(sim.exit.date, "2024-01-06");
+});
+
+test("the first breach is tolerated and the second is honoured", () => {
+  // Most of the value in re-deciding at the exit turns out to be tolerance, not
+  // judgment: a coin-flip reviewer scored 4.8% against 3.9% for exiting on sight.
+  // Level is 90. Close 89 is the first breach, 88 the second.
+  const tolerant = runnerCall({ breach_tolerance:1 });
+  const sim = simulateTrade(tolerant, runnerBars([100, 96, 89, 88, 88]));
+  assert.equal(sim.exit.reason, "stop");
+  assert.equal(sim.exit.date, "2024-01-05");
+  // Tolerance 0 is the old behaviour, one session earlier.
+  const strict = simulateTrade(runnerCall({ breach_tolerance:0 }),
+    runnerBars([100, 96, 89, 88, 88]));
+  assert.equal(strict.exit.date, "2024-01-04");
+});
+
+test("tolerated breaches need not be consecutive", () => {
+  // The count is of breaching closes, not of an unbroken run — a stock that pokes
+  // through the level, recovers, then breaks again has spent its tolerance.
+  const sim = simulateTrade(runnerCall({ breach_tolerance:1 }),
+    runnerBars([100, 89, 95, 96, 88, 88]));
+  assert.equal(sim.exit.reason, "stop");
+  assert.equal(sim.exit.date, "2024-01-06");
+});
+
+test("a tolerated breach never outlives the horizon", () => {
+  // The horizon is a hard ceiling on exposure. Ignoring a breach must not also
+  // ignore the bar's horizon check, or tolerance silently extends the holding period.
+  // The breach lands ON the horizon bar and is inside tolerance, so the stop stays
+  // silent — but the hold must still end there rather than running to the next breach.
+  const closes = []; for (let i = 0; i < 20; i++) closes.push(100);
+  closes.push(85, 84, 83);
+  const sim = simulateTrade(runnerCall({ breach_tolerance:1, horizon:"1m" }),
+    runnerBars(closes));
+  assert.equal(sim.exit.reason, "horizon");
+  assert.equal(sim.exit.date, "2024-01-22");
+});
+
+test("breach tolerance is reported so the exit can be explained", () => {
+  const sim = simulateTrade(runnerCall({ breach_tolerance:1 }),
+    runnerBars([100, 96, 89, 88, 88]));
+  assert.equal(sim.exit.breaches_ignored, 1);
+  assert.equal(typeof sim.exit.breach_index, "number");
+});
+
+test("an absent breach_tolerance honours the first breach, as it always did", () => {
+  const sim = simulateTrade({ direction:"long", stop_pct:0.10, target_pct:null, horizon:"3m" },
+    runnerBars([100, 96, 89, 88, 88]));
+  assert.equal(sim.exit.date, "2024-01-04");
+  assert.equal(sim.exit.breaches_ignored, 0);
 });
 
 test("an absent exit_mode keeps the legacy fixed-target exit", () => {

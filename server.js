@@ -1127,6 +1127,33 @@ const BT_TERM_REFERENCE = 21;
 // default rather than disabling the feature silently.
 const BT_EXIT_MODE = ["runner", "fixed"].includes(process.env.SQUALL_BT_EXIT_MODE)
   ? process.env.SQUALL_BT_EXIT_MODE : "runner";
+// Breaching closes to treat as noise before honouring a stop. 1 is not a tuned optimum —
+// it is where the measured curve flattens (2nd breach 6.3%, 3rd 5.5%), and going further
+// converges on never exiting, which scored -4.2% with a -166.5% worst case.
+const BT_BREACH_TOLERANCE = (() => {
+  const raw = parseInt(process.env.SQUALL_BT_BREACH_TOLERANCE, 10);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 5 ? raw : 1;
+})();
+/*
+ * Above this stop width, tolerance is switched off.
+ *
+ * This threshold is EMPIRICAL, not derived, and it is worth saying so plainly. Tolerance
+ * exists to absorb noise, and it pays at risk 1-3 (-0.5 -> 2.1%, 2.5 -> 4.6%, 3.9 -> 6.3%)
+ * where stops sit at 5-9%. At risk 4-5 the cap allows 14-18% and the high-ATR names take
+ * most of it; a close through a stop that wide is a breakdown rather than a poke, and
+ * tolerating it rode losses deeper — risk 5 went 4.7 -> 4.0% and the worst case widened
+ * from -36.1% to -41.2%. Gating at 10% restores both (4.6%, -36.1%) and costs the lower
+ * risk levels nothing, since their stops are already inside it.
+ *
+ * Floor-relative formulations were tried first and do not discriminate: at risk 4-5 the
+ * noise floor is usually the binding term, so `stop <= 1.3x floor` is true there too.
+ * Being tuned on an 18-name sample, this is the number in the exit policy most likely to
+ * be overfit — it is the first thing to re-measure on a wider set.
+ */
+const BT_TOLERANCE_MAX_STOP = (() => {
+  const raw = Number(process.env.SQUALL_BT_TOLERANCE_MAX_STOP);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.10;
+})();
 
 /**
  * Re-checks the model's structured call against fixed enums and ranges, the same way
@@ -1367,6 +1394,9 @@ function ensureBacktestPosition(rawDecision, snapshot, rawProfile) {
     options_proxy: plan.options_proxy,
     entry_rule: "next_open",
     exit_mode: BT_EXIT_MODE,
+    // Resolved here rather than inside simulateTrade so the simulator honours whatever
+    // number it is handed and the decision card can show the one actually used.
+    breach_tolerance: decision.stop_pct <= BT_TOLERANCE_MAX_STOP ? BT_BREACH_TOLERANCE : 0,
     profile_basis: plan.profile_basis
   };
 }
@@ -1444,10 +1474,26 @@ function simulateTrade(decision, bars) {
    * untouched, which is why the worst case does not move at risk 1-3: that stop is what
    * turned INTC 2024-07-15 into -3.0% instead of -31.4%.
    */
+  /*
+   * Breach tolerance: the first N breaching closes are noise, the next one is a decision.
+   *
+   * Measured against an oracle that decides perfectly at every breach (3.9% -> 7.5% on
+   * 36 trades), ignoring exactly one breach recovers 6.3% — two thirds of the headroom
+   * for no judgment at all. The telling number is that a COIN-FLIP reviewer scored 4.8%:
+   * most of what re-deciding at the exit buys is simply not exiting on sight, which is
+   * why this is a counter and not a second AI call.
+   *
+   * It is not a wider stop in disguise. A plain wider stop peaks at 4.7% (x1.2) and then
+   * degrades, with the worst case blowing out to -41.2%, because it moves the loss floor
+   * permanently. Tolerating a transient breach leaves the floor where it was.
+   */
   const runnerMode = decision && decision.exit_mode === "runner";
+  const tolerance = Math.max(0, Math.min(5,
+    Math.round(btFinite(decision && decision.breach_tolerance) || 0)));
   let exitIdx = null, exitPrice = null, exitReason = null;
+  let breachIdx = null, ignored = 0;
   if (trading) {
-    let best = entry, armed = false;
+    let best = entry, armed = false, breaches = 0;
     for (let i = 0; i < n; i++) {
       const c = btFinite(close[i]);
       if (c == null) continue;
@@ -1458,10 +1504,17 @@ function simulateTrade(decision, bars) {
       const anchor = armed ? best : entry;
       const stopPrice = stopPct == null ? null
         : long ? anchor * (1 - stopPct) : anchor * (1 + stopPct);
-      const hitStop = stopPrice != null && (long ? c <= stopPrice : c >= stopPrice);
+      const breached = stopPrice != null && (long ? c <= stopPrice : c >= stopPrice);
+      // Counted per breaching close, not per unbroken run: a stock that pokes through
+      // the level, recovers and breaks again has spent its tolerance on the first poke.
+      if (breached) breaches += 1;
+      const hitStop = breached && breaches > tolerance;
       const hitTarget = !runnerMode && targetPrice != null
         && (long ? c >= targetPrice : c <= targetPrice);
+      // Checked even on a tolerated breach. The horizon is a hard ceiling on exposure,
+      // and skipping the test on that bar would let tolerance quietly extend the hold.
       const hitHorizon = i + 1 >= horizonN;
+      if (hitStop) { breachIdx = i; ignored = breaches - 1; }
       if (!hitStop && !hitTarget && !hitHorizon) continue;
       // Fill at the next session's open. On the final bar there is no next open,
       // so the close stands in rather than inventing a price.
@@ -1526,7 +1579,11 @@ function simulateTrade(decision, bars) {
     // line at the wrong level is indistinguishable from a right one on a chart.
     base: BT_START_EQUITY,
     entry: { date: dates[0], price: entry },
-    exit: trading ? { date: dates[exitIdx], price: exitPrice, reason: exitReason } : null,
+    // breach_index is the bar that TRIGGERED the exit, not the bar it filled on. The
+    // review orchestrator needs the trigger to ask "was that breakdown real?" about the
+    // right session, and it is not derivable from the fill date once tolerance is in play.
+    exit: trading ? { date: dates[exitIdx], price: exitPrice, reason: exitReason,
+      breach_index: breachIdx, breaches_ignored: ignored } : null,
     stats
   };
 }
