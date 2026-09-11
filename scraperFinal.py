@@ -2114,7 +2114,7 @@ Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Read
 The 2–3 catalysts that could re-rate the stock (draw on the Finnhub source records plus earnings dates, 8-K events, insider activity, and sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
 
 ## Trade Idea
-One actionable options structure using ONLY strikes/expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss, and the thesis it expresses. If nothing in §13 sets up cleanly, say so and explain why in one sentence.
+One actionable trade with the intended holding period stated explicitly, and the thesis it expresses. Default to a shares position — entry zone, stop level, target level — sized to that holding period; build the idea out of options only where the MySquall block calls for them. Any option leg must use ONLY strikes and expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss. §13 lists the two nearest expirations only, so if neither reaches the holding period, say so in one sentence and give the shares trade instead rather than shortening the thesis to fit the chain. Never invent a strike or expiration. If nothing sets up cleanly, say so and explain why in one sentence.
 """
 
     return {

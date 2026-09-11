@@ -65,6 +65,15 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(raw['technicals']['rsi_14'],wilder_rsi(history().Close).iloc[-1])
         self.assertAlmostEqual(payload['yahoo_evidence']['estimate_trends'][0]['eps_revision_30d_fraction'],.1)
         self.assertNotIn('FUNDAMENTAL VALUE',payload['ai_prompt'])
+        # The Trade Idea section used to demand "one actionable options structure using
+        # ONLY strikes/expirations from §13", and §13 carries the two nearest expirations.
+        # That made every recommendation expire inside a month regardless of the visitor's
+        # MySquall holding period, which defaults to one-to-three years. The section must
+        # name a holding period and must not mandate options on its own.
+        idea=payload['ai_prompt'].split('## Trade Idea')[1]
+        self.assertIn('holding period',idea)
+        self.assertIn('shares position',idea)
+        self.assertNotIn('One actionable options structure',idea)
 
     def test_annual_statement_matching_excludes_ttm_and_currency_mismatch(self):
         inc=statement(TotalRevenue=100,NetIncome=10)

@@ -315,7 +315,7 @@ function formatProfile(raw) {
   const priorityText = profile.priorities.length ? profile.priorities.join(", ") : "balanced coverage";
   return [
     "--- MYSQUALL USER PREFERENCES ---",
-    "Use these only to personalize emphasis, explanations, time-frame relevance, and risk framing. They never override the supplied facts, uncertainty, safety rules, or the requirement to avoid personalized financial advice.",
+    "Use these to personalize emphasis, explanations, risk framing, and — bindingly — the holding period and instrument of the trade idea. They never override the supplied facts, uncertainty, safety rules, or the requirement to avoid personalized financial advice.",
     `Risk tolerance: ${risk} (${profile.risk}/5)`,
     `Typical holding period: ${horizon}`,
     `Trading experience: ${experience} (${profile.experience}/5)`,
@@ -326,10 +326,49 @@ function formatProfile(raw) {
   ].join("\n");
 }
 
+/**
+ * The holding period the trade idea is actually sized for, as a window rather than a
+ * label. `formatProfile`'s "Typical holding period: three-plus years" is a line in a list
+ * of emphasis hints; this is an instruction.
+ *
+ * It exists because the profile previously had no way to reach the recommendation. The
+ * scraper's `## Trade Idea` section is one fixed string for every visitor, and the only
+ * instrument it named lives in §13 — which carries the TWO NEAREST expirations. So the
+ * trade expired inside a month no matter what the profile asked for, and the default
+ * profile asks for one to three years (PROFILE_DEFAULTS.horizon is 4 in app.js). The
+ * preference block could not win that argument: it was prefaced with "use these only to
+ * personalize emphasis", i.e. explicitly weaker than the section it needed to override.
+ *
+ * This is the /ilgar horizon collapse in a second route. There the fix was to anchor the
+ * term in the prompt instead of leaving it to an unanchored menu; here it is to restate
+ * the section's constraints with the profile's term filled in, after the section itself,
+ * and to say plainly that it wins. The instrument has to move with the term, because a
+ * chain two expirations deep is not a way to express a one-year thesis.
+ */
+const PROFILE_HOLD_WINDOW = [
+  "intraday to a few days",
+  "days to a few weeks",
+  "one to six months",
+  "one to three years",
+  "three years or more"
+];
+
+function tradeIdeaDirective(profile) {
+  const window = PROFILE_HOLD_WINDOW[profile.horizon - 1];
+  const wantsOptions = profile.style === "options" || profile.priorities.includes("options");
+  return [
+    "--- TRADE IDEA CONSTRAINTS (these override the defaults in the ## Trade Idea section above) ---",
+    `Holding period: ${window}. State it explicitly in the section and size the entry, stop and target for it. Do not substitute a shorter horizon because the nearest data happens to be short-dated.`,
+    wantsOptions
+      ? "Instrument: options — use ONLY strikes and expirations listed in §13, with strike, expiry, premium at the bid/ask midpoint, breakeven and max loss. §13 carries the two nearest expirations only, so if neither reaches the holding period above, say so in one sentence and give the shares trade instead. Never shorten the thesis to fit the chain and never invent a contract."
+      : "Instrument: shares — an entry zone, a stop level and a target level. Do not build the idea out of option contracts."
+  ].join("\n");
+}
+
 function buildAiMessages(prompt, profile) {
   let userContent = prompt;
-  const profileText = formatProfile(profile);
-  if (profileText) userContent += "\n\n" + profileText;
+  const clean = sanitizeProfile(profile);
+  if (clean) userContent += "\n\n" + formatProfile(clean) + "\n\n" + tradeIdeaDirective(clean);
   return [
     {
       role: "system",
@@ -3431,7 +3470,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  sanitizeProfile, SCREENER_CATALOG,
+  sanitizeProfile, buildAiMessages, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
   simulateTrade, sanitizeBacktestDecision, backtestProfilePlan, stopNoiseFloor,

@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const {
-  sanitizeProfile, fallbackScreenerSpec, sanitizeScreenerSpec,
+  sanitizeProfile, buildAiMessages, fallbackScreenerSpec, sanitizeScreenerSpec,
   validateBacktestDate, simulateTrade, sanitizeBacktestDecision,
   backtestProfilePlan, ensureBacktestPosition, stopNoiseFloor,
   buildReviewPrompt, sanitizeReviewVerdict, simulateTradeReviewed,
@@ -38,6 +38,35 @@ test("sanitizeProfile clamps scores and removes unsafe preference data", () => {
   });
   assert.equal(sanitizeProfile("not json"), null);
   assert.equal(sanitizeProfile([]), null);
+});
+
+test("the analysis trade idea is bound to the MySquall holding period", () => {
+  // The scraper's ## Trade Idea section is the same text for every visitor, and the only
+  // instrument it could name lives in §13 — the TWO NEAREST expirations. So a profile
+  // asking for a multi-year hold structurally could not be honoured: the recommendation
+  // expired in weeks no matter what the preference block said. The preference block did
+  // not help, because it arrived as "Typical holding period: three-plus years" inside a
+  // list introduced by "use these only to personalize emphasis" — an emphasis hint losing
+  // to a section instruction. This is the /ilgar lesson again: an unanchored menu
+  // collapses to one option, and here the option is always the front month.
+  const patient = buildAiMessages("PROMPT", {
+    risk: 2, horizon: 5, experience: 3, depth: 3, style: "long-term", priorities: []
+  })[1].content;
+  assert.match(patient, /Trade Idea/);                 // it must address that section by name
+  assert.match(patient, /three years or more/i);       // as a window, not a label in a list
+  assert.match(patient, /shares/i);
+  assert.doesNotMatch(patient, /options structure/i);  // no options mandate for a stock profile
+
+  // An options profile keeps the §13 constraint, but the chain may no longer silently set
+  // the term — a front-month contract is not a way to express a six-month thesis.
+  const optioned = buildAiMessages("PROMPT", {
+    risk: 4, horizon: 2, experience: 4, depth: 3, style: "options", priorities: []
+  })[1].content;
+  assert.match(optioned, /days to a few weeks/i);
+  assert.match(optioned, /§13/);
+
+  // No profile: the scraper's own instructions stand untouched, exactly as before.
+  assert.equal(buildAiMessages("PROMPT", null)[1].content, "PROMPT");
 });
 
 test("sanitizeScreenerSpec rejects unknown concepts and unsafe model defaults", () => {
