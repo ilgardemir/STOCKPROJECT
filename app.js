@@ -1720,12 +1720,14 @@ function renderStrip(d) {
 }
 
 /* ════════════════ WORKSPACE DESTINATIONS ════════════════
-   One list, rendered as one vertical rail, driving both layout modes. It replaces two
+   One list, rendered as a vertical rail on larger screens and a bottom dock on phones,
+   driving both layout modes. It replaces two
    separate mechanisms that were the same idea at different breakpoints: the four horizontal
    section tabs inside the data pane, and #mobileTabs' Data/AI pane switcher below 960px.
 
-   Vertical is the whole point. A horizontal tab row costs 34–40px of the axis this layout
-   has none of; a 96px rail costs none of it, and the display this is used on is 1280×720.
+   Vertical is the right trade on short desktop screens: a horizontal row costs 34–40px of
+   the axis that layout has none of. A phone is the opposite trade — 74px of permanent rail
+   consumes a fifth of its usable width — so CSS moves the same buttons below the pane.
 
    `pane` says which pane a destination lives in. In split mode both panes are on screen, so
    the AI destinations are filtered out of the rail — selecting "AI Analysis" when the AI
@@ -1752,6 +1754,7 @@ const SECTION_KEY = "squall-data-section";
    got the worst of both. 820px of viewport height is roughly where two stacked scroll
    regions stop being worth their scrollbars. */
 const FOCUS_MQ = matchMedia("(max-width: 1100px), (max-height: 820px)");
+const MOBILE_VIEW_MQ = matchMedia("(max-width: 600px)");
 const isFocusMode = () => FOCUS_MQ.matches;
 /* The class is what CSS keys off. Set here rather than in a media query so that JS and CSS
    cannot disagree about which mode is live — one condition, one source. */
@@ -1792,6 +1795,7 @@ function renderViewRail(bucket) {
       return `<button type="button" role="tab" data-view="${v.id}"${rule} aria-selected="${v.id === activeView}"
         class="${v.id === activeView ? "active" : ""}">${esc(v.label)}<i class="tab-dot" aria-hidden="true"></i></button>`;
     }).join("");
+    keepActiveViewVisible();
   }
   // Only the data destinations produce panels; the AI ones are a whole pane already.
   return filled.filter(v => v.pane === "data").map(v =>
@@ -1809,6 +1813,7 @@ function showView(id) {
     b.classList.toggle("active", on);
     b.setAttribute("aria-selected", String(on));
   });
+  keepActiveViewVisible();
   document.querySelectorAll("#dataBody .data-section").forEach(p =>
     p.classList.toggle("show", p.dataset.section === id));
   const body = document.getElementById("dataBody");
@@ -1820,6 +1825,26 @@ function showView(id) {
   if (id === "chart" && active) requestAnimationFrame(drawChart);
   if (id === "chat") document.getElementById("chatInput")?.focus();
 }
+
+/* A saved destination can sit beyond the phone dock's initial scroll position. Keep the
+   selected item in view without coupling navigation to desktop geometry; the optional
+   method guard also keeps the page harness and older browsers on the no-op path. */
+function keepActiveViewVisible() {
+  if (!MOBILE_VIEW_MQ.matches) return;
+  const button = document.querySelector(`#viewRail [data-view="${activeView}"]`);
+  if (button && typeof button.scrollIntoView === "function") {
+    button.scrollIntoView({ block: "nearest", inline: "center" });
+  }
+}
+
+function syncViewRailOrientation() {
+  const rail = document.getElementById("viewRail");
+  if (!rail) return;
+  rail.setAttribute("aria-orientation", MOBILE_VIEW_MQ.matches ? "horizontal" : "vertical");
+  keepActiveViewVisible();
+}
+MOBILE_VIEW_MQ.addEventListener("change", syncViewRailOrientation);
+syncViewRailOrientation();
 
 /* Which panes are mounted. In split mode: both, always — leaving a stale [data-hidden]
    behind after a resize is how one pane silently disappears on a wide screen. */
@@ -1868,6 +1893,7 @@ function renderLoadingRail() {
   rail.innerHTML = entries.map(e =>
     `<button type="button" role="tab" data-view="${e.id}" aria-selected="${e.id === marked}"
       class="${e.id === marked ? "active" : ""}">${esc(e.label)}<i class="tab-dot" aria-hidden="true"></i></button>`).join("");
+  keepActiveViewVisible();
   wireViewRail();
   syncPaneVisibility();
 }

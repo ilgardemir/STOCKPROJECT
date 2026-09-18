@@ -791,9 +791,6 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   #rangeSel button { padding: 6px 11px; }
   .toggle { padding: 6px 12px 6px 10px; }
 }
-/* The rail is the last thing that should eat width on a phone, so it sheds to a compact
-   strip rather than disappearing — losing it would leave no way to change destination. */
-@media (max-width: 560px) { :root { --rail-w: 74px; } #viewRail { padding: 8px 5px; } #viewRail button { padding: 8px 7px; font-size: var(--t-micro); } }
 /* The header sheds labels one at a time as it narrows, rather than all at once. Each
    step hands its width to the search field, which is the bar's real job — dropping them
    together left a band around 560px where the field collapsed to ~120px. */
@@ -831,10 +828,130 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   #themeBtn { width: 33px; }
 }
 
+/* PHONE LAYOUT
+   Phones are not a narrower desktop. The desktop rail spends width because height is the
+   scarce axis; on a phone that trade is backwards. The same destinations become a bottom
+   dock, the active pane gets the full width, and the crowded header becomes two deliberate
+   rows once there is work on screen. No information or action is removed. */
+@media (max-width: 600px) {
+  :root { --header-h: 100px; --mobile-nav-h: 56px; --rail-w: 0px; }
+
+  body > header {
+    height: var(--header-h); padding: 7px 10px 8px; gap: 7px;
+    display: grid; grid-template-columns: 34px minmax(0, 1fr) auto;
+    grid-template-rows: 36px 42px;
+  }
+  body > header .wordmark { grid-column: 1; grid-row: 1; width: 34px; height: 34px; margin: 0; padding: 3px; justify-content: center; }
+  body > header .wordmark .wind { width: 27px; height: 24px; }
+  body > header .wordmark .wm-title, body > header .wordmark small { display: none; }
+  body > header #tickerBar {
+    grid-column: 2; grid-row: 1; margin: 0; padding: 0; border: 0; gap: 7px;
+    align-items: center; justify-self: start;
+  }
+  body > header #searchForm { grid-column: 1 / -1; grid-row: 2; width: 100%; max-width: none; margin: 0; }
+  body > header .ticker-wrap { height: 42px; }
+  body > header .util-rail { grid-column: 3; grid-row: 1; height: 34px; justify-self: end; }
+  body > header .util-rail > button { min-width: 36px; width: 36px; }
+  body > header #themeBtn { width: 36px; }
+
+  /* The landing page has no header search or ticker identity. Keep that state to one calm
+     row and give the recovered width back to the wordmark. */
+  body.hero-up > header { height: 52px; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 36px; padding-block: 8px; }
+  body.hero-up > header .wordmark { grid-column: 1; width: auto; justify-content: flex-start; padding-inline: 5px; }
+  body.hero-up > header .wordmark .wm-title { display: inline; font-size: 16px; }
+  body.hero-up > header .util-rail { grid-column: 2; }
+
+  /* The standalone 404 has no utility rail or global search. It keeps the simple one-row
+     identity header instead of reserving an empty second row for controls it does not load. */
+  body[data-page="notfound"] > header { height: 52px; display: flex; padding: 8px 10px; }
+  body[data-page="notfound"] > header .wordmark { width: auto; height: 34px; justify-content: flex-start; padding-inline: 5px; }
+  body[data-page="notfound"] > header .wordmark .wm-title { display: inline; font-size: 16px; }
+
+  #tickerSuggest { top: calc(var(--header-h) + 6px); right: 10px; width: calc(100vw - 20px); }
+  #savedMenu, #themeMenu { position: fixed; top: calc(var(--header-h) + 6px); right: 10px; max-width: calc(100vw - 20px); }
+  body.hero-up #savedMenu, body.hero-up #themeMenu { top: 58px; }
+
+  #progressWrap.show { height: 42px; }
+  #progressInner { gap: 9px; padding: 0 12px; }
+  #progressMeta { min-width: 0; overflow: hidden; }
+  #progressMeta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progressTrack { min-width: 48px; }
+  #progressPct { min-width: 34px; }
+
+  #hero { justify-content: flex-start; gap: 16px; padding: max(42px, 9dvh) 16px 28px; overflow-y: auto; }
+  #hero .wind { width: 54px; height: 44px; }
+  #hero h1 { font-size: clamp(31px, 12vw, 42px); }
+  #hero p { font-size: var(--t-lead); }
+  #hero .hero-fine { font-size: var(--t-data); line-height: 1.5; }
+  #heroAnalyzeBtn { min-width: 44px; padding-inline: 13px; }
+  .hero-actions { width: 100%; }
+  .hero-actions .chip { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+
+  #workspace { min-height: 0; }
+  body.focus-mode #split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  body.focus-mode .pane { grid-column: 1; grid-row: 1; min-height: 0; }
+  body.focus-mode #resizer { display: none; }
+  #viewRail {
+    grid-column: 1; grid-row: 2; min-width: 0; min-height: var(--mobile-nav-h);
+    flex-direction: row; align-items: stretch; gap: 2px; overflow-x: auto; overflow-y: hidden;
+    padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px));
+    border-right: 0; border-top: 1px solid var(--rule); scroll-snap-type: x proximity;
+  }
+  #viewRail button {
+    min-width: max-content; min-height: 42px; padding: 0 14px; text-align: center;
+    white-space: nowrap; overflow-wrap: normal; font-size: var(--t-data); scroll-snap-align: center;
+  }
+  #viewRail button.active { box-shadow: inset 0 2px 0 var(--accent); }
+  #viewRail button[data-group-start] { margin: 0 0 0 6px; padding: 0 14px 0 20px; border-top: 0; border-left: 1px solid var(--rule); }
+
+  .pane-body { padding: 12px 12px 22px; }
+
+  #screenerView { padding: 20px 12px calc(40px + env(safe-area-inset-bottom, 0px)); }
+  .screen-head { margin-bottom: 15px; }
+  .screen-head h1 { font-size: clamp(25px, 8.5vw, 32px); line-height: 1.12; }
+  #screenForm { padding: 8px; border-radius: var(--radius); }
+  #screenQuery { min-height: 96px; padding: 8px; font-size: 16px; }
+  #screenRun { min-height: 46px; }
+  .screen-examples { display: flex; grid-template-columns: none; gap: 8px; overflow-x: auto; padding-bottom: 4px; scroll-snap-type: x proximity; }
+  .screen-example { flex: 0 0 min(76vw, 270px); min-height: 44px; scroll-snap-align: start; }
+  .recipe, .screen-result { padding: 13px 12px; }
+  .recipe-top, .screen-results-head, .screen-refine-head { display: block; }
+  .recipe-source, .screen-results-head span, .screen-refine-head > span { display: inline-block; margin-top: 7px; }
+  .recipe-definitions { grid-template-columns: 1fr; }
+  .screen-metrics { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+  .screen-metric { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; border-radius: 0; background: transparent; }
+  .screen-metric + .screen-metric { border-top: 1px solid var(--rule); }
+  .screen-metric small { text-transform: none; }
+  .screen-metric b { text-align: right; }
+  .screen-chat-msg { max-width: 94%; }
+  .screen-refine-form input { min-height: 42px; font-size: 16px; }
+  .screen-refine-form button { min-height: 42px; }
+
+  #profilePanel { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .profile-head { padding: calc(14px + env(safe-area-inset-top, 0px)) 14px 12px; }
+  #profileForm { padding: 14px; }
+  .profile-field { padding: 12px; }
+  .profile-actions button { min-height: 42px; }
+
+  .backtest-shell { width: calc(100% - 24px); padding: 26px 0 calc(48px + env(safe-area-inset-bottom, 0px)); }
+  .backtest-intro h1 { font-size: clamp(31px, 10vw, 42px); }
+  .backtest-form input, #backtestRun { min-height: 46px; font-size: 16px; }
+  .backtest-panel { padding: 13px 12px; }
+}
+
+@media (max-width: 380px) {
+  body > header { grid-template-columns: 32px minmax(0, 1fr) auto; padding-inline: 8px; }
+  body > header .wordmark { width: 32px; }
+  body > header .util-rail > button, body > header #themeBtn { min-width: 33px; width: 33px; }
+  #sPrice { font-size: var(--t-body); }
+  .pill { font-size: var(--t-micro); padding-inline: 6px; }
+  .screen-refine-form { flex-direction: column; }
+  .screen-refine-form button { width: 100%; }
+}
+
 /* CARDS */
-/* The horizontal #dataSections tablist is gone — its job moved to #viewRail, which is
-   vertical and therefore free on the axis this layout has none of. What remains is the
-   panel itself. */
+/* The horizontal #dataSections tablist is gone — its job moved to #viewRail, which is a
+   vertical desktop rail and a bottom phone dock. What remains here is the panel itself. */
 .data-section { display: none; }
 /* A metric row is a label and a value sharing an axis; at the ~1150px a focus-mode pane
    now offers, that axis is far enough apart that the eye stops connecting the two. The
@@ -1535,3 +1652,34 @@ body { letter-spacing: 0; }
 .ai-section summary { font-family: ui-sans-serif, system-ui, sans-serif; letter-spacing: .01em; }
 .metric-label, .metric-value, .card > summary { font-family: var(--mono); }
 .card > summary { font-weight: 600; }
+
+/* These components are declared after the main phone layout block, so their mobile
+   adjustments live at the end of the cascade rather than depending on selector weight. */
+@media (max-width: 600px) {
+  #hero p { font-size: var(--t-lead); }
+  #aiScroll { padding: 12px 14px 22px; }
+  #chatRow, #chatDock.expanded > #chatRow, body.chat-view #chatRow { padding: 9px 12px 10px; }
+  #chatInput { min-width: 0; }
+  #chatSend { width: 42px; min-height: 42px; flex-shrink: 0; }
+  .chat-think-btn { min-height: 42px; }
+
+  #dataBody:has(> .chart-section.show) { padding-bottom: 10px; }
+  #chartControls { gap: 4px; margin-bottom: 7px; }
+  .chart-tool-btn { min-height: 36px; padding-inline: 10px; }
+  #rangeSel button { min-height: 30px; padding-inline: 10px; }
+  #chartBox { min-height: 220px; gap: 8px; }
+  .chart-expand-btn { width: 36px; height: 36px; }
+  .card > summary { min-height: 48px; padding-inline: 12px; }
+  .card-body { padding-inline: 12px; }
+
+  #chartModal { padding: 0; }
+  #chartModalInner { border: 0; border-radius: 0; }
+  #chartModalHead { flex-wrap: wrap; gap: 8px; padding: 9px 10px; }
+  #chartModalTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chartModalTag { display: none; }
+  #chartModalRangeSel { order: 3; width: 100%; margin: 0; overflow-x: auto; }
+  #chartModalRangeSel button { flex: 1 0 auto; min-height: 36px; }
+  #chartModalClose { width: 38px; height: 38px; }
+  #chartModalBody { padding: 8px 10px 10px; gap: 8px; }
+  #chartModalControls { padding: 7px 10px calc(7px + env(safe-area-inset-bottom, 0px)); flex-wrap: nowrap; overflow-x: auto; }
+}

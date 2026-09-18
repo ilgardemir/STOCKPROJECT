@@ -66,12 +66,12 @@
 
 <!--#include chrome-tabs-->
 
-<!-- The workspace is destinations, not bands. #viewRail is a VERTICAL list on purpose: a
-     horizontal tab row costs 34–40px of the only axis that is scarce here, and a 96px rail
-     costs none of it. It is rendered by renderAll (so wire it by delegation, never with a
-     top-level getElementById) and it drives both modes — in split mode it lists the data
-     destinations and both panes stay mounted; in focus mode it lists all of them and one
-     pane at a time takes the whole region. -->
+<!-- The workspace is destinations, not bands. #viewRail is rendered by renderAll (so wire
+     it by delegation, never with a top-level getElementById) and drives both modes. It is a
+     vertical rail beside the panes on larger screens, where width is cheaper than height;
+     on phones it becomes a thumb-reachable horizontal dock below the active pane. In split
+     mode it lists data destinations and both panes stay mounted; in focus mode it lists all
+     destinations and one pane at a time takes the region. -->
 <div id="workspace">
   <div id="split">
     <nav id="viewRail" role="tablist" aria-label="Workspace views" aria-orientation="vertical"></nav>

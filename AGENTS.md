@@ -35,6 +35,11 @@ Then make the change. For a multi-step task, describe the whole plan up front ra
 
 The point is that the user can redirect you *before* the work exists, not after.
 
+For visual or product work, **learn the actual site before planning the change**. Inspect the
+deployed product and exercise the affected flow when the environment allows it. If live UI
+access is unavailable, say so plainly and inspect the current markup, styles, behavior, and
+local rendered state instead; do not design from an old screenshot or a remembered layout.
+
 ### 3. Commit and push each completed change
 
 Descriptive message, direct to `main` is fine. Prompt pushes keep both clones and the Railway deploy in sync. Don't batch several unrelated changes into one commit.
