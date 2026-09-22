@@ -111,6 +111,13 @@ process.stdout.write(JSON.stringify({
                    "BB EXPANSION: Very wide bands — high volatility regime."],
   algorithmic_signals: ["BULLISH: Price above both moving averages.",
                         "WARNING: Volume ratio elevated into resistance."],
+  // Imminent on purpose, so the strip badge and the Next Results card both render.
+  event_risk: { pending_period_end: "2026-09-27", earnings_window: ["2026-10-11", "2026-10-31"],
+    earnings_window_already_open: false, days_until_earnings_window_opens: 12,
+    days_until_earnings_window_closes: 32, imminent: true,
+    observed_filing_lag_days: { low: 29, median: 34, high: 38 },
+    results_announced: { period_end: "2026-06-28", announced: "2026-07-31" },
+    basis: "Estimated from this issuer's own SEC filing history (stub)." },
   filing_activity: { "8k_events": ["Results of Operations"], insider_buys: 2,
     insider_sells: 6, activist_13d: false, window_days: 90, truncated: false },
   options_data: {

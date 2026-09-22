@@ -409,7 +409,7 @@ body.has-analysis #searchForm { max-width: 280px; }
    it ellipsed: at 1280px it rendered as 32px of "AAP…", which is worse than absent and
    costs the sector and regime badges the room they need. */
 @media (max-width: 1400px) { #sCompany { display: none; } }
-@media (max-width: 1180px) { #tickerBar .regime-badge { display: none; } }
+@media (max-width: 1180px) { #tickerBar .regime-badge:not(.event-badge) { display: none; } }
 @media (max-width: 1060px) { #tickerBar .sector-badge { display: none; } }
 @media (max-width:  620px) { #tickerBar { margin-left: 10px; padding-left: 10px; gap: 7px; } #sTicker { display: none; } }
 

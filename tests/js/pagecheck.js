@@ -107,6 +107,10 @@ const SEEDED_STORAGE = {
         ticker: "AAA", company_name: "Pagecheck Industries", aiSummary: "## Verdict\n**Hold** — flat.\n\n## A\nx\n\n## B\ny",
         raw_data: { technicals: { current_price: 10 }, key_levels: { resistance: [11], support: [9] } },
         live_quote: { last_price: 10 },
+        // Imminent, so the strip badge and the Next Results card both execute on load.
+        event_risk: { pending_period_end: "2024-03-31", earnings_window: ["2024-04-14", "2024-04-30"],
+          earnings_window_already_open: false, days_until_earnings_window_opens: 9, imminent: true,
+          observed_filing_lag_days: { low: 25, median: 30, high: 35 }, results_announced: null, basis: "seed" },
         price_history: Array.from({ length: 300 }, (_, i) => ({
           date: `2024-01-${String((i % 28) + 1).padStart(2, "0")}`,
           open: 10 + i * 0.01, high: 10.5 + i * 0.01, low: 9.5 + i * 0.01, close: 10.2 + i * 0.01, volume: 1000 + i

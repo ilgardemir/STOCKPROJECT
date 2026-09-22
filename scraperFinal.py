@@ -7,6 +7,7 @@ Sources: Finnhub (quote/profile/news) · yahooquery (history/options/fundamental
 
 from yahooquery import Ticker as YQTicker
 from financial_rules import business_model, quote_evidence
+from event_calendar import live_event_risk, describe_event_risk
 from quant_utils import (return_windows, first_number, positive_ratio, percent_fraction, wilder_rsi,
                          annual_cagr, adjusted_close, risk_statistics)
 import requests, json, re, sys, os, math, time, tempfile, traceback
@@ -695,11 +696,15 @@ def get_recent_filings(cik, signal_days=SIGNAL_WINDOW_DAYS):
         # truncated response degrades to fewer filings instead of an IndexError that
         # would discard the SEC half of the analysis entirely.
         total = min(len(recent.get("accessionNumber", [])), len(forms), len(dates))
+        # 8-K item numbers ("2.02,9.01"), already in this response. Item 2.02 is how the
+        # live earnings window knows a quarter's results are out before its 10-Q is filed.
+        items = recent.get("items", [])
 
         def filing_at(i):
             return {"form": forms[i], "filing_date": dates[i],
                     "accession_number": recent["accessionNumber"][i],
-                    "primary_document": pdocs[i] if i < len(pdocs) else None}
+                    "primary_document": pdocs[i] if i < len(pdocs) else None,
+                    "items": items[i] if i < len(items) else ""}
 
         # ISO dates compare correctly as strings, so no date parsing per row. Scanning
         # the whole block rather than stopping at the first out-of-window entry avoids
@@ -1579,6 +1584,7 @@ def generate_analysis_payload(query: str) -> dict:
     cik           = get_cik_from_ticker(ticker)
     sec_available = cik is not None
     facts = None; filings = []; mda_text = "SEC data unavailable."
+    upcoming_report = None
     sec_rev_val = sec_ni_val = sec_assets_val = sec_liab_val = sec_equity_val = sec_ocf_val = sec_rev_cagr = None
     filing_signals = {"8k_events": [], "insider_buys": 0, "insider_sells": 0, "activist_13d": False}
     company_name = ticker
@@ -1590,6 +1596,12 @@ def generate_analysis_payload(query: str) -> dict:
         # SEC's in-memory recent history to reliably reach the annual report.
         filings = get_recent_filings(cik)
         company_name = (facts or {}).get("entityName", ticker)
+        # Degrades to absent: too little filing history to establish a cadence is normal.
+        try:
+            upcoming_report = live_event_risk(facts, TODAY.date(), filings) if facts else None
+        except Exception as exc:
+            _sec_diag("event_risk", f"CIK{cik}", False, error=exc)
+            upcoming_report = None
 
         def sec_val(ns, concept):
             return safe_extract_sec(facts, ns, concept, with_dates=True) if facts else (None, [])
@@ -2014,6 +2026,7 @@ Analyst Targets (Mean/Hi/Lo): {fmt(target_mean,'usd')} / {fmt(target_high,'usd')
 Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(short_float,'pct')}
 
 ### 10. EARNINGS (Last 4Q)
+{describe_event_risk(upcoming_report)}
 """
     if recent_earnings:
         for e in recent_earnings:
@@ -2121,7 +2134,7 @@ The 2–3 catalysts that could re-rate the stock (draw on the Finnhub source rec
 
 ## Trade Idea
 All options bid/ask pairs are indicative snapshots with unverified quote timestamps. Never describe their midpoint as executable or give a priced options recommendation; use shares and explain that a current broker quote is required. Last-trade dates do not timestamp bid/ask quotes.
-One actionable shares trade with the intended holding period stated explicitly, and the thesis it expresses: entry zone, stop level and target level sized to that holding period. Respect the quote limitations above even when the profile prefers options. Never invent a strike or expiration or shorten the thesis to fit the available chain. If nothing sets up cleanly, say so and explain why in one sentence.
+If §10 marks the next results IMMINENT, say whether the trade holds through them, since a stop cannot cover a results gap. One actionable shares trade with the intended holding period stated explicitly, and the thesis it expresses: entry zone, stop level and target level sized to that holding period. Respect the quote limitations above even when the profile prefers options. Never invent a strike or expiration or shorten the thesis to fit the available chain. If nothing sets up cleanly, say so and explain why in one sentence.
 """
 
     return {
@@ -2176,6 +2189,7 @@ One actionable shares trade with the intended holding period stated explicitly, 
         },
         "chart_patterns":    chart_patterns,
         "filing_activity":   filing_signals,
+        "event_risk":        upcoming_report,
         "options_data":      options_data,
         "mda_excerpt":       mda_text,
         "live_quote":        live_quote,

@@ -82,10 +82,28 @@ payload cache still applies. Market snapshots display their date and offer Refre
 Regimes expose score separation, not a probability. `financial_rules.py` owns business-model
 applicability and bid/ask validation. Options quotes have no verified bid/ask timestamp and
 remain indicative; priced options recommendations require a current broker quote.
-Screener cache v8 retains base composites and reranks core fundamentals within sector/model
+**Classification keys on the Yahoo *industry*, never the sector** — Yahoo files every financial
+name under "Financial Services", and matching that marked V, MA, SPGI, MCO, CME and ICE as banks
+and blanked their margin/FCF/quality scores. Only banks, underwriting insurers, capital markets,
+mortgage finance and credit services are "financial"; the payment networks Yahoo also files under
+Credit Services are named in `PAYMENT_NETWORKS`. With no industry, the sector decides (conservatively).
+Screener cache v9 retains base composites and reranks core fundamentals within sector/model
 on every selected universe (minimum three comparable observations). Financial-company
 capital/credit quality and REIT FFO/AFFO are not available and affected concepts are explicitly
 unsupported. Coverage distinguishes missing/inapplicable evidence from failed criteria.
+
+**The live analyzer carries `event_risk` too** — the next results window, from the same
+reconstruction the replay uses. `event_risk` and its helpers live in `event_calendar.py` (no
+dependencies) because backtester.py imports scraperFinal, so the scraper cannot import the
+backtester back; backtester re-exports every moved name. Live adds one thing through
+`live_event_risk`: issuers **announce** weeks before they **file**, so facts alone call a quarter
+"imminent" for ~3 weeks after its release — exactly when people look a stock up. An 8-K with
+Item 2.02 filed after the pending period end marks the results as out and advances the window
+one cadence; the `items` list rides in the one SEC submissions call already made, so it costs
+no request. `falls_inside_horizon` is dropped (replay horizons mean nothing live). The window
+opens at `min(14, fastest filing lag − 7)` days after period end (`_window_open_days`): a fixed
+14-day floor opened ORCL's window *after* its 11-day 10-Q and collapsed it to one day. The strip
+badge appears only when `imminent`; the Next Results card always renders when an estimate exists.
 
 The primary flow is **browser → Node server → spawns Python scraper → OpenRouter LLM → streamed back to browser**. The screener adds a parallel flow: **browser → Node server → (LLM interprets query) → spawns Python screener → streamed back**. Four Python/JS files hold essentially all the logic, with `sp500.js` and `market-universes.js` providing index constituents.
 

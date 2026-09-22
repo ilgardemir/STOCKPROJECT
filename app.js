@@ -1540,6 +1540,12 @@ function histSrc(d) {
   if (!h || h === "Unavailable") return null;
   return { kind: "market", label: h === "Yahoo" ? "Yahoo Finance" : h };
 }
+// Strip badge only when results are imminent; a routine report months out is not news.
+function eventBadge(er) {
+  if (!er || !er.imminent || !Array.isArray(er.earnings_window)) return "";
+  const label = er.earnings_window_already_open ? "Results due now" : `Results in ~${er.days_until_earnings_window_opens}d`;
+  return `<span class="regime-badge event-badge" title="Estimated results window ${esc(er.earnings_window[0])} to ${esc(er.earnings_window[1])}, from SEC filing cadence; not a confirmed date">${label}</span>`;
+}
 const metric = (label, value, cls = "") => `<div class="metric"><span class="k">${label}</span><span class="v ${cls}">${value}</span></div>`;
 function rangeBar(title, lo, hi, val, fmt = fUsd, altVal = null, altName = "") {
   if (!isNum(lo) || !isNum(hi) || !isNum(val) || hi <= lo) return "";
@@ -1700,7 +1706,8 @@ function renderStrip(d) {
           wide enough that the bar clipped it mid-character at 1280px — while the Market
           Regime card already shows the same number with a bar beside it. The title keeps
           both for anyone who wants them without opening the card. */""}
-    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Historical price/volume classification; not a forecast">${esc(regime.label)}</span>` : ""}`;
+    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Historical price/volume classification; not a forecast">${esc(regime.label)}</span>` : ""}
+    ${eventBadge(d.event_risk)}`;
   strip.classList.add("show");
   document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
 
@@ -2088,6 +2095,22 @@ function renderAll(d) {
     ${metric("Short Interest", fPct(s.short_percent), isNum(s.short_percent) && s.short_percent > 0.10 ? "red" : "")}</div>`;
   sent += rangeBar("Analyst targets vs price (amber = mean target)", s.target_low, s.target_high, t.current_price, fUsd, s.target_mean, "Mean target");
   add("fundamentals", card("sentiment", "Sentiment & Ownership", sent));
+
+  /* Next results — estimated from the issuer's SEC filing cadence (event_calendar.py) */
+  const er = d.event_risk;
+  if (er && Array.isArray(er.earnings_window)) {
+    const overdue = er.earnings_window_already_open && er.days_until_earnings_window_closes === 0;
+    const opens = overdue ? "Past usual date" : er.earnings_window_already_open ? "Open now" : `${er.days_until_earnings_window_opens} days`;
+    const lag = er.observed_filing_lag_days || {};
+    let body = `<div class="mgrid">
+      ${metric("Estimated results window", `${esc(er.earnings_window[0])} <small>to</small> ${esc(er.earnings_window[1])}`, er.imminent ? "amber" : "")}
+      ${metric("Window opens in", opens, er.imminent ? "amber" : "")}
+      ${metric("For the period ending", esc(er.pending_period_end))}
+      ${er.results_announced ? metric("Last results released", `${esc(er.results_announced.announced)} <small>(period ended ${esc(er.results_announced.period_end)})</small>`) : ""}
+      ${isNum(lag.median) ? metric("Usual filing lag", `${lag.median} days <small>(${lag.low}–${lag.high})</small>`) : ""}</div>`;
+    body += `<p class="learn-note">${overdue ? "No results release (8-K Item 2.02) found yet, although this company has usually filed by now. " : ""}${er.imminent ? "Results are likely within three weeks. A price gap on results can jump straight past a stop. " : ""}${esc(er.basis || "")}</p>`;
+    add("fundamentals", card("nextresults", "Next Results", body, { source: secSrc(d) }));
+  }
 
   /* Earnings */
   const earn = r.earnings_surprises || [];
