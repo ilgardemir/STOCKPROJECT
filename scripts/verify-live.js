@@ -25,6 +25,16 @@ async function stream(path) {
   return events;
 }
 async function main() {
+  if (process.argv.includes("--replay")) {
+    let deployed = false;
+    for (let attempt=0; attempt<24; attempt++) {
+      const client = await fetch(base+"/backtester.js",{signal:AbortSignal.timeout(20000)});
+      if ((await client.text()).includes('data.policy?.version === "replay-v2"')) { deployed=true; break; }
+      if (attempt % 6 === 0) console.log("Waiting for replay v2 deployment...");
+      await new Promise(resolve=>setTimeout(resolve,10000));
+    }
+    assert.ok(deployed,"Replay v2 deployment did not become available within four minutes");
+  }
   for (const file of ["/server.js","/CLAUDE.md","/financial_rules.py","/replay-engine.js"]) {
     const response=await fetch(base+file,{signal:AbortSignal.timeout(20000)});
     assert.equal(response.status,404,file);await response.arrayBuffer();
@@ -53,6 +63,7 @@ async function main() {
     const events=await stream("/backtest-stream?ticker=JPM&as_of=2024-06-03&horizon=1m");
     assert.ok(events.backtest_done);
     const result=events.backtest_outcomes;
+    assert.ok(result?.audit,"Replay v2 audit record is missing");
     assert.equal(result.audit.policy.version,"replay-v2");
     assert.ok(result.audit.decision,"Live model did not supply a valid structured decision");
     assert.deepEqual(simulateReplay(result.audit.decision,result.audit.bars,result.audit.policy),result.simulation);
