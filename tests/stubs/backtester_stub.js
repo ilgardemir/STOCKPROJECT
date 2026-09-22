@@ -34,7 +34,7 @@ process.stdin.on("end", () => {
       benchmark: "SPY", benchmark_returns: { "1m": 0.02, "3m": null, "6m": null },
       excess_returns: { "1m": 0.06, "3m": null, "6m": null },
       exit_dates: { "1m": dates[20] }, max_drawdown_6m: -0.03,
-      bars: { dates, open, close, spyOpen, spyClose }
+      bars: { basis:"split_adjusted_price", dates, open, close, spyOpen, spyClose }
     },
     ai_prompt: "FROZEN SNAPSHOT PROMPT " + JSON.stringify(snapshot),
     methodology: { signal_cutoff: "stub" },

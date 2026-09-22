@@ -7,6 +7,7 @@ global.test = (name, fn) => tests.push({ name, fn });
 require("./server.test");
 require("./backtester.test");
 require("./app.test");
+require("./replay.test");
 
 /*
  * The loop AWAITS fn(). It used to call it bare, which meant an async test could only

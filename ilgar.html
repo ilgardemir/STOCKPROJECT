@@ -22,17 +22,17 @@
   <div class="backtest-shell">
     <header class="backtest-intro">
       <div>
-        <div class="screen-kicker">Private evaluation workspace</div>
-        <h1>Historical analyzer</h1>
-        <p>Freeze a company at a past date, let Squall analyze only what was knowable then, and reveal what happened afterward.</p>
+        <div class="screen-kicker">Historical research laboratory</div>
+        <h1>Research replay</h1>
+        <p>Inspect dated evidence, record an AI research decision, then simulate it under a policy locked before the run.</p>
       </div>
       <span class="backtest-private">Unlisted beta</span>
     </header>
 
     <section class="backtest-method" aria-label="How the backtest works">
       <div><b>1</b><span>Market and SEC data are cut off at the selected date.</span></div>
-      <div><b>2</b><span>The AI writes its analysis without seeing future returns.</span></div>
-      <div><b>3</b><span>Measured outcomes are released only after generation ends.</span></div>
+      <div><b>2</b><span>The AI records long, short or no position. Future bars are excluded from its input; model memory is not erased.</span></div>
+      <div><b>3</b><span>A fixed policy measures the outcome. Export the inputs, decision and accounting to audit it.</span></div>
     </section>
 
     <form id="backtestForm" class="backtest-form">
@@ -44,9 +44,15 @@
         <span>Analysis cutoff</span>
         <input id="backtestDate" type="date" min="2000-01-01" aria-label="Historical analysis cutoff date">
       </label>
-      <button id="backtestRun" type="submit">Run historical analysis</button>
+      <label><span>Observation horizon (locked before run)</span><select id="replayHorizon"><option value="1m">21 sessions</option><option value="3m" selected>63 sessions</option><option value="6m">126 sessions</option></select></label>
+      <button id="backtestRun" type="submit">Run research replay</button>
     </form>
     <p class="backtest-caveat">Prices are split-adjusted. Historical news, options flow, analyst estimates, and historical index membership are omitted when they cannot be reconstructed honestly.</p>
+    <details class="backtest-panel" open><summary>Replay v2 — policy and limitations</summary>
+      <p>25% initial exposure; remaining cash earns zero. Enter at the next session open. An 8% adverse or 16% favorable close triggers an exit at the following open; these are close-based rules, not intraday stop orders. Otherwise exit at the open after the chosen number of held sessions. No trailing stop, tolerated breach, conviction sizing or AI exit review. MySquall does not alter this experiment.</p>
+      <p>Assume 10 basis points of cost on each entry/exit and 3% annual borrow on initial short notional. Both benchmarks use the same exposure, costs and observation window. The simulation measures split-adjusted price returns; dividends, cash interest, taxes, margin calls and actual borrow availability are excluded. These are declared scenario assumptions, not calibrated optimal settings.</p>
+      <p>A selected historical case is exploratory evidence, not an out-of-sample test. The model may remember later events; current data may contain revisions, and surviving symbols introduce selection bias. Assess predictive skill with a separately frozen, prospective paper-trading study. Failed decisions are reported as unavailable, never replaced with a trade.</p>
+    </details>
 
     <div id="backtestProgress" role="status" aria-live="polite">
       <div class="backtest-progress-row"><span id="backtestProgressText">Preparing historical analysis…</span><b id="backtestProgressPct">0%</b></div>

@@ -184,7 +184,7 @@ function renderBacktestSnapshot(payload) {
 
   document.getElementById("backtestSnapshot").innerHTML = `
     <div class="backtest-section-head"><div><span>Frozen snapshot</span><h2>${btEsc(snapshot.company_name || snapshot.ticker)} <small>${btEsc(snapshot.ticker)}</small></h2></div><b>As of ${btEsc(snapshot.effective_market_date || snapshot.as_of)}</b></div>
-    <div class="backtest-integrity" id="backtestIntegrityState">Everything in this section existed by the cutoff. The AI is now analyzing this snapshot while the future outcome remains sealed.</div>
+    <div class="backtest-integrity" id="backtestIntegrityState">Bars and filing dates are restricted to the cutoff. Current-vintage adjustments and provider revisions remain possible. Forward outcomes are excluded from the AI input.</div>
     <section class="backtest-panel" id="backtestSetup"></section>
     <section class="backtest-panel"><h3>Price and technical condition</h3><div class="backtest-stats">${metricCards}</div><div class="backtest-scores">${scoreCards}</div></section>
     ${valuationPanel}${fundamentalsPanel}${eventPanel}
@@ -197,7 +197,8 @@ function paintBacktestAi() {
   backtestPaint = null;
   const body = document.getElementById("backtestAiBody");
   if (!body) return;
-  const html = typeof renderMarkdown === "function" ? renderMarkdown(backtestAnswer) : `<p>${btEsc(backtestAnswer)}</p>`;
+  const narrative = backtestAnswer.replace(/<replay_decision>[\s\S]*?(?:<\/replay_decision>|$)/g, "");
+  const html = typeof renderMarkdown === "function" ? renderMarkdown(narrative) : `<p>${btEsc(narrative)}</p>`;
   body.innerHTML = html || `<div class="backtest-ai-wait"><span></span><span></span><span></span></div>`;
   const thinking = document.getElementById("backtestThinkingText");
   if (thinking) thinking.textContent = backtestThinking;
@@ -214,11 +215,12 @@ function btModelLabel(model) {
 }
 function openBacktestAi(model) {
   document.getElementById("backtestAi").innerHTML = `
-    <div class="backtest-section-head"><div><span>Blind historical read</span><h2>What Squall would have seen then</h2></div><b>${btEsc(btModelLabel(model))}</b></div>
+    <div class="backtest-section-head"><div><span>Retrospective AI research</span><h2>Interpretation of the dated evidence</h2></div><b>${btEsc(btModelLabel(model))}</b></div>
     <section class="backtest-panel backtest-ai-panel"><details><summary>Model reasoning</summary><pre id="backtestThinkingText"></pre></details><div id="backtestAiBody" class="prose"><div class="backtest-ai-wait"><span></span><span></span><span></span></div></div></section>`;
 }
 
 function renderBacktestOutcomes(payload) {
+  replayAudit = payload.audit || null;
   const outcome = payload.outcomes || {};
   const returns = outcome.returns || {};
   const benchmark = outcome.benchmark_returns || {};
@@ -230,14 +232,14 @@ function renderBacktestOutcomes(payload) {
     return `<article class="backtest-outcome ${cls}"><span>${label}</span><b>${btPct(value)}</b><small>SPY ${btPct(benchmark[key])} · excess ${btPct(excess[key])}</small><em>${outcome.exit_dates?.[key] ? `through ${btEsc(outcome.exit_dates[key])}` : "Not enough future sessions yet"}</em></article>`;
   }).join("");
   document.getElementById("backtestOutcomes").innerHTML = `
-    <div class="backtest-section-head"><div><span>Outcome reveal</span><h2>What happened afterward</h2></div><b>Not shown to the AI</b></div>
+    <div class="backtest-section-head"><div><span>Outcome reveal</span><h2>What happened afterward</h2></div><button type="button" class="chip" onclick="downloadReplayAudit()" ${replayAudit ? "" : "disabled"}>Download audit JSON</button></div>
     <section class="backtest-panel" id="backtestCurve"></section>
-    <div class="backtest-outcome-entry">Next-session entry: <b>${outcome.entry_date ? `${btUsd(outcome.entry_price)} on ${btEsc(outcome.entry_date)}` : "Unavailable"}</b> · split-adjusted</div>
+    <div class="backtest-outcome-entry">Separate market-context returns below use dividend-adjusted data where available; they are not the price-return trade simulation above. Entry: <b>${outcome.entry_date ? `${btUsd(outcome.entry_price)} on ${btEsc(outcome.entry_date)}` : "Unavailable"}</b></div>
     <div class="backtest-outcomes">${cards}</div>
-    <div class="backtest-integrity">Maximum six-month drawdown after entry: <b>${btPct(outcome.max_drawdown_6m)}</b>. These realized returns evaluate the historical analysis; they did not affect it.</div>`;
+    <div class="backtest-integrity">Maximum available six-month drawdown after entry: <b>${btPct(outcome.max_drawdown_6m)}</b>. Future bars were excluded from the prompt. Model memory and case selection prevent treating this as proof of predictive skill.</div>`;
   renderBacktestCurve(payload.simulation);
   const integrity = document.getElementById("backtestIntegrityState");
-  if (integrity) integrity.textContent = "Everything in this section existed by the cutoff. The AI analysis finished before Squall released the outcome data below.";
+  if (integrity) integrity.textContent = "Forward outcomes were released after generation ended. Date filtering does not erase model memory or provider revisions; this is retrospective research.";
 }
 
 function finishBacktest(label, error = false) {
@@ -245,7 +247,7 @@ function finishBacktest(label, error = false) {
   clearTimeout(backtestWatchdog);
   const button = document.getElementById("backtestRun");
   button.disabled = false;
-  button.textContent = "Run historical analysis";
+  button.textContent = "Run research replay";
   setBacktestProgress(error ? 0 : 100, label, error);
   if (backtestSource) { backtestSource.close(); backtestSource = null; }
 }
@@ -338,18 +340,9 @@ function readMySquallForBacktest() {
 
 function openBacktestStream(ticker, asOf) {
   let url = `/backtest-stream?ticker=${encodeURIComponent(ticker)}&as_of=${encodeURIComponent(asOf)}`;
-  const { profile, error: profileError } = readMySquallForBacktest();
-  if (profile) url += `&profile=${encodeURIComponent(JSON.stringify(profile))}`;
-  if (profileError) {
-    // Name the ORIGINAL failure when the recorder in chrome-top.html caught one. A TDZ
-    // error names the binding that was stranded, never the line that stranded it, so
-    // reporting only `profileError` describes the symptom and hides the cause — which is
-    // the whole reason this took three passes to find. The cause is what to act on.
-    const root = (typeof window !== "undefined" && window.__squallLoadError) || null;
-    showBacktestError("Running without your MySquall profile",
-      `Squall could not read your saved preferences, so this run uses balanced defaults for risk, horizon and position size. The analysis itself is unaffected. ${
-        root ? `The underlying fault is in ${root.text}` : `Reported as: ${profileError}`}. Reloading the page usually restores it.`);
-  }
+  url += `&horizon=${encodeURIComponent(document.getElementById("replayHorizon")?.value || "3m")}`;
+  replayAudit = null;
+  // v2 is independent of MySquall, including when its shared UI fails to initialize.
   const source = backtestSource = new EventSource(url);
 
   // Every event is proof of life, so the timer is re-armed from one place rather than
@@ -370,7 +363,7 @@ function openBacktestStream(ticker, asOf) {
     const data = JSON.parse(event.data); renderBacktestSnapshot(data); openBacktestAi(data.model);
   });
   on("backtest_ai_start", event => {
-    const data = JSON.parse(event.data); setBacktestProgress(98, "Writing the blind historical analysis");
+    const data = JSON.parse(event.data); setBacktestProgress(98, "Writing the retrospective research analysis");
     if (!document.getElementById("backtestAiBody")) openBacktestAi(data.model);
   });
   on("backtest_ai_thinking", event => {
@@ -742,10 +735,28 @@ const BT_DIRECTION_COPY = {
   long: "Long", short: "Short", flat: "No position"
 };
 
+let replayAudit = null;
+function downloadReplayAudit() {
+  if (!replayAudit) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(replayAudit, null, 2)], {type:"application/json"}));
+  const link = document.createElement("a");
+  link.href = url; link.download = `squall-${replayAudit.run_id}.json`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function renderBacktestDecision(data) {
   const host = document.getElementById("backtestDecision");
   if (!host) return;
   const d = data.decision;
+  if (data.policy?.version === "replay-v2") {
+    const p = data.policy;
+    host.innerHTML = `<div class="backtest-section-head"><h2>${d ? btEsc(BT_DIRECTION_COPY[d.direction]) : "Decision unavailable"}</h2><b>${btEsc(p.version)}</b></div>
+      <section class="backtest-panel"><p>${d ? btEsc(d.thesis) : "The response did not contain one valid structured decision. No replacement trade was invented; this is not an abstention."}</p>
+      <p>${d?.direction === "flat" ? "The model explicitly chose no position. Cash remains flat." : `Policy: ${btMagnitudePct(p.position_pct)} initial exposure, ${p.sessions} held sessions, ${btMagnitudePct(p.stop_pct)} adverse / ${btMagnitudePct(p.target_pct)} favorable close triggers next-open exit.`}</p>
+      <p class="backtest-curve-note">${btEsc(p.execution)} Costs ${p.cost_bps} bps each way; assumed short borrow ${btMagnitudePct(p.borrow_apr)} annually. No profile or conviction adjustment. See policy limitations above.</p></section>`;
+    return;
+  }
   if (!d) {
     host.innerHTML = `
       <div class="backtest-section-head"><div><span>The call</span><h2>No decision recorded</h2></div></div>
@@ -810,6 +821,17 @@ function renderBacktestDecision(data) {
  */
 function btCurveStats(simulation, hasTrade, exitLook) {
   const stats = (simulation && simulation.stats) || {};
+  if (simulation?.policy?.version === "replay-v2") {
+    const p = simulation.policy;
+    return `<div class="backtest-stats">${[
+      ["Net strategy return",stats.trade_return], ["Stock at matched exposure",stats.stock_return],
+      ["SPY at matched exposure",stats.spy_return], ["Difference vs SPY (not alpha)",stats.excess_vs_spy],
+      ["Marked strategy return",stats.marked_return], ["Costs / initial account",stats.costs_return],
+      ["Daily marked drawdown",stats.max_dd]
+    ].map(([label,value]) => btStat(label,btPct(value))).join("")}</div>
+    <p class="backtest-curve-note">${btEsc(simulation.status)} · ${btEsc(simulation.reason || "Selected observation window completed.")} ${simulation.exit ? `Exit: ${btEsc(simulation.exit.reason)} at next open ${btUsd(simulation.exit.price)} on ${btEsc(simulation.exit.date)}.` : "No executed exit recorded."} ${simulation.pending_exit ? "An exit signal is awaiting an available next open." : ""}</p>
+    <p class="backtest-curve-note">${btEsc(p.price_basis)}. ${btMagnitudePct(p.position_pct)} initial exposure for both benchmarks; cash earns zero. ${simulation.decision_status === "unavailable" ? "No valid AI decision; only benchmarks are evaluated." : ""}</p>`;
+  }
   if (!hasTrade) {
     // A flat call is a real answer, not a missing one. Say what it cost or saved
     // rather than rendering an empty trade row.
@@ -838,7 +860,7 @@ function renderBacktestCurve(simulation) {
   // A cutoff within a session or two of today leaves nothing to plot. Say so — an
   // empty panel where a chart belongs reads as a bug rather than as "no data yet".
   if (!simulation || !simulation.curve || simulation.curve.length < 2) {
-    host.innerHTML = `<p class="backtest-empty">Too few sessions have passed since this cutoff to chart an outcome. The measured returns below are still valid.</p>`;
+    host.innerHTML = `<p class="backtest-empty">${btEsc(simulation?.reason || "Too few sessions are available to chart an outcome.")}</p>`;
     return;
   }
   const curve = simulation.curve;
@@ -854,9 +876,9 @@ function renderBacktestCurve(simulation) {
   // line. The design system also reserves the single accent and forbids inventing a
   // second hue, which leaves weight and dash as the honest levers.
   const series = [
-    { key:"spy", label:"SPY", color:btVar("--ink-dim", "#7d8892"),
+    { key:"spy", label:simulation.policy ? "SPY, matched exposure" : "SPY", color:btVar("--ink-dim", "#7d8892"),
       points:curve.map(p => p.spy), width:1.2, dash:[1, 3] },
-    { key:"stock", label:"Stock, buy & hold", color:btVar("--ink", "#b9c2ca"),
+    { key:"stock", label:simulation.policy ? "Stock, matched exposure" : "Stock, buy & hold", color:btVar("--ink", "#b9c2ca"),
       points:curve.map(p => p.stock), width:1.5, dash:[5, 4] }
   ];
   // The exit reason decides the colour. Painting a target hit in loss-red because

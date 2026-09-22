@@ -232,7 +232,7 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
     the stock's session dates and padded with None where it has no bar, so the two
     series stay index-aligned for the front end without silently shortening either.
     """
-    limit = max_sessions or HORIZONS["6m"]
+    limit = max_sessions or HORIZONS["6m"] + 1  # next-open exit after final held session
     empty = {"dates": [], "open": [], "close": [], "volume": [],
              "spyOpen": [], "spyClose": []}
     _, after = split_at_date(stock_frame, as_of)
@@ -262,18 +262,17 @@ def sealed_bars(stock_frame, spy_frame, as_of, max_sessions=None):
     for stamp, row in after.iterrows():
         dates.append(stamp.date().isoformat())
         closes.append(rounded(row[close_col]))
-        opens.append(rounded(row[open_col]) if open_col is not None else rounded(row[close_col]))
+        opens.append(rounded(row[open_col]) if open_col is not None else None)
         volumes.append(None if volume_col is None else finite(row[volume_col]))
         if spy_close_col is not None and stamp in spy_after.index:
             spy_row = spy_after.loc[stamp]
             spy_closes.append(rounded(spy_row[spy_close_col]))
-            spy_opens.append(rounded(spy_row[spy_open_col]) if spy_open_col is not None
-                             else rounded(spy_row[spy_close_col]))
+            spy_opens.append(rounded(spy_row[spy_open_col]) if spy_open_col is not None else None)
         else:
             spy_closes.append(None)
             spy_opens.append(None)
 
-    return {"dates": dates, "open": opens, "close": closes, "volume": volumes,
+    return {"basis": "split_adjusted_price", "dates": dates, "open": opens, "close": closes, "volume": volumes,
             "spyOpen": spy_opens, "spyClose": spy_closes}
 
 
@@ -1156,6 +1155,8 @@ def facts_for_prompt(facts):
 
 def build_ai_prompt(snapshot):
     projection = {key: snapshot[key] for key in PROMPT_BLOCKS if key in snapshot}
+    # Legacy tuned direction guardrails are not inputs to the v2 research decision.
+    projection.pop("direction_guardrails", None)
     if "sec_facts" in projection:
         projection["sec_facts"] = facts_for_prompt(projection["sec_facts"])
     # Separation, never "N% confidence" — see scraper.regime_for_prompt.
@@ -1180,7 +1181,7 @@ def build_ai_prompt(snapshot):
         # is still here. The room went to the holding-period anchor below.
         "State only figures the snapshot contains or that you compute from it, showing the arithmetic. Never supply an analyst target, peer multiple or remembered average; write that it is unavailable. Snapshot percentages are decimal fractions, so 0.152 is 15.2%.",
         "The market_regime label only summarises the metrics beside it: it is not independent evidence, never outranks them, carries no weighting, and entries in its `conflicts` list must be addressed rather than resolved in the label's favour. Chart-pattern scores are candidate detectors; an empty support or resistance list is no evidence either way.",
-        "The `direction_guardrails` block is decided by the engine, not by you. If `no_short` is true you must take the long side and address the stated reasons; if `no_long` is true you must take the short side.",
+        "No direction is imposed. Insufficient or conflicting evidence can justify no position.",
         # `imminent` is decided in the engine, and the old wording is why. It asked
         # whether the window opened inside the holding period — true for every quarterly
         # filer at 3m and 6m — then offered "shorten the horizon" as the remedy. All 13
@@ -1193,16 +1194,16 @@ def build_ai_prompt(snapshot):
         # length ceiling above: an unanchored menu collapses to one option. It chose 1m in
         # 13 of 13 completed live replays, and re-running those same decisions at 3m
         # scored 3.82% against 1.89% with the worst case unchanged.
-        "End with a section titled 'Simulated position'. Choose LONG or SHORT — never flat, neutral, wait, watch or avoid. State conviction 1-5, entry at the next session open, a positive stop distance, a positive target distance (the level at which the stop starts trailing), and a holding period of 1, 3 or 6 months matched to the thesis rather than to the next report — 1 only if the setup resolves in weeks, 6 if it needs a full reporting cycle, never the shortest by default. MySquall preferences set the risk, sizing emphasis and holding-period ceiling.",
+        "End with a section titled 'Research decision'. Choose LONG, SHORT or FLAT under the supplied fixed replay policy. Explain the evidence and the strongest objection. FLAT is a valid decision, distinct from a missing response. Do not choose a different horizon or execution policy after inspecting the case.",
         # An unanchored 1-5 scale collapses to its midpoint: 17 of 18 audited runs returned
         # exactly 3 and none returned 1, 4 or 5. Conviction now scales position size.
-        "Conviction 3 is not a default: use 1 when you are picking a side only because the format demands one, 3 when the evidence leans with real objections outstanding, and 5 only when nothing substantial contradicts it. It scales the simulated position size.",
+        "Do not express conviction as a calibrated probability or use it to set position size.",
         # The "closer than about 2x atr_pct" figure was removed rather than corrected to a
         # term-scaled one: atr_pct is a DAILY range, so the right multiple depends on the
         # holding period, and asking for sqrt(term) here would be a computation performed
         # in the thinking budget — exactly the failure the block above documents. The
         # engine widens a sub-noise stop itself (stopNoiseFloor in server.js).
-        "Size the stop off atr_pct, not a round number; the engine widens one inside the noise band for your holding period. This is research, not individualized financial advice.",
+        "The server supplies the policy and machine-readable decision format. Historical model memory cannot be removed; do not describe this replay as proof of predictive skill.",
         "\n--- FROZEN POINT-IN-TIME SNAPSHOT ---",
         json.dumps(projection, separators=(",", ":"), allow_nan=False),
     ])
@@ -1340,7 +1341,7 @@ def main():
         },
         # The window the Node simulation replays the model's call over. Sealed by the
         # server until AI generation ends, exactly like every other key in this object.
-        "bars": sealed_bars(adjusted, spy_adjusted, as_of),
+        "bars": sealed_bars(frames[ticker], frames.get("SPY", pd.DataFrame()), as_of),
     }
     progress(88, "Sealing the future outcomes away from the AI prompt")
     output = {

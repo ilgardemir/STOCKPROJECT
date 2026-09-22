@@ -223,7 +223,7 @@ test("the watchdog is reset by activity, so a working run is never cut off", () 
   assert.equal(BT.__els.get("backtestError").innerHTML, "");
 });
 
-test("a half-executed app.js costs the profile, not the whole run", () => {
+test("a half-executed profile UI cannot alter or prevent a fixed-policy replay", () => {
   const BT = loadBacktester();
   // The exact shape of a top-level throw in app.js: the hoisted function declaration
   // survives, so `typeof` still says "function", but the `let` it reads is stranded in
@@ -234,22 +234,21 @@ test("a half-executed app.js costs the profile, not the whole run", () => {
 
   assert.equal(BT.__lastSource instanceof BT.EventSource, true,
     "The stream must still open — MySquall is personalization, not a prerequisite");
-  assert.match(BT.__els.get("backtestError").textContent || BT.__els.get("backtestError").innerHTML,
-    /MySquall/, "Silently swapping in default risk and sizing would change the answer unannounced");
+  assert.equal(BT.__els.get("backtestError").innerHTML, "",
+    "The fixed replay policy never reads or substitutes a MySquall profile");
   assert.doesNotMatch(BT.__els.get("backtestProgressText").textContent, /Could not start/,
     "This is a degraded run, not a failed one");
 });
 
-test("the notice names the original fault, not the binding it stranded", () => {
+test("replay v2 never consults MySquall preferences", () => {
   const BT = loadBacktester();
-  BT.getMySquallProfile = () => { throw new ReferenceError("Cannot access 'mySquallProfile' before initialization"); };
+  let calls = 0;
+  BT.getMySquallProfile = () => { calls++; return {risk:5,horizon:5}; };
   // What chrome-top.html's recorder would have captured at load.
   BT.__squallLoadError = { message: "x is not a function", source: "app.js", line: 452, column: 3,
     text: "app.js:452 — x is not a function" };
   startRun(BT);
-  const shown = BT.__els.get("backtestError").innerHTML;
-  assert.match(shown, /app\.js:452/,
-    "A TDZ error names the stranded binding, never the line that stranded it — report the cause");
+  assert.equal(calls, 0, "Personalization must not change a locked replay policy");
 });
 
 test("a throw while opening the stream is reported instead of latching the button", () => {

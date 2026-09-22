@@ -4,6 +4,7 @@ const fs   = require("fs");
 const os   = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { replayPolicy, parseReplayDecision, replayMessages, simulateReplay } = require("./replay-engine");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -2745,6 +2746,14 @@ const handleRequest = async (req, res) => {
     const queryCheck = sanitizeQuery(url.searchParams.get("ticker") || "");
     const dateCheck = validateBacktestDate(url.searchParams.get("as_of"));
     const profile = sanitizeProfile(url.searchParams.get("profile"));
+    let policy;
+    try { policy = replayPolicy(url.searchParams.get("horizon") || "3m"); }
+    catch (error) {
+      res.writeHead(200, sseHeaders());
+      res.end(`event: backtest_error\ndata: ${JSON.stringify({error:error.message})}\n\n`);
+      return;
+    }
+    const runId = crypto.randomUUID(), lockedAt = new Date().toISOString();
     const gate = admit(req, "analyze");
     res.writeHead(200, sseHeaders(gate));
     let connected = true;
@@ -2823,42 +2832,27 @@ const handleRequest = async (req, res) => {
 
       const outcomes = payload.outcomes || {};
       const { outcomes:_sealed, ai_prompt:_privatePrompt, ...publicSnapshot } = payload;
-      send("backtest_snapshot", { ...publicSnapshot, model:AI_MODEL });
+      send("backtest_snapshot", { ...publicSnapshot, model:AI_MODEL, policy });
       send("backtest_progress", { percent:97, label:"Historical snapshot ready · asking AI without future outcomes" });
 
       // Runs only after the AI stream has ended or failed. The decision call and the
       // simulation both happen inside here, so no post-cutoff bar can precede the
       // model's blind analysis on the wire.
       const revealOutcomes = async (prose) => {
-        let extractedDecision = null;
-        if (prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
-          send("backtest_progress", { percent:99, label:"Extracting the trade the model committed to" });
-          extractedDecision = await requestBacktestDecision(payload.ai_prompt, prose, profile, aiAbort.signal);
-        }
         if (!connected) return;
-        const decision = ensureBacktestPosition(extractedDecision, payload.snapshot, profile);
-        send("backtest_decision", { decision, available:true });
-        /*
-         * The re-review is default OFF and charged per call.
-         *
-         * Each review is genuinely extra work rather than a retry of the same request,
-         * so the "charge once per logical request" rule does not cover it — but there is
-         * still no refund path, so it is charged BEFORE the call and a denial simply
-         * stops reviewing and keeps the deterministic exit. Budget exhaustion must
-         * degrade the experiment, never the replay.
-         */
-        let simulation;
-        if (BT_REVIEW_MODE === "on" && prose && API_KEY !== "YOUR_OPENROUTER_KEY_HERE") {
-          send("backtest_progress", { percent:99, label:"Re-reviewing the exit against conditions on the day" });
-          simulation = await simulateTradeReviewed(decision, outcomes.bars, async (reviewPrompt) => {
-            if (!spendAi(COST.backtest_review.ai).ok) throw new Error("AI budget exhausted");
-            return requestBacktestReview(reviewPrompt, aiAbort.signal);
-          });
-        } else {
-          simulation = simulateTrade(decision, outcomes.bars);
-        }
+        const decision = parseReplayDecision(prose, policy);
+        send("backtest_decision", { decision, available:!!decision, policy });
+        const simulation = simulateReplay(decision, outcomes.bars, policy);
+        const messages = replayMessages(payload.ai_prompt, policy);
+        const audit = {run_id:runId, locked_at:lockedAt, completed_at:new Date().toISOString(),
+          policy, model:AI_MODEL, sampling:AI_SAMPLING, reasoning:reasoningConfig(),
+          messages, snapshot:payload.snapshot, answer:prose || null,
+          decision, decision_status:decision ? decision.direction === "flat" ? "abstained" : "recorded" : "unavailable",
+          snapshot_sha256:crypto.createHash("sha256").update(JSON.stringify(payload.snapshot)).digest("hex"),
+          input_sha256:crypto.createHash("sha256").update(JSON.stringify(messages)).digest("hex"),
+          bars:outcomes.bars, simulation};
         if (!connected) return;
-        send("backtest_outcomes", { outcomes, simulation, review_mode:BT_REVIEW_MODE });
+        send("backtest_outcomes", { outcomes, simulation, audit, review_mode:"disabled_in_v2" });
         send("backtest_done", { ok:true });
         res.end();
       };
@@ -2874,7 +2868,7 @@ const handleRequest = async (req, res) => {
         model:AI_MODEL, max_tokens:ANALYSIS_MAX,
         reasoning:reasoningConfig(), stream:true, usage:{ include:true },
         ...AI_SAMPLING,
-        messages:buildBacktestAiMessages(payload.ai_prompt, profile)
+        messages:replayMessages(payload.ai_prompt, policy)
       });
       let answer = "", reasoning = "", emitted = false, lastError = null, truncated = false;
       for (let attempt = 1; attempt <= 3; attempt++) {

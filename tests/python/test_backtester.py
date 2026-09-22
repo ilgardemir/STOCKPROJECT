@@ -355,10 +355,10 @@ class HistoricalAnalyzerTests(unittest.TestCase):
         # The forced choice itself, not one phrasing of it — the wording was shortened
         # when the instruction block had to be cut back, and pinning a sentence made a
         # deliberate edit look like a broken contract.
-        self.assertIn("LONG or SHORT", prompt)
-        self.assertIn("never flat, neutral, wait, watch or avoid", prompt)
-        self.assertIn("entry at the next session open", prompt)
-        self.assertIn("MySquall preferences", prompt)
+        self.assertIn("LONG, SHORT or FLAT", prompt)
+        self.assertNotIn("never flat", prompt)
+        self.assertIn("fixed replay policy", prompt)
+        self.assertNotIn('"direction_guardrails"', prompt)
         # Sanity: the fixture is realistic enough that a naive dump WOULD have leaked.
         self.assertIn("123.456789", json.dumps({**snapshot, **outcomes}))
 

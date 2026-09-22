@@ -1,5 +1,16 @@
 # CLAUDE.md
 
+## Current historical evaluator (September 22)
+
+`/ilgar` now runs **research replay v2**. Read `docs/replay-methodology.md` and
+`replay-engine.js` for the active policy. It permits flat decisions, uses one
+structured commitment from the research response, locks horizon and fixed execution
+assumptions before generation, and exports auditable accounting. Legacy forced-choice,
+conviction-sizing, runner/tolerance and AI-review descriptions below document earlier
+experiments only. Their helper exports remain for offline reproducibility; no live
+route invokes them. Do not restore them to the active route. MySquall does not change
+v2. SSE names remain unchanged; `backtest_outcomes` additionally carries `audit`.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
