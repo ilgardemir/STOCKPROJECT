@@ -2108,7 +2108,7 @@ function renderAll(d) {
     let body = `<div class="mgrid">
       ${metric(`Insider Buys <small>(${win}D)</small>`, String(fa.insider_buys ?? 0), fa.insider_buys > 0 ? "green" : "")}
       ${metric(`Insider Sells <small>(${win}D)</small>`, String(fa.insider_sells ?? 0), fa.insider_sells >= 5 ? "red" : "")}
-      ${metric("Activist 13D", fa.activist_13d ? "Yes" : "No", fa.activist_13d ? "amber" : "")}</div>`;
+      ${metric("Recent 13D / 13D-A filing", fa.activist_13d ? "Present — inspect purpose and ownership changes" : "None found")}</div>`;
     body += `<div class="lvl-label">8-K events (last ${win} days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
     // The scraper caps how many filing documents it will fetch per run. When that binds,

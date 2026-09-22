@@ -72,7 +72,8 @@ class PipelineRegressionTests(unittest.TestCase):
         # name a holding period and must not mandate options on its own.
         idea=payload['ai_prompt'].split('## Trade Idea')[1]
         self.assertIn('holding period',idea)
-        self.assertIn('shares position',idea)
+        self.assertIn('shares trade',idea)
+        self.assertIn('unverified quote timestamps',idea)
         self.assertNotIn('One actionable options structure',idea)
 
     def test_annual_statement_matching_excludes_ttm_and_currency_mismatch(self):
