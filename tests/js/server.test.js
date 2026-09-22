@@ -14,6 +14,22 @@ const BARS = require("../fixtures/backtest_bars.json");
 
 const BASE_LIMITS = { ...LIM };
 
+test("static server publishes assets but never repository files or traversal paths", async () => {
+  const { serveStatic } = require("../../server");
+  const read = url => new Promise(resolve => {
+    let status;
+    serveStatic({url, headers: {}}, {
+      writeHead(code) { status = code; },
+      end(body) { resolve({status, body: String(body)}); }
+    });
+  });
+  for (const url of ["/server.js", "/CLAUDE.md", "/.env", "/.git/config", "/tests/js/run.js",
+    "/partials/chrome-top.html", "/%2e%2e/server.js", "/assets/%2e%2e/server.js", "/%ZZ"])
+    assert.equal((await read(url)).status, 404, url);
+  for (const url of ["/", "/?t=JPM", "/screener", "/ilgar", "/app.js", "/styles.css", "/assets/favicon.ico"])
+    assert.equal((await read(url)).status, 200, url);
+});
+
 function request(remoteAddress, headers = {}) {
   return { socket: { remoteAddress }, headers };
 }

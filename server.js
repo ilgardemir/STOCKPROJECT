@@ -1819,6 +1819,13 @@ async function simulateTradeReviewed(decision, bars, reviewer, maxReviews) {
 
 // Static file serving
 const PUBLIC_DIR = __dirname;
+// Only intentionally published files are addressable. Never serve the repository.
+const PUBLIC_FILES = new Set([
+  "/index.html", "/screener.html", "/ilgar.html", "/404.html",
+  "/app.js", "/backtester.js", "/sp500.js", "/market-universes.js", "/styles.css",
+  ...["favicon.ico", "favicon-16x16.png", "favicon-32x32.png", "apple-touch-icon.png",
+    "icon-192.png", "icon-512.png"].map(name => "/assets/" + name)
+]);
 const MIME = {
   ".html":"text/html",".js":"text/javascript",".css":"text/css",
   ".json":"application/json",".png":"image/png",".jpg":"image/jpeg",
@@ -1901,11 +1908,16 @@ function serveStatic(req, res) {
   // Strip the query FIRST. Testing req.url === "/" before doing so misses "/?t=AAPL", whose
   // path is still the root — and the extensionless rewrite below then turns the empty
   // remainder into ".html" and 404s the analyzer's own deep link.
-  let p = req.url.split("?")[0].replace(/\.\./g, "");
+  let p;
+  try { p = decodeURIComponent(req.url.split("?")[0]); }
+  catch (_) { return sendNotFound(req, res, false); }
+  if (p.includes("\\") || p.includes("\0") || p.split("/").includes(".."))
+    return sendNotFound(req, res, false);
   // Pages get clean extensionless URLs: /screener is the page, screener.html is the file.
   // Only paths with no extension are rewritten, so /assets/x.png is untouched.
   if (p === "/" || p === "") p = "/index.html";
   else if (!path.extname(p)) p = p.replace(/\/+$/, "") + ".html";
+  if (!PUBLIC_FILES.has(p)) return sendNotFound(req, res, path.extname(p) === ".html");
   const filePath = path.join(PUBLIC_DIR, p);
   // Post-rewrite, "is this a page?" is exactly "did it end up as .html?" — extensionless
   // URLs have already become one and real assets never do.
@@ -3470,6 +3482,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  serveStatic,
   sanitizeProfile, buildAiMessages, SCREENER_CATALOG,
   applyProfileCalibration, fallbackScreenerSpec, sanitizeScreenerSpec,
   fallbackRefineScreener, readMarketUniverse, validateBacktestDate,
