@@ -17,6 +17,15 @@ const vm = require("node:vm");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 
+test("empty screens disclose missing data instead of claiming all companies failed", () => {
+  const app = loadApp();
+  const html = app("renderScreenResults")({results: [], universe_requested:30, universe_scored:20,
+    coverage:{evaluated:0, missing_data:18, not_applicable:2}});
+  assert.match(html, /18 excluded for missing data/);
+  assert.match(html, /2 require a different financial model/);
+  assert.doesNotMatch(html, /No companies met every condition/);
+});
+
 /* A permissive element. Unlike pagecheck.js — which resolves ids against each page's REAL
    markup precisely so a missing one throws — this file resolves every id, because it is
    testing pure helpers and app.js writes to real elements at its top level. Page-specific

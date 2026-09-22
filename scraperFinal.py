@@ -6,6 +6,7 @@ Sources: Finnhub (quote/profile/news) · yahooquery (history/options/fundamental
 """
 
 from yahooquery import Ticker as YQTicker
+from financial_rules import business_model, quote_evidence
 from quant_utils import (return_windows, first_number, positive_ratio, percent_fraction, wilder_rsi,
                          annual_cagr, adjusted_close, risk_statistics)
 import requests, json, re, sys, os, math, time, tempfile, traceback
@@ -990,8 +991,8 @@ def _fetch_options_yq(yq_ticker, ticker_sym: str, current_price: float) -> dict:
                 otm_puts   = puts_df[puts_df["strike"] <= atm_strike].tail(3) if puts_df is not None and not puts_df.empty and "strike" in puts_df.columns else pd.DataFrame()
 
                 def row_to_opt(r):
-                    return {"strike": safe_float(r.get("strike")), "bid": safe_float(r.get("bid")),
-                            "ask": safe_float(r.get("ask")), "iv": safe_float(r.get("impliedVolatility")),
+                    return {"strike": safe_float(r.get("strike")), **quote_evidence(r.get("bid"), r.get("ask")),
+                            "iv": safe_float(r.get("impliedVolatility")),
                             "open_interest": safe_float(r.get("openInterest")),
                             "volume": safe_float(r.get("volume")),
                             "last": safe_float(r.get("lastPrice")),
@@ -1401,7 +1402,7 @@ def analyze_institutional(hist: pd.DataFrame) -> dict:
 
 def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional: dict) -> dict:
     """Classify the current tape with deterministic price/volume evidence only."""
-    out = {"label":"INSUFFICIENT DATA", "confidence":0, "summary":"", "evidence":[], "scores":{}}
+    out = {"label":"INSUFFICIENT DATA", "summary":"", "evidence":[], "scores":{}}
     if hist is None or hist.empty or len(hist) < 80: return out
 
     close = hist["Close"].astype(float)
@@ -1441,7 +1442,6 @@ def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     label, winner = ranked[0]
     gap = winner - ranked[1][1]
-    confidence = int(max(45, min(92, 48 + winner * 5 + gap * 4)))
     evidence = [f"Structure: {structure.lower().replace(' / ', '/')}."]
     if ma20 > ma50 > ma200: evidence.append("20D > 50D > 200D moving averages.")
     elif ma20 < ma50 < ma200: evidence.append("20D < 50D < 200D moving averages.")
@@ -1506,7 +1506,7 @@ def classify_market_regime(hist: pd.DataFrame, price_action: dict, institutional
     # the same thing on a scale that cannot be mistaken for one, and the prompt builders
     # ship that instead (see regime_for_prompt).
     separation = "wide" if gap >= 4 else "moderate" if gap >= 2 else "narrow"
-    out.update({"label":label, "confidence":confidence, "separation":separation,
+    out.update({"label":label, "separation":separation,
                 "summary":summaries[label], "evidence":evidence, "conflicts":conflicts,
                 "scores":scores,
                 "basis":("Backward-looking classification of the last 60 sessions of price and volume. "
@@ -1697,6 +1697,7 @@ def generate_analysis_payload(query: str) -> dict:
     ks  = yqd.key_stats          # pe, peg, pb, shorts, ev
     sd  = yqd.summary_detail     # market cap, trailing/forward pe
     ap  = yqd.asset_profile      # sector, industry, description
+    model = business_model(ap.get("sector"), ap.get("industry"))
     pm  = yqd.price_mod          # live price, bid/ask, market state
 
     # ── Current price ─────────────────────────────────────────────────────────
@@ -1721,15 +1722,15 @@ def generate_analysis_payload(query: str) -> dict:
     fh_market_cap = fh_market_cap_m * 1_000_000 if fh_market_cap_m is not None and fh_market_cap_m > 0 else None
     fh_timestamp = safe_float(fh_quote.get("t"))
     live_quote = {
-        "fetched_at":     datetime.utcfromtimestamp(fh_timestamp).strftime("%Y-%m-%d %H:%M:%SZ") if fh_timestamp else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "fetched_at":     datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "quote_time":     datetime.utcfromtimestamp(fh_timestamp).strftime("%Y-%m-%dT%H:%M:%SZ") if quote_source == "Finnhub" and fh_timestamp else pm.get("regularMarketTime"),
         "source":         quote_source,
         "last_price":     current_price,
         "open":           safe_float(fh_quote.get("o")) or safe_float(pm.get("regularMarketOpen")),
         "day_high":       safe_float(fh_quote.get("h")) or safe_float(pm.get("regularMarketDayHigh")),
         "day_low":        safe_float(fh_quote.get("l")) or safe_float(pm.get("regularMarketDayLow")),
         "previous_close": safe_float(fh_quote.get("pc")) or safe_float(pm.get("regularMarketPreviousClose")),
-        "bid":            first_number(pm.get("bid"), sd.get("bid")),
-        "ask":            first_number(pm.get("ask"), sd.get("ask")),
+        **quote_evidence(first_number(pm.get("bid"), sd.get("bid")), first_number(pm.get("ask"), sd.get("ask"))),
         "bid_size":       first_number(pm.get("bidSize"), sd.get("bidSize")),
         "ask_size":       first_number(pm.get("askSize"), sd.get("askSize")),
         "market_state":   pm.get("marketState"),
@@ -1829,6 +1830,10 @@ def generate_analysis_payload(query: str) -> dict:
     debt_eq = first_number(percent_fraction(fd.get("debtToEquity")), fh_metrics.get("totalDebt/totalEquityAnnual"), fh_metrics.get("totalDebt/totalEquityQuarterly"), fmp_m.get("debtToEquityTTM"))
     ocf_val, ni_val, earnings_quality_period = matched_cash_income(cf_df, inc_df)
     earnings_quality = positive_ratio(ocf_val, ni_val)
+    if model == "financial":
+        gross_m = ev_ebitda = fcf_yield = fcf_margin = curr_ratio = earnings_quality = None
+    elif model == "reit":
+        earnings_quality = None
 
     # ── Sentiment & analyst targets ───────────────────────────────────────────
     short_float = safe_float(ks.get("shortPercentOfFloat"))
@@ -1871,6 +1876,9 @@ def generate_analysis_payload(query: str) -> dict:
 
     # ── Algorithmic flags ─────────────────────────────────────────────────────
     flags, data_warnings = [], []
+    if model != "operating":
+        data_warnings.append("Business model: " + model + ". Generic cash-flow and leverage tests are not investment-quality assessments. "
+                             + ("Regulatory capital and credit quality are not scored." if model == "financial" else "FFO/AFFO and property-level coverage are unavailable; no REIT quality verdict is computed."))
     if not currencies_match:
         data_warnings.append("FCF yield unavailable: statement and market-cap currency could not be matched.")
     if filing_signals.get("truncated"):
@@ -1888,8 +1896,8 @@ def generate_analysis_payload(query: str) -> dict:
         elif pe_trail > 500: flags.append(f"EXTREME VALUATION: Trailing P/E {pe_trail:.2f} (>500).")
     if is_valid(peg, -10, 50):
         if peg < 0: flags.append("NEGATIVE PEG: negative earnings growth or anomaly.")
-        elif peg > 5: flags.append(f"EXTREME PEG: {peg:.2f} — massive overvaluation or negative growth.")
-    if is_valid(debt_eq, 0) and debt_eq > 5: flags.append(f"EXTREME LEVERAGE: D/E {debt_eq:.2f}x (>5x).")
+        elif peg > 5: flags.append(f"HIGH REPORTED PEG: {peg:.2f}; inspect earnings-growth definition and period.")
+    if model == "operating" and is_valid(debt_eq, 0) and debt_eq > 5: flags.append(f"HIGH DEBT/EQUITY: {debt_eq:.2f}x; assess industry norms and equity denominator.")
     if is_valid(earnings_quality) and ni_val and ni_val > 0 and earnings_quality < 0.5:
         flags.append("RED FLAG: Earnings Quality < 0.5 — cash flow doesn't match profits.")
 
@@ -1898,17 +1906,15 @@ def generate_analysis_payload(query: str) -> dict:
         if sec_rev_cagr is not None and sec_rev_cagr < 0: flags.append(f"DECLINING TOP LINE: 3Y Rev CAGR {sec_rev_cagr:.2%} (SEC).")
         if sec_liab_val and sec_equity_val and sec_equity_val != 0:
             lev = safe_divide(sec_liab_val, sec_equity_val)
-            if lev > 2.0: flags.append(f"HIGH LEVERAGE: Liabilities {lev:.1f}x Equity (SEC).")
+            if lev > 2.0 and model == "operating": flags.append(f"LIABILITIES/EQUITY: {lev:.1f}x (SEC); includes non-debt liabilities, assess industry context.")
         if filing_signals["insider_buys"] > filing_signals["insider_sells"]:
             flags.append(f"MORE REPORTED PURCHASE TRANSACTIONS: {filing_signals['insider_buys']}B vs {filing_signals['insider_sells']}S (Form 4 counts, {SIGNAL_WINDOW_DAYS}D; not net value).")
         elif filing_signals["insider_sells"] >= 5 and filing_signals["insider_sells"] > filing_signals["insider_buys"]:
             flags.append(f"MORE REPORTED SALE TRANSACTIONS: {filing_signals['insider_sells']}S vs {filing_signals['insider_buys']}B (Form 4 counts, {SIGNAL_WINDOW_DAYS}D; not net value).")
-        if filing_signals["activist_13d"]: flags.append("ACTIVIST ALERT: New 13D — large position building.")
+        if filing_signals["activist_13d"]: flags.append("OWNERSHIP FILING: Recent 13D/13D-A; read the filing for purpose and ownership changes. No buying or activism inferred.")
 
     if is_valid(peg, 0) and peg > 0 and rev_3y is not None:
-        if peg < 1.0 and rev_shrinking: flags.append(f"FAKE VALUE: PEG {peg:.2f} but 3Y Rev CAGR negative ({rev_3y:.2%}).")
-        elif peg < 1.0: flags.append(f"FUNDAMENTAL VALUE: PEG {peg:.2f} (< 1.0).")
-        elif peg > 2.0 and rev_3y < 0.05: flags.append(f"EXPENSIVE STABILITY: PEG {peg:.2f} with {rev_3y:.2%} 3Y growth.")
+        if peg < 1.0: flags.append(f"LOW REPORTED PEG: {peg:.2f}; historical 3Y revenue CAGR {rev_3y:.2%} measures a different growth series and does not establish fair value.")
 
     if latest and ma_50 and ma_200:
         if latest > ma_50 > ma_200:   flags.append("BULLISH ALIGNMENT: Price > 50MA > 200MA.")
@@ -2019,7 +2025,7 @@ Inst/Insider/Short: {fmt(inst_own,'pct')} / {fmt(insider_own,'pct')} / {fmt(shor
         ai_prompt += f"""
 ### 11. SEC SIGNALS (Last {SIGNAL_WINDOW_DAYS}D; transaction counts, not net dollars)
 Coverage: {"TRUNCATED: newest filings only" if filing_signals.get("truncated") else "within configured scan"}; {filing_signals.get("detail_fetches", 0)} documents fetched.
-8-K: {', '.join(filing_signals['8k_events']) if filing_signals['8k_events'] else 'None'} | Form 4: {filing_signals['insider_buys']}B/{filing_signals['insider_sells']}S | Activist 13D: {'YES' if filing_signals['activist_13d'] else 'No'}
+8-K: {', '.join(filing_signals['8k_events']) if filing_signals['8k_events'] else 'None'} | Form 4: {filing_signals['insider_buys']}B/{filing_signals['insider_sells']}S | Recent 13D/13D-A filing (purpose and ownership change not inferred): {'YES' if filing_signals['activist_13d'] else 'No'}
 """
 
     ai_prompt += "\n### 12. ALGORITHMIC SIGNALS\n"
@@ -2114,11 +2120,13 @@ Classify the trend from §12b (UPTREND=HH+HL, DOWNTREND=LH+LL, else RANGE). Read
 The 2–3 catalysts that could re-rate the stock (draw on the Finnhub source records plus earnings dates, 8-K events, insider activity, and sentiment shifts) and the 2–3 risks that would break the bull case. Be specific to this company, not generic.
 
 ## Trade Idea
-One actionable trade with the intended holding period stated explicitly, and the thesis it expresses. Default to a shares position — entry zone, stop level, target level — sized to that holding period; build the idea out of options only where the MySquall block calls for them. Any option leg must use ONLY strikes and expirations from §13: strike, expiry, premium (bid/ask midpoint), breakeven, max loss. §13 lists the two nearest expirations only, so if neither reaches the holding period, say so in one sentence and give the shares trade instead rather than shortening the thesis to fit the chain. Never invent a strike or expiration. If nothing sets up cleanly, say so and explain why in one sentence.
+All options bid/ask pairs are indicative snapshots with unverified quote timestamps. Never describe their midpoint as executable or give a priced options recommendation; use shares and explain that a current broker quote is required. Last-trade dates do not timestamp bid/ask quotes.
+One actionable shares trade with the intended holding period stated explicitly, and the thesis it expresses: entry zone, stop level and target level sized to that holding period. Respect the quote limitations above even when the profile prefers options. Never invent a strike or expiration or shorten the thesis to fit the available chain. If nothing sets up cleanly, say so and explain why in one sentence.
 """
 
     return {
         "ticker":            ticker,
+        "financial_model":   model,
         "cik":               cik,
         "company_name":      company_name,
         "today":             TODAY_STR,

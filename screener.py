@@ -14,6 +14,7 @@ import traceback
 from pathlib import Path
 
 from quant_utils import wilder_rsi
+from financial_rules import business_model
 import numpy as np
 import pandas as pd
 from yahooquery import Ticker
@@ -22,7 +23,29 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 7  # dated-window, missing-score and current-universe rank corrections
+CACHE_VERSION = 8  # financial-model applicability and sector-relative fundamental scores
+
+# Missing bank capital/credit and REIT FFO data must not be replaced with industrial ratios.
+MODEL_UNSUPPORTED = {
+    "financial": {"balance_sheet", "cash_generation", "quality", "high_margin", "cash_rich", "low_debt", "fcf_yield", "capital_efficiency", "dividend_quality", "profitable_growth", "garp", "quality_value", "steady_compounder", "defensive_quality", "speculative_growth"},
+    "reit": {"value", "profitability", "quality", "high_margin", "cash_generation", "fcf_yield", "capital_efficiency", "income", "dividend_quality", "profitable_growth", "garp", "quality_value", "steady_compounder", "defensive_quality", "speculative_growth"}
+}
+
+
+def apply_financial_model(row):
+    model = business_model(row.get("sector"), row.get("industry"))
+    row["financial_model"] = model
+    row["unsupported_concepts"] = sorted(MODEL_UNSUPPORTED.get(model, set()))
+    if model == "financial":
+        row["scores"]["value"] = finite(blend([valuation_score(row.get("pe"), 40, 10), valuation_score(row.get("price_to_book"), 5, .7)]))
+        row["scores"]["profitability"] = finite(blend([scale(row.get("return_on_equity"), 0, .20), scale(row.get("return_on_assets"), 0, .02)]))
+    for key in row["unsupported_concepts"]:
+        row["scores"][key] = None
+    # Negative earnings must not make a negative payout ratio look exceptionally safe.
+    if row.get("payout_ratio") is not None and row["payout_ratio"] < 0:
+        row["scores"]["income"] = row["scores"]["dividend_quality"] = None
+    row["fundamental_basis"] = "Heuristic component scales, compared only within the same sector/business model; not fair value or a forecast. Financial firms lack capital/credit tests; REITs lack FFO/AFFO."
+    return row
 
 # ── Upstream backpressure ─────────────────────────────────────────────────────
 # A cold run pulls ~600 symbols twice (history + modules), which is by far the
@@ -478,6 +501,35 @@ def read_cache():
 
 
 def rank_universe(rows):
+    # Recomputed on the selected universe, including cache hits. Do not repeatedly rank
+    # ranks: preserve the original composites. Fewer than 3 peers is not a comparison.
+    fundamental = ("value", "growth", "profitability", "high_margin", "balance_sheet", "cash_generation", "quality", "income", "capital_efficiency", "dividend_quality")
+    for key in fundamental:
+        groups = {}
+        for row in rows:
+            base = row.setdefault("fundamental_base", {})
+            if key not in base:
+                base[key] = finite(row["scores"].get(key))
+            row["scores"][key] = None
+            group = (row.get("sector", "Unknown"), row.get("financial_model", "operating"))
+            if base[key] is not None and group[0] != "Unknown":
+                groups.setdefault(group, []).append(row)
+        for peers in groups.values():
+            if len(peers) < 3:
+                continue
+            for row in peers:
+                value = row["fundamental_base"][key]
+                below = sum(p["fundamental_base"][key] < value for p in peers)
+                ties = sum(p["fundamental_base"][key] == value for p in peers)
+                row["scores"][key] = round(100 * (below + (ties - 1) / 2) / (len(peers) - 1), 1)
+                row.setdefault("peer_counts", {})[key] = len(peers)
+    for row in rows:
+        s = row["scores"]
+        for key, parts in {"profitable_growth": ["growth", "profitability", "cash_generation"], "garp": ["growth", "value", "quality"], "quality_value": ["value", "quality", "cash_generation"], "steady_compounder": ["trend_stability", "risk_adjusted_momentum", "quality", "low_volatility"], "defensive_quality": ["low_volatility", "balance_sheet", "quality", "income"]}.items():
+            s[key] = finite(blend([s.get(p) for p in parts]))
+        if "speculative_growth" in s:
+            profitability = finite(s.get("profitability"))
+            s["speculative_growth"] = finite(blend([s.get("growth"), s.get("high_volatility"), None if profitability is None else 100-profitability, s.get("momentum_short")]))
     for row in rows:
         row["scores"]["relative_strength"] = None
         row["scores"]["technical_strength"] = None
@@ -529,6 +581,7 @@ def build_universe(tickers, names):
             "revenue_growth": finite(financial.get("revenueGrowth")), "earnings_growth": finite(financial.get("earningsGrowth")),
             "profit_margin": finite(financial.get("profitMargins")), "operating_margin": finite(financial.get("operatingMargins")),
             "gross_margin": finite(financial.get("grossMargins")), "return_on_equity": finite(financial.get("returnOnEquity")),
+            "return_on_assets": finite(financial.get("returnOnAssets")),
             "debt_to_equity": finite(financial.get("debtToEquity")), "current_ratio": finite(financial.get("currentRatio")),
             "free_cash_flow": finite(financial.get("freeCashflow")), "total_cash": finite(financial.get("totalCash")),
             "total_debt": finite(financial.get("totalDebt")), "target_price": finite(financial.get("targetMeanPrice")),
@@ -592,7 +645,7 @@ def build_universe(tickers, names):
             "short_squeeze_setup": round(blend([s["high_short_interest"], s["volume_surge"], s["momentum_short"]]), 1),
         })
         feat["scores"] = {k: finite(v) for k, v in feat["scores"].items()}
-        rows.append(feat)
+        rows.append(apply_financial_model(feat))
     # Merge rather than replace. A throttled run now returns fewer symbols by design,
     # and overwriting would drop coverage a previous run already paid Yahoo for — which
     # would fail the issubset check next time and trigger exactly the full cold pull this
@@ -817,7 +870,9 @@ def theme_relevance(row, theme):
     return round(score_bound(score), 1), matched[:4]
 
 
-def screen(rows, spec):
+def screen(rows, spec, coverage=None):
+    coverage = coverage if coverage is not None else {}
+    coverage.update(evaluated=0, missing_data=0, not_applicable=0, failed_filters=0, failed_criteria=0, matched=0)
     concepts = spec.get("concepts") or [{"id": "quality", "weight": 1}]
     settings = spec.get("settings") or {}
     filters = spec.get("filters") or {}
@@ -826,7 +881,20 @@ def screen(rows, spec):
     threshold = clamp(settings.get("match_threshold", 48), 20, 85)
     ranked = []
     for row in rows:
+        requested = {c.get("id") for c in concepts}
+        if requested.intersection(row.get("unsupported_concepts", [])):
+            coverage["not_applicable"] += 1
+            continue
+        numeric_filters = {"market_cap_min":"market_cap", "market_cap_max":"market_cap", "price_min":"price", "price_max":"price", "pe_max":"pe", "forward_pe_max":"forward_pe", "volume_min":"avg_volume_20d", "avg_dollar_volume_min":"avg_dollar_volume", "dividend_yield_min":"dividend_yield", "revenue_growth_min":"revenue_growth", "earnings_growth_min":"earnings_growth", "profit_margin_min":"profit_margin", "current_ratio_min":"current_ratio", "beta_min":"beta", "beta_max":"beta", "short_interest_min":"short_interest"}
+        scores = [(c, concept_score(row, c.get("id"), settings)) for c in concepts if c.get("id") in CONCEPT_LABELS]
+        if (not scores or any(s is None for _, s in scores) or
+                any(finite(filters.get(k)) is not None and finite(row.get(field)) is None for k, field in numeric_filters.items()) or
+                (theme_keywords and not row.get("business_summary"))):
+            coverage["missing_data"] += 1
+            continue
+        coverage["evaluated"] += 1
         if not passes_filters(row, filters):
+            coverage["failed_filters"] += 1
             continue
 
         # Theme gate: when a theme is requested, a company must visibly match it
@@ -836,6 +904,7 @@ def screen(rows, spec):
         if theme_keywords:
             theme_val, theme_terms = theme_relevance(row, theme)
             if theme_val is None or theme_val < clamp(theme.get("min_score", 24), 15, 80):
+                coverage["failed_criteria"] += 1
                 continue
 
         scores = [(c, concept_score(row, c.get("id"), settings)) for c in concepts if c.get("id") in CONCEPT_LABELS]
@@ -856,6 +925,7 @@ def screen(rows, spec):
                 (must and min(must) < max(30, threshold - 12)) or
                 (requested_patterns and not any(qualifies_pattern(row, p) for p in requested_patterns)) or
                 (required_patterns and not all(qualifies_pattern(row, p) for p in required_patterns))):
+            coverage["failed_criteria"] += 1
             continue
 
         result = {k: row.get(k) for k in (
@@ -864,6 +934,8 @@ def screen(rows, spec):
             "avg_dollar_volume"
         )}
         reasons = explain(row, concepts, settings)
+        if row.get("fundamental_basis"):
+            reasons.insert(0, row["fundamental_basis"])
         if theme_terms:
             reasons = [f"{theme.get('label', 'Theme')} evidence: {', '.join(theme_terms)} appears in its company identity or business description"] + reasons
         result.update({"match_score": round(score, 1), "concept_scores": {c["id"]: round(s, 1) for c, s in scores}, "reasons": reasons[:4]})
@@ -871,6 +943,7 @@ def screen(rows, spec):
             result["theme_score"] = theme_val
             result["theme_terms"] = theme_terms
         ranked.append(result)
+        coverage["matched"] += 1
     ranked.sort(key=lambda x: x["match_score"], reverse=True)
     return ranked[:int(clamp(spec.get("max_results", 20), 5, 50))]
 
@@ -891,13 +964,15 @@ def main():
         row["universe_label"] = universe_label
     stage(3, "Scoring fuzzy concepts with deterministic rules")
     progress(88, "Scoring each company against the measurable criteria")
-    results = screen(rows, spec)
+    coverage = {}
+    results = screen(rows, spec, coverage)
     stage(4, "Explaining why each company matched")
     progress(94, "Preparing evidence for the strongest matches")
     output = {
         "universe": universe_label, "universe_id": universe_id,
         "universe_requested": len(tickers), "universe_scored": len(rows),
         "cache_hit": cached, "spec": spec, "results": results,
+        "coverage": coverage,
         # Honest when coverage is thin: universe_scored below universe_requested with
         # throttled set means Yahoo pushed back and we deliberately did not retry.
         "throttled": _throttled,

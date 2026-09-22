@@ -975,11 +975,8 @@ function runAnalysis() {
   if (_es) { _es.close(); _es = null; }
   finalizePartialStream();
 
-  // Re-run of something we already hold (matched by ticker)? Reopen instantly, no tokens spent.
+  // Analyze explicitly requests a new analysis. Saved research opens through the Saved menu.
   const direct = query.toUpperCase();
-  if (sessions[direct] && sessions[direct].data.aiSummary && sessions[direct].profileKey === profileKey) {
-    active = direct; showWorkspace(); renderTickerPills(); renderAll(sessions[direct].data); return;
-  }
   // Courtesy pre-check only — it saves a wasted scrape on an obvious re-run. The server
   // holds the authoritative limits; this one is per-ticker, per-browser and trivially
   // bypassed, and it doesn't fire at all for company-name queries.
@@ -1374,9 +1371,11 @@ function renderScreenResults(result) {
   if (!result) return "";
   const rows = result.results || [];
   const spec = result.spec || {};
-  if (!rows.length) return `<div class="screen-empty"><b>No companies met every condition.</b><span>Broaden the match threshold or remove a required criterion, then run the screen again.</span></div>`;
+  const coverage = result.coverage || {};
+  const coverageHtml = `<p class="learn-note">${esc(result.universe_scored ?? "Unknown")} of ${esc(result.universe_requested ?? "unknown")} companies have market data. ${isNum(coverage.evaluated) ? `${coverage.evaluated} fully evaluated; ${coverage.missing_data || 0} excluded for missing data; ${coverage.not_applicable || 0} require a different financial model; ${coverage.failed_filters || 0} failed filters; ${coverage.failed_criteria || 0} failed theme or score criteria.` : "Criterion-level coverage unavailable for this saved screen; rerun to check."}${result.throttled ? " Provider throttling reduced coverage." : ""}${result.generated_at ? ` Screen generated ${esc(result.generated_at)}.` : ""}</p>`;
+  if (!rows.length) return coverageHtml + `<div class="screen-empty"><b>No verified matches in the available data.</b><span>Check coverage above before changing your criteria. Missing or inapplicable data is not a failed investment criterion.</span></div>`;
   const cards = rows.map((r, i) => `<article class="screen-result" style="--i:${i}"><div class="screen-result-top"><button class="screen-symbol" type="button" onclick="analyzeFromScreener('${jsAttr(r.ticker)}')">${esc(r.ticker)}</button><div class="screen-name"><b>${esc(r.name || r.ticker)}</b><span>${esc([(r.indexes || []).join(" / "), r.sector, r.industry].filter(Boolean).join(" · "))}</span></div><div class="match-score" data-score="${Math.round(r.match_score)}" title="Match score: fit with this screen, not an investment rating">${Math.round(r.match_score)}</div></div><div class="screen-metrics"><div class="screen-metric"><small>Price</small><b>${fUsd(r.price)}</b></div><div class="screen-metric"><small>20-day return</small><b class="${signCls(r.return_20d)}">${screenPct(r.return_20d)}</b></div><div class="screen-metric"><small>Below 52-week high</small><b>${screenPct(r.distance_52w_high)}</b></div></div>${scoreBreakdown(r, spec)}<div class="screen-reasons">${(r.reasons || []).map(x => `<p class="screen-reason">${esc(x)}</p>`).join("")}</div></article>`).join("");
-  return `<div class="screen-results-head"><h2>${rows.length} matches</h2><span>${esc(result.universe_scored)} of ${esc(result.universe_requested)} companies scored in ${esc(result.universe || spec.universe_label || "the selected universe")}${result.cache_hit ? " · current cache used" : ""}</span></div><div class="screen-grid">${cards}</div>`;
+  return `<div class="screen-results-head"><h2>${rows.length} matches</h2><span>${esc(result.universe || spec.universe_label || "the selected universe")}${result.cache_hit ? " · cached market data" : ""}</span></div>${coverageHtml}<div class="screen-grid">${cards}</div>`;
 }
 /* Paint results and bring them to life: each match ring sweeps 0→score while
    the number counts up. Skipped (values set instantly) under reduced motion. */
@@ -1693,14 +1692,15 @@ function renderStrip(d) {
   strip.innerHTML = `
     <span id="sTicker">${esc(d.ticker)}</span>
     <span id="sCompany" title="${esc(d.company_name)}${q.exchange ? " · " + esc(q.exchange) : ""}">${esc(d.company_name)}</span>
-    <span id="sPrice">${fUsd(price)}</span>
+    <span id="sPrice" title="Saved snapshot; Analyze refreshes the research">${fUsd(price)}</span>
+    <span class="sector-badge">As of ${esc(q.quote_time || q.fetched_at || d.today || "unknown")}</span>
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
     ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
     ${/* Label only. The confidence used to ride along here, and "DISTRIBUTION · 86%" is
           wide enough that the bar clipped it mid-character at 1280px — while the Market
           Regime card already shows the same number with a bar beside it. The title keeps
           both for anyone who wants them without opening the card. */""}
-    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Market regime · ${esc(regime.label)}${isNum(regime.confidence) ? ` · ${Math.round(regime.confidence)}% confidence` : ""}${regime.summary ? " — " + esc(regime.summary) : ""}">${esc(regime.label)}</span>` : ""}`;
+    ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Historical price/volume classification; not a forecast">${esc(regime.label)}</span>` : ""}`;
   strip.classList.add("show");
   document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
 
@@ -1942,7 +1942,7 @@ function renderAll(d) {
     ${metric("Day Change", fPct(t.daily_change), signCls(t.daily_change))}
     ${metric("Open", fUsd(q.open))}
     ${metric("Prev Close", fUsd(q.previous_close))}
-    ${metric("Bid / Ask", (isNum(q.bid) || isNum(q.ask)) ? `${fUsd(q.bid)} <small>/</small> ${fUsd(q.ask)}` : "N/A")}
+    ${metric("Bid / Ask", (isNum(q.bid) && q.bid > 0 && isNum(q.ask) && q.ask >= q.bid) ? `${fUsd(q.bid)} <small>/</small> ${fUsd(q.ask)} <small>(snapshot)</small>` : "Unavailable")}
     ${metric("Volume", fInt(q.last_volume))}
     ${metric("Market Cap", fUsd(q.market_cap))}
     ${metric("Currency", esc(q.currency || "N/A"))}
@@ -1960,7 +1960,8 @@ function renderAll(d) {
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
-  add("overview", card("snapshot", "Live Snapshot", snap));
+  snap += `<p class="learn-note">Saved market snapshot, not a streaming quote. Select Analyze to refresh; the server may reuse data fetched within five minutes.</p><button type="button" class="chip" onclick="retryAnalysis('${jsAttr(d.ticker)}')">Refresh analysis</button>`;
+  add("overview", card("snapshot", "Market Snapshot", snap));
 
   /* Candlestick chart — its own destination, not a card in a scroll list.
      As a card it was a fixed 565px inside a 312px window, so the controls and the candles
@@ -1973,13 +1974,13 @@ function renderAll(d) {
 
   /* Deterministic market regime — explains the current price/volume environment. */
   if (regime.label && regime.label !== "INSUFFICIENT DATA") {
-    const confidence = isNum(regime.confidence) ? Math.max(0, Math.min(100, regime.confidence)) : 0;
     let body = `<div class="regime-summary ${signalClass(regime.label)}">
       <div><span>Current regime</span><strong>${esc(regime.label)}</strong></div>
-      <div class="regime-confidence"><span>${Math.round(confidence)}% confidence</span><i><b style="width:${confidence}%"></b></i></div>
+      <div class="regime-confidence"><span>Score separation: ${esc(regime.separation || "unavailable")}</span></div>
       <p>${esc(regime.summary || "Price and volume currently give a mixed signal.")}</p>
     </div>`;
     if (Array.isArray(regime.evidence) && regime.evidence.length) body += `<div class="regime-evidence">${regime.evidence.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
+    if (regime.conflicts?.length) body += `<p class="learn-note">Conflicting evidence: ${regime.conflicts.map(esc).join("; ")}</p>`;
     body += `<p class="learn-note"><b>How to use this:</b> regime describes the current environment; it does not predict the next move. Trend regimes favor continuation setups, while range or transition regimes reward patience and tighter risk controls.</p>`;
     add("overview", card("regime", "Market Regime", body, { count: regime.label, source: histSrc(d) }));
   }
@@ -2028,7 +2029,7 @@ function renderAll(d) {
   /* Valuation */
   add("fundamentals", card("valuation", "Valuation", `<div class="mgrid">
     ${metric("P/E Trailing", fRatio(v.pe_trailing))}${metric("P/E Forward", fRatio(v.pe_forward))}
-    ${metric("PEG", fRatio(v.peg_ratio), isNum(v.peg_ratio) ? (v.peg_ratio > 0 && v.peg_ratio < 1 ? "green" : v.peg_ratio > 3 ? "red" : "") : "")}
+    ${metric("PEG (provider growth basis)", fRatio(v.peg_ratio))}
     ${metric("Price / Book", fRatio(v.price_to_book))}${metric("Price / Sales", fRatio(v.price_to_sales))}
     ${metric("EV / EBITDA", fRatio(v.ev_ebitda))}${metric("FCF Yield", fPct(v.fcf_yield), signCls(v.fcf_yield))}</div>`));
 
@@ -2041,7 +2042,7 @@ function renderAll(d) {
   /* Health */
   add("fundamentals", card("health", "Financial Health", `<div class="mgrid">
     ${metric("Current Ratio", fRatio(fh.current_ratio), isNum(fh.current_ratio) ? (fh.current_ratio >= 1.5 ? "green" : fh.current_ratio < 1 ? "red" : "amber") : "")}
-    ${metric(fh.debt_to_equity_unit === "multiple" ? "Debt / Equity (×)" : "Debt / Equity (legacy units)", fRatio(fh.debt_to_equity), isNum(fh.debt_to_equity) && fh.debt_to_equity > (fh.debt_to_equity_unit === "multiple" ? 2 : 200) ? "red" : "")}
+    ${metric(fh.debt_to_equity_unit === "multiple" ? "Debt / Equity (×)" : "Debt / Equity (legacy units)", fRatio(fh.debt_to_equity))}
     ${metric("Earnings Quality <small>(OCF/NI)</small>", fRatio(fh.earnings_quality), isNum(fh.earnings_quality) ? (fh.earnings_quality >= 1 ? "green" : fh.earnings_quality < 0.5 ? "red" : "amber") : "")}</div>`));
 
   /* SEC fundamentals */

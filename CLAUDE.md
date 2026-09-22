@@ -63,6 +63,19 @@ There is still no linter or build step. `npm test` runs the zero-dependency Node
 
 ## Architecture
 
+### September 22 financial review corrections
+
+Static files are explicitly allowlisted in `server.js`; repository files are never public.
+`Analyze` requests a new analysis, while Saved opens stored snapshots. The server's five-minute
+payload cache still applies. Market snapshots display their date and offer Refresh analysis.
+Regimes expose score separation, not a probability. `financial_rules.py` owns business-model
+applicability and bid/ask validation. Options quotes have no verified bid/ask timestamp and
+remain indicative; priced options recommendations require a current broker quote.
+Screener cache v8 retains base composites and reranks core fundamentals within sector/model
+on every selected universe (minimum three comparable observations). Financial-company
+capital/credit quality and REIT FFO/AFFO are not available and affected concepts are explicitly
+unsupported. Coverage distinguishes missing/inapplicable evidence from failed criteria.
+
 The primary flow is **browser → Node server → spawns Python scraper → OpenRouter LLM → streamed back to browser**. The screener adds a parallel flow: **browser → Node server → (LLM interprets query) → spawns Python screener → streamed back**. Four Python/JS files hold essentially all the logic, with `sp500.js` and `market-universes.js` providing index constituents.
 
 ### `scraperFinal.py` (~1500 lines) — the single-ticker data engine

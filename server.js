@@ -360,7 +360,7 @@ function tradeIdeaDirective(profile) {
     "--- TRADE IDEA CONSTRAINTS (these override the defaults in the ## Trade Idea section above) ---",
     `Holding period: ${window}. State it explicitly in the section and size the entry, stop and target for it. Do not substitute a shorter horizon because the nearest data happens to be short-dated.`,
     wantsOptions
-      ? "Instrument: options — use ONLY strikes and expirations listed in §13, with strike, expiry, premium at the bid/ask midpoint, breakeven and max loss. §13 carries the two nearest expirations only, so if neither reaches the holding period above, say so in one sentence and give the shares trade instead. Never shorten the thesis to fit the chain and never invent a contract."
+      ? "Instrument: options preferred — use ONLY strikes and expirations listed in §13. A priced idea requires a verified current two-sided quote; the supplied snapshots have no verified quote timestamp, so give the shares trade instead and state that a broker quote is needed. Never treat a bid/ask midpoint as executable. §13 carries the two nearest expirations only, so if neither reaches the holding period above, say so in one sentence and give the shares trade instead. Never shorten the thesis to fit the chain and never invent a contract."
       : "Instrument: shares — an entry zone, a stop level and a target level. Do not build the idea out of option contracts."
   ].join("\n");
 }
@@ -677,13 +677,13 @@ const SCREENER_CATALOG = {
   low_volatility:["Lower volatility", "Realized volatility, ATR percentage, beta, and one-year maximum drawdown."],
   high_volatility:["Higher volatility", "Elevated realized volatility, ATR percentage, beta, and drawdown."],
   trend_stability:["Stable trend", "Share of recent sessions above the 50-day average plus limited drawdown and volatility."],
-  value:["Value", "Trailing and forward P/E, price-to-book, price-to-sales, PEG, and enterprise-value/EBITDA where available."],
+  value:["Value", "Sector-relative heuristic multiples score (at least 3 peers): P/E, forward P/E, P/B, P/S and EV/EBITDA for operating companies; P/E and P/B for financials. REIT value requires unavailable FFO/AFFO. Not fair value."],
   growth:["Growth", "Reported revenue and earnings growth, balanced so one extreme field cannot dominate."],
-  profitability:["Profitability", "Profit, operating, and gross margins plus return on equity."],
-  quality:["Business quality", "Profitability, return on equity, leverage, and cash generation combined."],
-  balance_sheet:["Balance-sheet strength", "Debt-to-equity, current ratio, and net cash relative to company size."],
+  profitability:["Profitability", "Sector-relative margins and ROE; financials use ROE/ROA. At least 3 comparable peers required; REITs unsupported."],
+  quality:["Business quality", "Sector-relative profitability, ROE, leverage and cash generation. Financials and REITs require unavailable sector-specific evidence and are not scored."],
+  balance_sheet:["Balance-sheet strength", "Sector-relative debt/equity, current ratio and net cash; not applicable to financial firms, whose capital and credit quality are unavailable."],
   cash_generation:["Cash generation", "Free cash flow scaled by market capitalization and supported by profit margins."],
-  high_margin:["High margins", "Gross, operating, and net profit margins versus broad public-company ranges."],
+  high_margin:["High margins", "Gross, operating and net margin composite ranked within sector, with at least 3 peers; not applicable to financials or REITs."],
   income:["Dividend income", "Current dividend yield with a payout-ratio penalty when data is available."],
   analyst_upside:["Analyst-implied upside", "Consensus target price versus the current price and recommendation mean; never treated as fact."],
   insider_ownership:["Insider ownership", "Reported percentage of shares held by insiders."],
