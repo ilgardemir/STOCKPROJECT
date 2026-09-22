@@ -415,18 +415,25 @@ const THEMES = [
   { id: "lagoon", label: "Lagoon",   note: "Turquoise + pink",  mode: "dark",  bg: "#052b2b", accent: "#ff4fa3" },
   { id: "matrix", label: "Terminal", note: "Black + lime",      mode: "dark",  bg: "#000000", accent: "#8dff3a" },
 ];
-const THEME_STORAGE_KEY = "squall-theme";
+/* Noir is the default. The key is versioned because the old build wrote the resolved theme
+   on EVERY load, so a stored "dark" cannot be told apart from "never chose" — keeping the
+   old key would have left every returning visitor on Midnight. Only an explicit pick writes
+   the new key; a pre-v2 value is carried over only when it is one no default could have
+   produced (see the loader below). 404.html reads the same key. */
+const THEME_STORAGE_KEY = "squall-theme-v2";
+const LEGACY_THEME_KEY = "squall-theme";
+const DEFAULT_THEME = "noir";
 const themeBtn = document.getElementById("themeBtn");
 const themeMenu = document.getElementById("themeMenu");
 
-function themeDef(id) { return THEMES.find(t => t.id === id) || THEMES[0]; }
+function themeDef(id) { return THEMES.find(t => t.id === id) || THEMES.find(t => t.id === DEFAULT_THEME); }
 
 /* The switch itself: flip the tokens, tell anything that samples resolved colors, repaint
    the canvas. Deliberately synchronous and cheap — it is the callback a view transition
    runs between its two snapshots, so anything deferred out of it (a rAF, a timeout) lands
    *after* the "new" snapshot is taken and pops into view mid-fade instead of crossfading.
    drawChart() is the reason that matters: canvases don't inherit CSS colors. */
-function commitTheme(def) {
+function commitTheme(def, persist) {
   const root = document.documentElement;
   root.dataset.theme = def.id;
   root.dataset.mode = def.mode;
@@ -444,7 +451,9 @@ function commitTheme(def) {
   }
   if (themeMenu) themeMenu.querySelectorAll(".theme-opt").forEach(b =>
     b.setAttribute("aria-checked", String(b.dataset.theme === def.id)));
-  try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
+  // Persist only an explicit pick — writing the resolved default here is what made the
+  // pre-v2 key unable to distinguish a choice from a default.
+  if (persist) try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
   // Anything that samples resolved colors (hero wind field, the cssVar cache, future
   // canvases) listens here rather than on the button — the button click only opens the menu.
   document.dispatchEvent(new CustomEvent("squall:theme", { detail: def }));
@@ -463,16 +472,16 @@ function commitTheme(def) {
    "some things fade, most snap" effect that read as broken. Overlapping switches need no
    handling here — startViewTransition skips an in-flight transition for us, and the DOM is
    already in its final state by then either way. */
-function applyTheme(id, animate) {
+function applyTheme(id, animate, persist) {
   const def = themeDef(id);
   const root = document.documentElement;
-  if (root.dataset.theme === def.id && root.dataset.mode) { commitTheme(def); return; }
-  if (!animate || REDUCED || !document.startViewTransition) { commitTheme(def); return; }
+  if (root.dataset.theme === def.id && root.dataset.mode) { commitTheme(def, persist); return; }
+  if (!animate || REDUCED || !document.startViewTransition) { commitTheme(def, persist); return; }
 
   root.classList.add("theme-swap");
   const done = () => root.classList.remove("theme-swap");
   try {
-    const vt = document.startViewTransition(() => commitTheme(def));
+    const vt = document.startViewTransition(() => commitTheme(def, persist));
     // Every one of these promises rejects on a skipped transition — a hidden tab, or a
     // second switch arriving mid-fade — and an unhandled rejection is a console error the
     // user sees. Skipping is a normal outcome here, not a failure: the DOM is already in
@@ -480,7 +489,7 @@ function applyTheme(id, animate) {
     vt.ready.catch(() => {});
     vt.updateCallbackDone.catch(() => {});
     vt.finished.then(done, done);
-  } catch (e) { commitTheme(def); done(); }
+  } catch (e) { commitTheme(def, persist); done(); }
 }
 
 if (themeMenu) themeMenu.innerHTML =
@@ -493,10 +502,22 @@ if (themeMenu) themeMenu.innerHTML =
     </button>`).join("");
 
 (function () {
-  let saved; try { saved = localStorage.getItem(THEME_STORAGE_KEY); } catch (e) {}
-  // An unknown id (older build, hand-edited storage) falls back to the OS preference.
-  if (!saved || !THEMES.some(t => t.id === saved))
-    saved = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  let saved;
+  try {
+    saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (!saved) {
+      // "dark"/"light" were what the old build wrote as the OS-derived default, so they
+      // prove nothing; any other palette could only have been picked by hand.
+      const legacy = localStorage.getItem(LEGACY_THEME_KEY);
+      if (legacy && legacy !== "dark" && legacy !== "light" && THEMES.some(t => t.id === legacy)) {
+        saved = legacy;
+        localStorage.setItem(THEME_STORAGE_KEY, legacy);
+      }
+      localStorage.removeItem(LEGACY_THEME_KEY);
+    }
+  } catch (e) {}
+  // An unknown id (older build, hand-edited storage) falls back to the default.
+  if (!saved || !THEMES.some(t => t.id === saved)) saved = DEFAULT_THEME;
   applyTheme(saved, false);
 })();
 
@@ -527,7 +548,7 @@ if (themeBtn) themeBtn.addEventListener("click", () => { themeMenuOpen() ? close
 if (themeMenu) themeMenu.addEventListener("click", e => {
   const opt = e.target.closest(".theme-opt");
   if (!opt) return;
-  applyTheme(opt.dataset.theme, true);
+  applyTheme(opt.dataset.theme, true, true);
   themeBtn.classList.remove("picked"); void themeBtn.offsetWidth; themeBtn.classList.add("picked");
   closeThemeMenu(true);
 });
@@ -1689,6 +1710,26 @@ function clearTickerBar() {
    The order here is the shed order: everything after #sPrice is dropped by the media
    ladder as the bar narrows, right to left, before the wordmark or the search field give
    up any width. */
+/* The snapshot date, compact. It shipped as the raw ISO string in an accent pill — 182px
+   of "As of 2026-08-27 14:31:00Z" — which at 1280px ellipsed every chip after it down to
+   "TR…" and "Tec…". It is metadata, not a category, so it reads as muted text; the full
+   value stays on the title. Today shows the time (freshness is the question), anything
+   older shows the date (staleness is). */
+function asOfStamp(raw) {
+  if (!raw) return `<span class="as-of" title="Snapshot time unknown">as of —</span>`;
+  const dt = new Date(String(raw).replace(" ", "T"));
+  let label = String(raw);
+  if (!isNaN(dt)) {
+    const now = new Date();
+    const sameDay = dt.toDateString() === now.toDateString();
+    label = sameDay
+      ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : dt.toLocaleDateString([], { month: "short", day: "numeric",
+          ...(dt.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
+  }
+  return `<span class="as-of" title="Snapshot as of ${esc(raw)} — Analyze refreshes it">as of ${esc(label)}</span>`;
+}
+
 function renderStrip(d) {
   const q = d.live_quote || {}, t = (d.raw_data || {}).technicals || {};
   const company = d.company_profile || {}, regime = d.market_regime || {};
@@ -1699,7 +1740,7 @@ function renderStrip(d) {
     <span id="sTicker">${esc(d.ticker)}</span>
     <span id="sCompany" title="${esc(d.company_name)}${q.exchange ? " · " + esc(q.exchange) : ""}">${esc(d.company_name)}</span>
     <span id="sPrice" title="Saved snapshot; Analyze refreshes the research">${fUsd(price)}</span>
-    <span class="sector-badge">As of ${esc(q.quote_time || q.fetched_at || d.today || "unknown")}</span>
+    ${asOfStamp(q.quote_time || q.fetched_at || d.today)}
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
     ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
     ${/* Label only. The confidence used to ride along here, and "DISTRIBUTION · 86%" is

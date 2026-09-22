@@ -186,7 +186,7 @@ const SEEDED_STORAGE = {
   "squall-chat-h": "120",
   "squall-chat-think": "1",
   "squall-split": "0.55",
-  "squall-theme": "dark"
+  "squall-theme": "lagoon"
 };
 
 function run(page, units, poisonId, dropIds) {

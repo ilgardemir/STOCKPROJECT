@@ -394,6 +394,7 @@ body.hero-up .util-rail { margin-left: auto; }
    one width. These two shrink and ellipse — legibly, with the full text on the title —
    rather than being sliced mid-character by #tickerBar's overflow. */
 #tickerBar .sector-badge, #tickerBar .regime-badge { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.as-of { flex-shrink: 0; font-size: var(--t-micro); color: var(--ink-dim); white-space: nowrap; letter-spacing: .02em; }
 .sector-badge { color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .regime-badge { color: var(--warn); background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
 /* The shed ladder. The bar gives up its own content — right to left, least glanceable
@@ -409,6 +410,16 @@ body.has-analysis #searchForm { max-width: 280px; }
    it ellipsed: at 1280px it rendered as 32px of "AAP…", which is worse than absent and
    costs the sector and regime badges the room they need. */
 @media (max-width: 1400px) { #sCompany { display: none; } }
+/* Then the rail's labels, before any chip ellipses. At 1280px the labels cost ~190px that
+   the bar needed: every chip rendered as "Tec…" / "TR…" / "Resul…", which carries nothing.
+   The rail's icons are learned after one visit and each button keeps its title; the chips
+   are the analysis. Same collapse the rail already does at 720px, keyed to has-analysis so
+   the landing page keeps its labels. */
+@media (max-width: 1400px) {
+  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #savedBtn span { display: none; }
+  body.has-analysis .util-rail > button { width: 38px; padding: 0; }
+  body.has-analysis #savedBtn { width: auto; padding: 0 9px; }
+}
 @media (max-width: 1180px) { #tickerBar .regime-badge:not(.event-badge) { display: none; } }
 @media (max-width: 1060px) { #tickerBar .sector-badge { display: none; } }
 @media (max-width:  620px) { #tickerBar { margin-left: 10px; padding-left: 10px; gap: 7px; } #sTicker { display: none; } }

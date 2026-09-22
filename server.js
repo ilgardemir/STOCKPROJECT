@@ -2051,6 +2051,17 @@ let stateDirty = false;
 
 const utcDayId  = () => new Date().toISOString().slice(0, 10);
 const utcHourId = () => Math.floor(Date.now() / 3600000);
+/* An OpenRouter error body is JSON — `{"error":{"message":…,"code":…}}` — and this text
+   reaches the page verbatim inside ai_error. Show the provider's sentence, not its braces;
+   a body that is not that shape still goes through, bounded. */
+function openRouterDetail(text) {
+  const raw = String(text || "");
+  try {
+    const msg = JSON.parse(raw)?.error?.message;
+    if (typeof msg === "string" && msg.trim()) return msg.trim().slice(0, 300);
+  } catch (e) {}
+  return raw.slice(0, 300);
+}
 function nextUtcMidnight() { const d = new Date(); d.setUTCHours(24, 0, 0, 0); return d; }
 const secsToUtcMidnight = () => Math.max(1, Math.ceil((nextUtcMidnight() - Date.now()) / 1000));
 const secsToNextHour    = () => Math.max(1, 3600 - Math.floor((Date.now() % 3600000) / 1000));
@@ -2881,7 +2892,7 @@ const handleRequest = async (req, res) => {
           });
           if (!aiRes.ok || !aiRes.body) {
             const detail = await aiRes.text().catch(() => "");
-            const error = new Error(`OpenRouter ${aiRes.status}: ${detail.slice(0, 300)}`);
+            const error = new Error(`OpenRouter ${aiRes.status}: ${openRouterDetail(detail)}`);
             error.httpStatus = aiRes.status;
             throw error;
           }
@@ -3011,7 +3022,7 @@ const handleRequest = async (req, res) => {
           });
           if (!aiRes.ok || !aiRes.body) {
             const errText = await aiRes.text().catch(() => "");
-            const e = new Error(`OpenRouter ${aiRes.status}: ${errText.slice(0, 300)}`);
+            const e = new Error(`OpenRouter ${aiRes.status}: ${openRouterDetail(errText)}`);
             e.httpStatus = aiRes.status;
             throw e;
           }

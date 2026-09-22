@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark" data-mode="dark">
+<html lang="en" data-theme="noir" data-mode="dark">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -19,13 +19,13 @@
    in it is one more way for an error page to itself error. The cost of standing alone is
    that the two things app.js would have given us have to be restated here: the stored theme
    and the mono wordmark's behavior. The theme has to be applied before first paint or the
-   page flashes Midnight at someone running Paper, so it is inline and synchronous, and the
+   page flashes Noir at someone running Paper, so it is inline and synchronous, and the
    id→mode map mirrors THEMES in app.js (adding a palette means editing both). An unknown or
-   unreadable value falls through to the markup's dark default rather than throwing. */
+   unreadable value falls through to the markup's Noir default rather than throwing. */
 (function () {
   var MODE = { dark:"dark", light:"light", noir:"dark", paper:"light", lagoon:"dark", matrix:"dark" };
   try {
-    var id = localStorage.getItem("squall-theme");
+    var id = localStorage.getItem("squall-theme-v2");
     if (id && MODE[id]) {
       document.documentElement.dataset.theme = id;
       document.documentElement.dataset.mode = MODE[id];
