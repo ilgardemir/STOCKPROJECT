@@ -1697,7 +1697,7 @@ def generate_analysis_payload(query: str) -> dict:
     ks  = yqd.key_stats          # pe, peg, pb, shorts, ev
     sd  = yqd.summary_detail     # market cap, trailing/forward pe
     ap  = yqd.asset_profile      # sector, industry, description
-    model = business_model(ap.get("sector"), ap.get("industry"))
+    model = business_model(ap.get("sector"), ap.get("industry"), ticker)
     pm  = yqd.price_mod          # live price, bid/ask, market state
 
     # ── Current price ─────────────────────────────────────────────────────────

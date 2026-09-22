@@ -24,6 +24,35 @@ class FinancialRulesTests(unittest.TestCase):
         self.assertEqual(coverage['not_applicable'], 1)
         self.assertEqual(coverage['failed_criteria'], 0)
 
+    def test_classification_uses_industry_not_the_shared_yahoo_sector(self):
+        # Yahoo files all of these under sector "Financial Services".
+        cases = {
+            ("Banks - Diversified", "JPM"): "financial",
+            ("Banks - Regional", "USB"): "financial",
+            ("Insurance - Property & Casualty", "TRV"): "financial",
+            ("Capital Markets", "GS"): "financial",
+            ("Credit Services", "COF"): "financial",
+            ("Credit Services", "V"): "operating",
+            ("Credit Services", "MA"): "operating",
+            ("Financial Data & Stock Exchanges", "SPGI"): "operating",
+            ("Financial Data & Stock Exchanges", "CME"): "operating",
+            ("Asset Management", "BLK"): "operating",
+            ("Insurance Brokers", "MMC"): "operating",
+        }
+        for (industry, ticker), expected in cases.items():
+            self.assertEqual(business_model("Financial Services", industry, ticker), expected, ticker)
+        self.assertEqual(business_model("Real Estate", "Real Estate Services", "CBRE"), "operating")
+
+    def test_missing_industry_falls_back_to_the_conservative_sector_read(self):
+        self.assertEqual(business_model("Financial Services", None), "financial")
+        self.assertEqual(business_model("Technology", ""), "operating")
+
+    def test_payment_networks_keep_their_quality_scores_in_the_screener(self):
+        visa = screener.apply_financial_model(dict(ticker="V", sector="Financial Services",
+            industry="Credit Services", scores=dict(quality=90, high_margin=95)))
+        self.assertEqual(visa["financial_model"], "operating")
+        self.assertEqual(visa["scores"]["quality"], 90)
+
     def test_missing_data_is_not_a_failed_criterion(self):
         coverage = {}
         screener.screen([{'scores': {'value': None}}], {'concepts':[{'id':'value'}]}, coverage)

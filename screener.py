@@ -23,7 +23,7 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 8  # financial-model applicability and sector-relative fundamental scores
+CACHE_VERSION = 9  # industry-based financial-model classification (V/MA/exchanges are operating)
 
 # Missing bank capital/credit and REIT FFO data must not be replaced with industrial ratios.
 MODEL_UNSUPPORTED = {
@@ -33,7 +33,7 @@ MODEL_UNSUPPORTED = {
 
 
 def apply_financial_model(row):
-    model = business_model(row.get("sector"), row.get("industry"))
+    model = business_model(row.get("sector"), row.get("industry"), row.get("ticker"))
     row["financial_model"] = model
     row["unsupported_concepts"] = sorted(MODEL_UNSUPPORTED.get(model, set()))
     if model == "financial":
