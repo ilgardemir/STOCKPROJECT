@@ -43,9 +43,14 @@ const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4-
 // times out or grounds nothing, so the switch below is a pure revert with no deploy.
 const NEWS_SEARCH  = process.env.SQUALL_NEWS_SEARCH !== "off";
 const NEWS_MODEL   = process.env.SQUALL_NEWS_MODEL || "openai/gpt-6-luna";
-// Unset = OpenRouter's auto choice (the model's native search where it has one, else Exa).
-const NEWS_ENGINE  = ["native", "exa", "parallel", "perplexity"].includes(process.env.SQUALL_NEWS_ENGINE)
-  ? process.env.SQUALL_NEWS_ENGINE : undefined;
+// Exa by default, and that is a grounding decision, not a price one. Exa's results are
+// injected into the prompt and returned as url_citation annotations regardless of output
+// format, so every item can be checked against the real result set. OpenAI's native search
+// returned JSON with ZERO annotations live (8 of 8 items ungrounded), which would make the
+// digest fall back to Finnhub every time. "auto" hands the choice back to OpenRouter.
+const NEWS_ENGINE_RAW = process.env.SQUALL_NEWS_ENGINE || "exa";
+const NEWS_ENGINE  = ["native", "exa", "parallel", "perplexity"].includes(NEWS_ENGINE_RAW)
+  ? NEWS_ENGINE_RAW : NEWS_ENGINE_RAW === "auto" ? undefined : "exa";
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -3777,5 +3782,5 @@ module.exports = {
   // Reasoning budget — exported so the absolute cap can be checked without a provider.
   reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX,
   // News digest cache — exported so sharing, eviction and budget gating are testable offline.
-  getNewsDigest, newsCache, NEWS_MODEL
+  getNewsDigest, newsCache, NEWS_MODEL, NEWS_ENGINE
 };

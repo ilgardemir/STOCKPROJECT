@@ -278,7 +278,7 @@ retuned from the Railway dashboard without a deploy.
 | `SQUALL_AI_PROVIDER_SORT` | `throughput` | `price` / `latency` |
 | `SQUALL_NEWS_SEARCH` | on | `off` = Finnhub news only (instant revert) |
 | `SQUALL_NEWS_MODEL` | `openai/gpt-6-luna` | The search-and-digest call. Charged `COST.news` (3 credits) per real search |
-| `SQUALL_NEWS_ENGINE` | auto | `native` / `exa` / `parallel` / `perplexity`; unset lets OpenRouter pick |
+| `SQUALL_NEWS_ENGINE` | `exa` | Exa returns its results as citations, which grounding needs. Native OpenAI search returned none for JSON output. `auto` = OpenRouter picks |
 | `SQUALL_NEWS_TIMEOUT_MS` / `_CACHE_TTL_MS` | 45000 / 1800000 | Timeout is the longest the dashboard waits after the scrape |
 | `SQUALL_NEWS_MAX_RESULTS` / `_MAX_ITEMS` / `_LOOKBACK_DAYS` | 10 / 8 / 45 | Search hits, items kept for the prompt, window |
 | `FINNHUB_API_KEY` | — | Quotes, profile, metrics, fallback news, `/quotes` |

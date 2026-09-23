@@ -163,7 +163,9 @@ test("news: a provider that rejects structured output gets one plain retry", asy
   assert.ok(bodies[0].response_format);
   assert.equal(bodies[1].response_format, undefined);
   assert.deepEqual(bodies[0].plugins, [{ id: "web", max_results: 10 }]);   // engine left to OpenRouter
-  assert.ok(bodies[0].messages[1].content.includes("Acme Corp (ACME)"));
+  // The user message is the search query: short, and naming the company.
+  assert.ok(bodies[0].messages[1].content.startsWith("Acme Corp (ACME) stock news September 2026"));
+  assert.ok(bodies[0].messages[1].content.length < 160);
   assert.equal(r.digest.items.length, 1);
   assert.equal(r.citations, 1);
 });
@@ -234,4 +236,13 @@ test("news: the payload says why it fell back, so a fallback is explainable with
   const ok = newsSearchStatus({ ok: true, ms: 9000, citations: 7,
     digest: { items: [1, 2], dropped: { ungrounded: 1, stale: 0, invalid: 0, duplicate: 0 } } });
   assert.deepEqual([ok.status, ok.citations, ok.kept, ok.dropped.ungrounded], ["ok", 7, 2, 1]);
+});
+
+test("news: Exa is the default engine because it returns citations; auto hands the choice back", () => {
+  const read = env => execFileSync(process.execPath, ["-e", "process.stdout.write(String(require('./server').NEWS_ENGINE))"],
+    { cwd: path.join(__dirname, "../.."), env: { ...process.env, SQUALL_NEWS_ENGINE: "", ...env }, encoding: "utf8" });
+  assert.equal(read({}), "exa");
+  assert.equal(read({ SQUALL_NEWS_ENGINE: "auto" }), "undefined");
+  assert.equal(read({ SQUALL_NEWS_ENGINE: "native" }), "native");
+  assert.equal(read({ SQUALL_NEWS_ENGINE: "typo" }), "exa");
 });
