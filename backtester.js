@@ -207,8 +207,8 @@ function scheduleBacktestAiPaint() {
   if (!backtestPaint) backtestPaint = requestAnimationFrame(paintBacktestAi);
 }
 // ilgar.html loads app.js before this file, so prettyModel is in scope — but guard it
-// rather than assume, because a raw id here is a visible regression ("openai/gpt-5.6-luna"
-// instead of "GPT 5.6 Luna") and a missing function would take the whole panel down.
+// rather than assume, because a raw id here is a visible regression ("openai/gpt-6-luna"
+// instead of "GPT 6 Luna") and a missing function would take the whole panel down.
 function btModelLabel(model) {
   if (!model) return "AI";
   return typeof prettyModel === "function" ? prettyModel(model) : model;

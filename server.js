@@ -31,7 +31,7 @@ const PORT        = process.env.PORT || 3000;
 //
 // Reverting to the flash tier means restoring BOTH: set SQUALL_AI_MODEL back and
 // SQUALL_AI_FREQ_PENALTY=0.3, or the loops come back undamped.
-const AI_MODEL    = process.env.SQUALL_AI_MODEL || "openai/gpt-5.6-luna";
+const AI_MODEL    = process.env.SQUALL_AI_MODEL || "openai/gpt-6-luna";
 // Translates/refines screener language only; no web plugin. Deliberately a separate
 // knob: this one is a cheap-and-fast job, and it should not be dragged upmarket just
 // because the analysis model was.
@@ -169,7 +169,7 @@ const envFloat = (name, dflt, lo, hi) => {
 // What that trades away is measured, not assumed. On deepseek-v4-flash-0731 WITH the
 // damper at 0.3, a 15-case sweep still produced 4 corrupted runs and 2 runaways of 79k
 // and 88k characters — so the damper was not preventing the failure it was added for.
-// The bet is that a frontier model does not need it. If GPT-5.6 Luna loops anyway, the
+// The bet is that a frontier model does not need it. If GPT-6 Luna loops anyway, the
 // answer is a better model or a lower ANALYSIS_MAX, not a penalty it cannot accept.
 const AI_FREQ_PENALTY = envFloat("SQUALL_AI_FREQ_PENALTY", 0, 0, 2);
 const AI_SAMPLING = {

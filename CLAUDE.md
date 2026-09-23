@@ -258,7 +258,7 @@ retuned from the Railway dashboard without a deploy.
 | Variable | Default | Notes |
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | Required for any AI output |
-| `SQUALL_AI_MODEL` | `openai/gpt-5.6-luna` | Analysis, backtest and chat. Chosen for reliability, not accuracy (see notes) |
+| `SQUALL_AI_MODEL` | `openai/gpt-6-luna` | Analysis, backtest and chat. Chosen for reliability, not accuracy (see notes) |
 | `SQUALL_UTILITY_MODEL` | `deepseek/deepseek-v4-flash` | Screener translation only. Keep it cheap |
 | `SQUALL_AI_FREQ_PENALTY` | 0 | **Non-zero + a frontier model = every request fails** ("No allowed providers"), because it turns on `require_parameters` |
 | `SQUALL_AI_TEMPERATURE` | 0.3 | Luna ignores it |

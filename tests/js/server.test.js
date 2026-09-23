@@ -982,7 +982,7 @@ test("both models are env-overridable and independent of each other", () => {
     { env: { ...process.env, encoding: undefined, ...env }, encoding: "utf8" }));
 
   const dflt = read({});
-  assert.equal(dflt.a, "openai/gpt-5.6-luna");
+  assert.equal(dflt.a, "openai/gpt-6-luna");
   assert.equal(dflt.u, "deepseek/deepseek-v4-flash");
 
   const swapped = read({ SQUALL_AI_MODEL: "deepseek/deepseek-v4-flash-0731" });
