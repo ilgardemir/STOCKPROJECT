@@ -215,6 +215,17 @@ function applyNewsDigest(payload, result) {
 }
 
 /**
+ * Non-fatal diagnostics shipped on the payload (like sec_diagnostics), so a fallback to
+ * Finnhub is explainable from the browser without server log access.
+ */
+function newsSearchStatus(result) {
+  if (!result) return { status: "off" };
+  const base = { ms: result.ms ?? null };
+  if (result.ok) return { status: "ok", ...base, citations: result.citations, kept: result.digest.items.length, dropped: result.digest.dropped };
+  return { status: "fallback", ...base, error: String(result.error || "unknown").slice(0, 300) };
+}
+
+/**
  * One search call. Never throws: every failure resolves { ok:false, error }.
  * `fetchImpl` is injectable so the whole path is testable offline.
  */
@@ -267,5 +278,5 @@ async function researchNews({ ticker, company, apiKey, model, engine, maxResults
 module.exports = {
   EVENTS, IMPACTS, DIRECTIONS, DIGEST_SCHEMA,
   buildNewsMessages, urlKey, citationsFrom, firstJson, sanitizeNewsDigest,
-  formatNewsSection, spliceNewsSection, digestToCompanyNews, applyNewsDigest, researchNews
+  formatNewsSection, spliceNewsSection, digestToCompanyNews, applyNewsDigest, newsSearchStatus, researchNews
 };

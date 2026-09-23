@@ -223,3 +223,15 @@ test("news: no API key, or SQUALL_NEWS_SEARCH=off, means no search and Finnhub s
   assert.deepEqual(runDigestScenario({}, probe), { r: null, calls: 0 });
   assert.deepEqual(runDigestScenario({ OPENROUTER_API_KEY: "k", SQUALL_NEWS_SEARCH: "off" }, probe), { r: null, calls: 0 });
 });
+
+test("news: the payload says why it fell back, so a fallback is explainable without server logs", () => {
+  const { newsSearchStatus } = require("../../news-research");
+  assert.deepEqual(newsSearchStatus(null), { status: "off" });
+  const fb = newsSearchStatus({ ok: false, error: "OpenRouter 400: " + "x".repeat(500), ms: 812 });
+  assert.equal(fb.status, "fallback");
+  assert.equal(fb.ms, 812);
+  assert.equal(fb.error.length, 300);
+  const ok = newsSearchStatus({ ok: true, ms: 9000, citations: 7,
+    digest: { items: [1, 2], dropped: { ungrounded: 1, stale: 0, invalid: 0, duplicate: 0 } } });
+  assert.deepEqual([ok.status, ok.citations, ok.kept, ok.dropped.ungrounded], ["ok", 7, 2, 1]);
+});

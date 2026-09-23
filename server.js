@@ -5,7 +5,7 @@ const os   = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { replayPolicy, parseReplayDecision, replayMessages, simulateReplay } = require("./replay-engine");
-const { researchNews, applyNewsDigest } = require("./news-research");
+const { researchNews, applyNewsDigest, newsSearchStatus } = require("./news-research");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -3443,7 +3443,8 @@ const handleRequest = async (req, res) => {
       // A scraper that never announced RESOLVED (an older build, a stub) still gets news.
       if (!newsJob) newsJob = getNewsDigest(payload.ticker, payload.company_name);
       send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Reading recent news" });
-      payload = applyNewsDigest(payload, await newsJob);
+      const newsResult = await newsJob;
+      payload = { ...applyNewsDigest(payload, newsResult), news_search: newsSearchStatus(newsResult) };
       if (res.writableEnded || res.destroyed) return;
 
       // Cached only after every failure branch above has been cleared, so an error
@@ -3520,7 +3521,8 @@ const handleRequest = async (req, res) => {
             }
             // No early RESOLVED hook on exec(), so the search runs after the scrape here.
             // This is the fallback route; the latency only matters on /analyze-stream.
-            payload = applyNewsDigest(payload, await getNewsDigest(payload.ticker, payload.company_name));
+            const newsResult = await getNewsDigest(payload.ticker, payload.company_name);
+            payload = { ...applyNewsDigest(payload, newsResult), news_search: newsSearchStatus(newsResult) };
             // Same data-only degradation as the streaming route: return the full payload
             // with the write-up missing rather than failing the whole request.
             const aiBudget = spendAi(COST.analyze_post.ai);
