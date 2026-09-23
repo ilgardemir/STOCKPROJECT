@@ -12,7 +12,11 @@
 const ticker = (process.argv[2] || "AAA").toUpperCase();
 const NO_INTRADAY = process.env.STUB_NO_INTRADAY === "1";
 
-for (let s = 0; s <= 6; s++) process.stderr.write(`STAGE|${s}|7|Stub stage ${s}\n`);
+for (let s = 0; s <= 6; s++) {
+  process.stderr.write(`STAGE|${s}|7|Stub stage ${s}\n`);
+  // Same early announcement the real scraper makes, so the server's news hook runs.
+  if (s === 1) process.stderr.write(`RESOLVED|${ticker}|${ticker} Stub Corp\n`);
+}
 
 // Deterministic wave so candles have visible structure to eyeball rather than a ramp.
 function dailyBars(n) {

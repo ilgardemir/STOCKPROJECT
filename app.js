@@ -702,6 +702,13 @@ const fInt = v => isNum(v) ? Math.round(v).toLocaleString("en-US") : "N/A";
 const signCls = (v, inv = false) => (!isNum(v) || v === 0) ? "" : ((inv ? v < 0 : v > 0) ? "green" : "red");
 const esc = t => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escAttr = t => esc(t).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+// Event enum from news-research.js. Finnhub's own categories ("company") aren't listed,
+// so fallback records simply render untagged.
+const NEWS_EVENT_LABELS = {
+  earnings: "Earnings", guidance: "Guidance", analyst: "Analyst", m_and_a: "M&A",
+  legal_regulatory: "Legal / regulatory", product: "Product", management: "Management",
+  capital_return: "Capital return", financing: "Financing", macro_sector: "Sector / macro"
+};
 function safeHttpUrl(value) {
   try {
     const url = new URL(String(value || ""));
@@ -2438,11 +2445,24 @@ function renderAll(d) {
        <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
        <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false }));
 
-  /* Sourced company news — last card, below the measurements. The model explains
-     these records but does not search for them. */
+  /* Sourced company news — last card, below the measurements. Either a server-side web
+     search digest (every item grounded in a cited URL) or Finnhub records as the
+     fallback; the analyst model explains these but never searches itself. */
   const news = Array.isArray(d.company_news) ? d.company_news : [];
   if (news.length) {
-    const newsBody = `<div class="news-list">${news.slice(0, 10).map(item => {
+    const digest = d.news_digest && typeof d.news_digest === "object" ? d.news_digest : null;
+    const overview = digest && digest.overview ? `<p class="news-overview">${esc(digest.overview)}</p>` : "";
+    const upcoming = digest && Array.isArray(digest.upcoming) && digest.upcoming.length
+      ? `<div class="news-upcoming"><span>Upcoming</span>${digest.upcoming.map(u => {
+          const href = safeHttpUrl(u.url);
+          const text = `${esc(u.date || "")} · ${esc(u.event || "")}`;
+          return `<div>${href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</div>`;
+        }).join("")}</div>`
+      : "";
+    const note = digest
+      ? "Found by an AI web search and kept only where the item links a source the search actually cited. Impact and direction tags are the search's triage, not a verdict; the linked publisher remains the source of truth."
+      : "Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.";
+    const newsBody = `${overview}<div class="news-list">${news.slice(0, 10).map(item => {
       const href = safeHttpUrl(item.url);
       let date = "Date unavailable";
       if (item.published_at) {
@@ -2451,12 +2471,18 @@ function renderAll(d) {
       }
       const headline = esc(item.headline || "Untitled story");
       const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
+      const tags = [];
+      if (item.impact === "high" || item.impact === "medium") tags.push(`<span class="news-tag">${item.impact === "high" ? "High" : "Medium"} impact</span>`);
+      if (NEWS_EVENT_LABELS[item.category]) tags.push(`<span class="news-tag">${NEWS_EVENT_LABELS[item.category]}</span>`);
+      if (item.direction === "positive" || item.direction === "negative")
+        tags.push(`<span class="news-tag ${item.direction === "positive" ? "up" : "down"}">${item.direction === "positive" ? "Positive" : "Negative"}</span>`);
       return `<article class="news-item">
         <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
         <h4>${title}</h4>
         ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
+        ${tags.length ? `<div class="news-tags">${tags.join("")}</div>` : ""}
       </article>`;
-    }).join("")}</div><p class="learn-note">Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.</p>`;
+    }).join("")}</div>${upcoming}<p class="learn-note">${note}</p>`;
     add("filings", card("news", "Recent Company News", newsBody, { count: news.length }));
   }
 

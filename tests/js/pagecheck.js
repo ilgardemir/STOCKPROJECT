@@ -111,6 +111,17 @@ const SEEDED_STORAGE = {
         event_risk: { pending_period_end: "2024-03-31", earnings_window: ["2024-04-14", "2024-04-30"],
           earnings_window_already_open: false, days_until_earnings_window_opens: 9, imminent: true,
           observed_filing_lag_days: { low: 25, median: 30, high: 35 }, results_announced: null, basis: "seed" },
+        // A web-search digest rather than Finnhub records, so the tags, storyline and
+        // upcoming list in the news card all execute on load.
+        data_sources: { news: "AI web search" },
+        company_news: [
+          { headline: "Pagecheck beats Q1", summary: "Revenue up 12%.", source: "Reuters", url: "https://reuters.com/a",
+            published_at: "2024-04-02T12:00:00Z", category: "earnings", impact: "high", direction: "positive" },
+          { headline: "Pagecheck sued", summary: "", source: "WSJ", url: "javascript:alert(1)",
+            published_at: "not a date", category: "company", impact: "low", direction: "neutral" }
+        ],
+        news_digest: { overview: "Earnings beat dominates.", model: "m", searched_at: "2024-04-03T00:00:00Z",
+          upcoming: [{ date: "late Apr 2024", event: "Annual meeting", url: "https://reuters.com/b" }] },
         price_history: Array.from({ length: 300 }, (_, i) => ({
           date: `2024-01-${String((i % 28) + 1).padStart(2, "0")}`,
           open: 10 + i * 0.01, high: 10.5 + i * 0.01, low: 9.5 + i * 0.01, close: 10.2 + i * 0.01, volume: 1000 + i

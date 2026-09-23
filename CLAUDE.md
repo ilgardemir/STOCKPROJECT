@@ -65,6 +65,7 @@ The screener adds an LLM step that turns the query into a recipe before `screene
 | `screener.py` | Multi-index screener. Job JSON on stdin, deterministic scoring, `PROGRESS\|pct\|label` on stderr |
 | `backtester.py` | Hidden point-in-time engine for `/ilgar`. `snapshot` and `outcomes` are kept separate; `ai_prompt` is built from `snapshot` only |
 | `replay-engine.js` | `/ilgar` research replay v2 policy (see below) |
+| `news-research.js` | Web-search news digest that replaces the Finnhub records in `ai_prompt` §14 (live analyzer only) |
 | `event_calendar.py` | `event_risk` (next results window). No dependencies; backtester re-exports it |
 | `financial_rules.py` | Business-model applicability, bid/ask validation |
 | `app.js` / `styles.css` | Shared by every page: one script, one stylesheet |
@@ -77,6 +78,8 @@ The screener adds an LLM step that turns the query into a recipe before `screene
   stderr (`STAGE|n|7|label`, `PROGRESS|`, `WARN|`). Serialize the whole payload to a string
   before writing, and always use `allow_nan=False`.
 - **The scraper has 7 stages**, also hard-coded as `STAGE_TOTAL` in server.js. Change both together.
+- After stage 1 the scraper prints `RESOLVED|TICKER|Company` on stderr; the server starts the news
+  search from it so the search overlaps the scrape. Without it the search starts after the scrape.
 - **Guard NaN before `int()`.** `int(x or 0)` does not guard, because NaN is truthy. Use `safe_int`
   (scraper) or `finite()` (screener).
 - Everything degrades to `N/A` rather than crashing (`YQData`, `safe_*`, `_sec_get`).
@@ -183,6 +186,13 @@ which hides it but does not protect it.
   Change both halves together.
 - The analysis instruction block must stay under 2,600 characters (a test enforces this).
 - `ai_prompt` §6b (`build_price_bar_block`) carries actual bars. Headlines are untrusted source material.
+- **§14 news is a web-search digest** (`news-research.js`), spliced in by the server over the
+  scraper's Finnhub §14 before `result` is sent and before caching. An item survives only if its
+  URL is one the search **cited** (annotations). Dates must fall inside the lookback window, and
+  labels are forced onto fixed enums. Finnhub records remain the fallback whenever the search is
+  off, fails, times out, grounds nothing or the budget is gone. The digest is cached per ticker
+  for 30 minutes and in-flight searches are shared. **Never use it on `/ilgar`**: a search
+  runs today and would leak post-cutoff news.
 
 ## Front end (`app.js`)
 
@@ -266,7 +276,12 @@ retuned from the Railway dashboard without a deploy.
 | `SQUALL_REASON_EFFORT` | `low` | Raise to `medium` before touching routing if depth looks thin |
 | `SQUALL_ANALYSIS_MAX` / `SQUALL_CHAT_MAX` | 16000 / 8000 | Ceilings, not targets |
 | `SQUALL_AI_PROVIDER_SORT` | `throughput` | `price` / `latency` |
-| `FINNHUB_API_KEY` | — | Quotes, profile, metrics, news, `/quotes` |
+| `SQUALL_NEWS_SEARCH` | on | `off` = Finnhub news only (instant revert) |
+| `SQUALL_NEWS_MODEL` | `openai/gpt-6-luna` | The search-and-digest call. Charged `COST.news` (3 credits) per real search |
+| `SQUALL_NEWS_ENGINE` | auto | `native` / `exa` / `parallel` / `perplexity`; unset lets OpenRouter pick |
+| `SQUALL_NEWS_TIMEOUT_MS` / `_CACHE_TTL_MS` | 45000 / 1800000 | Timeout is the longest the dashboard waits after the scrape |
+| `SQUALL_NEWS_MAX_RESULTS` / `_MAX_ITEMS` / `_LOOKBACK_DAYS` | 10 / 8 / 45 | Search hits, items kept for the prompt, window |
+| `FINNHUB_API_KEY` | — | Quotes, profile, metrics, fallback news, `/quotes` |
 | `FMP_API_KEY` | — | Optional cross-checks |
 | `SEC_USER_AGENT` | built-in | EDGAR requires a real UA |
 | `PORT`, `PYTHON_BIN` | 3000, `python3` | |

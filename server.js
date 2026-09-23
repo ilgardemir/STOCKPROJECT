@@ -5,6 +5,7 @@ const os   = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { replayPolicy, parseReplayDecision, replayMessages, simulateReplay } = require("./replay-engine");
+const { researchNews, applyNewsDigest } = require("./news-research");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -14,7 +15,8 @@ const SCRAPER_PATH = process.env.SQUALL_SCRAPER_PATH || "./scraperFinal.py";
 const SCREENER_PATH = process.env.SQUALL_SCREENER_PATH || "./screener.py";
 const BACKTESTER_PATH = process.env.SQUALL_BACKTESTER_PATH || "./backtester.py";
 const PORT        = process.env.PORT || 3000;
-// Interprets the structured payload; it never searches for market/news data.
+// Interprets the structured payload; it never searches for market/news data itself
+// (the separate NEWS_MODEL call below does that, before this model sees anything).
 // Env-overridable so a model can be swapped and rolled back from the Railway
 // dashboard, the same shape as every other knob here. That matters more than it
 // looks: a 15-case evaluation sweep costs ~23 minutes, and comparing two models
@@ -36,6 +38,14 @@ const AI_MODEL    = process.env.SQUALL_AI_MODEL || "openai/gpt-6-luna";
 // knob: this one is a cheap-and-fast job, and it should not be dragged upmarket just
 // because the analysis model was.
 const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4-flash";
+// Web-search news digest that replaces the Finnhub records in ai_prompt §14 (see
+// news-research.js). Finnhub stays as the silent fallback whenever this is off, fails,
+// times out or grounds nothing, so the switch below is a pure revert with no deploy.
+const NEWS_SEARCH  = process.env.SQUALL_NEWS_SEARCH !== "off";
+const NEWS_MODEL   = process.env.SQUALL_NEWS_MODEL || "openai/gpt-6-luna";
+// Unset = OpenRouter's auto choice (the model's native search where it has one, else Exa).
+const NEWS_ENGINE  = ["native", "exa", "parallel", "perplexity"].includes(process.env.SQUALL_NEWS_ENGINE)
+  ? process.env.SQUALL_NEWS_ENGINE : undefined;
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -226,6 +236,15 @@ const LIM = {
   // people analyzing the same ticker after the same piece of news.
   ANALYSIS_CACHE_TTL_MS: envInt("SQUALL_ANALYSIS_CACHE_TTL_MS", 300000),  // 5 min
   ANALYSIS_CACHE_MAX:    envInt("SQUALL_ANALYSIS_CACHE_MAX", 60),         // entries
+  // News digest. It starts as soon as the scraper names the ticker and runs beside the
+  // rest of the scrape, so NEWS_TIMEOUT_MS is mostly hidden; it is the longest the
+  // dashboard can be held after the scraper finishes. The digest outlives the analysis
+  // cache on purpose: news moves slower than a quote, and every miss is a paid search.
+  NEWS_TIMEOUT_MS:     envInt("SQUALL_NEWS_TIMEOUT_MS", 45000),
+  NEWS_CACHE_TTL_MS:   envInt("SQUALL_NEWS_CACHE_TTL_MS", 1800000),  // 30 min
+  NEWS_MAX_RESULTS:    envInt("SQUALL_NEWS_MAX_RESULTS", 10),        // search hits per call
+  NEWS_MAX_ITEMS:      envInt("SQUALL_NEWS_MAX_ITEMS", 8),           // items kept for the prompt
+  NEWS_LOOKBACK_DAYS:  envInt("SQUALL_NEWS_LOOKBACK_DAYS", 45),
   // Watchlist quotes (GET /quotes). Finnhub-only, never a scraper run, and deliberately
   // NOT charged through admit(): a watchlist refreshes on its own clock, and charging it
   // like an analysis would spend a visitor's hourly allowance on price ticks. It has its
@@ -269,6 +288,10 @@ const COST = {
   // refunding is not an option (there is no refund path, on purpose), so the cache is
   // checked BEFORE admission and the cheaper kind is charged from the start.
   analyze_cached: { ai: 10, scrape: 0, screen: 0 },
+  // One web-search call per ticker per NEWS_CACHE_TTL_MS, charged only on a real search
+  // (cache hits and shared in-flight searches are free). A search fee plus a few thousand
+  // tokens of results, so a fraction of an analysis rather than a tenth of one.
+  news:          { ai: 3,  scrape: 0, screen: 0 },
   // An exit re-review is a real extra call and must be charged — but it is not an
   // analysis. It sends a few hundred prompt tokens, caps output at 200 and runs with
   // reasoning off, against an analysis' ~5k prompt and 16k ceiling: roughly a sixteenth
@@ -387,7 +410,7 @@ function buildAiMessages(prompt, profile) {
       content: [
         "You are a quantitative financial analyst writing a thorough, multi-section read for an investor who can already see all the underlying data.",
         "Reason carefully before answering, then interpret — connect valuation, fundamentals, technicals, and institutional positioning into judgments. Never restate figures, rebuild tables, or list metrics for their own sake; cite a number only when it anchors a specific conclusion.",
-        "Be specific to this company, not generic. Use only the structured data and Finnhub source records supplied; never invent figures, strikes, expirations, or news events.",
+        "Be specific to this company, not generic. Use only the structured data and the dated news records in §14; never invent figures, strikes, expirations, or news events.",
       ].join(" ")
     },
     { role: "user", content: userContent }
@@ -2255,6 +2278,8 @@ function limitStats() {
     // is heading for a block, which is the one failure here that cannot be undone.
     providers: touchProviderHealth().sources,
     analysis_cache: analysisCacheStats(),
+    news: { enabled: !!newsSearchEnabled(), model: NEWS_MODEL, engine: NEWS_ENGINE || "auto",
+            searches: newsSearches, hits: newsHits, failures: newsFailures, cached: newsCache.size },
     quotes: quoteStats(),
     keys: buckets.size,
     top,
@@ -2362,6 +2387,50 @@ function putCachedAnalysis(q, payload) {
   while (analysisCache.size > LIM.ANALYSIS_CACHE_MAX) {
     analysisCache.delete(analysisCache.keys().next().value);
   }
+}
+
+// ─── News digest cache ────────────────────────────────────────────────────────
+// Keyed by resolved ticker and holding the PROMISE, so two visitors analyzing the same
+// ticker at once share one paid search instead of racing two. Failures are evicted as
+// soon as they settle, so a timeout is retried on the next analysis, not for 30 minutes.
+const newsCache = new Map();   // ticker → { promise, at }
+let newsSearches = 0, newsHits = 0, newsFailures = 0;
+
+function newsSearchEnabled() {
+  return NEWS_SEARCH && API_KEY && API_KEY !== "YOUR_OPENROUTER_KEY_HERE";
+}
+
+/** Resolves to researchNews()'s result, or null when search is off or unaffordable. Never rejects. */
+function getNewsDigest(ticker, company, researchImpl = researchNews) {
+  if (!newsSearchEnabled() || !ticker) return Promise.resolve(null);
+  const key = String(ticker).trim().toUpperCase();
+  const hit = newsCache.get(key);
+  if (hit && Date.now() - hit.at <= LIM.NEWS_CACHE_TTL_MS) { newsHits += 1; return hit.promise; }
+  newsCache.delete(key);
+  // Charged per real search. With the day's budget gone, the analysis keeps its Finnhub
+  // records rather than spending credits the write-up itself will need.
+  if (!spendAi(COST.news.ai).ok) return Promise.resolve(null);
+  newsSearches += 1;
+  const promise = researchImpl({
+    ticker: key, company, apiKey: API_KEY, model: NEWS_MODEL, engine: NEWS_ENGINE,
+    maxResults: LIM.NEWS_MAX_RESULTS, maxItems: LIM.NEWS_MAX_ITEMS,
+    lookbackDays: LIM.NEWS_LOOKBACK_DAYS, timeoutMs: LIM.NEWS_TIMEOUT_MS
+  }).catch(error => ({ ok: false, error: error.message, ms: 0 })).then(result => {
+    if (result && result.ok) {
+      const u = result.usage || {};
+      console.log(`news ${key}: ${result.digest.items.length} items, ${result.digest.upcoming.length} upcoming, ` +
+        `citations=${result.citations} dropped=${JSON.stringify(result.digest.dropped)} ` +
+        `tokens=${u.prompt_tokens ?? "?"}/${u.completion_tokens ?? "?"} cost=${u.cost ?? "?"} ${result.ms}ms`);
+    } else {
+      newsFailures += 1;
+      if (newsCache.get(key)?.promise === promise) newsCache.delete(key);
+      console.warn(`news ${key}: falling back to Finnhub — ${result ? result.error : "no result"}`);
+    }
+    return result;
+  });
+  newsCache.set(key, { promise, at: Date.now() });
+  while (newsCache.size > LIM.ANALYSIS_CACHE_MAX) newsCache.delete(newsCache.keys().next().value);
+  return promise;
 }
 
 function analysisCacheStats() {
@@ -3320,6 +3389,9 @@ const handleRequest = async (req, res) => {
       try { py.kill("SIGKILL"); } catch (_) {}
     }, LIM.SCRAPER_TIMEOUT_MS);
     let stdout = "", stderrTail = "", buf = "";
+    // Started the moment the scraper names the ticker, so the search overlaps the rest
+    // of the scrape instead of queueing behind it.
+    let newsJob = null;
 
     py.stderr.on("data", chunk => {
       buf += chunk.toString();
@@ -3330,6 +3402,9 @@ const handleRequest = async (req, res) => {
         if (line.startsWith("STAGE|")) {
           const [, k, n, label] = line.split("|");
           send("progress", { stage: Number(k), total: Number(n), label });
+        } else if (line.startsWith("RESOLVED|")) {
+          const [, t, ...name] = line.split("|");
+          if (!newsJob && t) newsJob = getNewsDigest(t, name.join("|"));
         } else if (line) {
           // Counted and logged even when the run goes on to succeed — a throttled run
           // that recovers is precisely the case the old tail-buffer-on-failure path
@@ -3365,8 +3440,15 @@ const handleRequest = async (req, res) => {
       catch { send("error", { error: "Failed to parse Python output.", detail: stdout.slice(0,500) }); return res.end(); }
       if (payload.error) { send("error", { error: payload.error }); return res.end(); }
 
+      // A scraper that never announced RESOLVED (an older build, a stub) still gets news.
+      if (!newsJob) newsJob = getNewsDigest(payload.ticker, payload.company_name);
+      send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Reading recent news" });
+      payload = applyNewsDigest(payload, await newsJob);
+      if (res.writableEnded || res.destroyed) return;
+
       // Cached only after every failure branch above has been cleared, so an error
-      // payload or a truncated run can never be served to the next visitor.
+      // payload or a truncated run can never be served to the next visitor. Cached WITH
+      // the news digest applied, so a hit replays the same §14 the dashboard showed.
       putCachedAnalysis(query, payload);
 
       // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
@@ -3436,6 +3518,9 @@ const handleRequest = async (req, res) => {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: payload.error })); return;
             }
+            // No early RESOLVED hook on exec(), so the search runs after the scrape here.
+            // This is the fallback route; the latency only matters on /analyze-stream.
+            payload = applyNewsDigest(payload, await getNewsDigest(payload.ticker, payload.company_name));
             // Same data-only degradation as the streaming route: return the full payload
             // with the write-up missing rather than failing the whole request.
             const aiBudget = spendAi(COST.analyze_post.ai);
@@ -3688,5 +3773,7 @@ module.exports = {
   // Model selection — exported so the env override is testable without a provider.
   AI_MODEL, UTILITY_MODEL,
   // Reasoning budget — exported so the absolute cap can be checked without a provider.
-  reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX
+  reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX,
+  // News digest cache — exported so sharing, eviction and budget gating are testable offline.
+  getNewsDigest, newsCache, NEWS_MODEL
 };
