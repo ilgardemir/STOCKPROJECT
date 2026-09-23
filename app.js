@@ -1658,6 +1658,230 @@ document.addEventListener("pointerdown", e => {
   const menu = document.getElementById("savedMenu"), btn = document.getElementById("savedBtn");
   if (!menu.contains(e.target) && !btn?.contains(e.target)) closeSavedMenu(false);
 });
+
+/* ════════════════ WATCHLIST ════════════════
+   Tickers someone follows, with a live price beside what their saved snapshot said. The
+   list is localStorage-only like everything else a visitor owns; prices are fetched from
+   GET /quotes and deliberately never persisted, since a stored quote is a stale quote.
+
+   The rate story matters more than the UI here. Prices refresh only while the popover is
+   open and the tab is visible, at most once per WATCH_REFRESH_MS, and the server answers
+   repeats from its own per-symbol cache — so an idle open tab costs nothing upstream. A
+   row never triggers an analysis by itself: opening one runs (or reopens) it explicitly. */
+const WATCH_STORAGE_KEY = "squall-watchlist-v1";
+const WATCH_MAX = 25;                // matches SQUALL_QUOTE_MAX_SYMBOLS' default
+const WATCH_REFRESH_MS = 60000;      // matches the server's quote TTL
+const WATCH_TICKER_RE = /^\^?[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,4})?$/;   // validateTickerFormat's
+let watchlist = [];                  // [{ t, at }]
+const watchQuotes = {};              // ticker → last /quotes row, memory only
+let watchFetchedAt = 0, watchTimer = null, watchInflight = false, watchNotice = "";
+
+function loadWatchlist() {
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(WATCH_STORAGE_KEY) || "[]"); } catch (_) { raw = []; }
+  if (!Array.isArray(raw)) raw = [];
+  const seen = new Set();
+  watchlist = raw.filter(r => r && typeof r.t === "string" && WATCH_TICKER_RE.test(r.t) && !seen.has(r.t) && seen.add(r.t))
+    .slice(0, WATCH_MAX).map(r => ({ t: r.t, at: Number(r.at) || Date.now() }));
+}
+function persistWatchlist() {
+  try { localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchlist)); return true; }
+  catch (_) { showStorageNotice("Browser storage is full — the watchlist change could not be saved."); return false; }
+}
+const isWatched = t => watchlist.some(r => r.t === t);
+function normalizeWatchTicker(raw) { return String(raw || "").trim().toUpperCase().replace(/^\$/, ""); }
+
+function addToWatchlist(raw) {
+  const t = normalizeWatchTicker(raw);
+  if (!WATCH_TICKER_RE.test(t)) return { ok: false, message: `"${String(raw).trim().slice(0, 12)}" isn't a ticker symbol.` };
+  if (isWatched(t)) return { ok: false, message: `${t} is already on the watchlist.` };
+  if (watchlist.length >= WATCH_MAX) return { ok: false, message: `The watchlist holds up to ${WATCH_MAX} tickers — remove one first.` };
+  watchlist.push({ t, at: Date.now() });
+  persistWatchlist();
+  return { ok: true, t };
+}
+function removeFromWatchlist(t) {
+  watchlist = watchlist.filter(r => r.t !== t);
+  delete watchQuotes[t];
+  persistWatchlist();
+}
+function toggleWatch(t) {
+  if (isWatched(t)) removeFromWatchlist(t); else addToWatchlist(t);
+  renderWatchlist(); syncWatchToggle();
+  if (isWatched(t)) refreshWatchQuotes(true);
+}
+
+/* What the saved snapshot said, if there is one — the baseline for "since snapshot". */
+function watchSnapshot(t) {
+  const d = sessions[t]?.data;
+  if (!d) return null;
+  const q = d.live_quote || {}, tech = (d.raw_data || {}).technicals || {};
+  const price = isNum(q.last_price) ? q.last_price : tech.current_price;
+  return { price: isNum(price) ? price : null, when: q.quote_time || q.fetched_at || d.today || null,
+    event: d.event_risk || null, name: d.company_name || "" };
+}
+
+/* The results window as seen from TODAY, not from the snapshot date: a snapshot taken a
+   month ago stored "results in ~30d", which is now "~0d" or already past. Only the window
+   dates are reused, never the stored day counts. A window that has closed says nothing. */
+function watchEventFlag(er, now = new Date()) {
+  if (!er || !Array.isArray(er.earnings_window) || er.earnings_window.length < 2) return null;
+  const day = s => { const d = new Date(String(s) + "T00:00:00"); return isNaN(d) ? null : d; };
+  const open = day(er.earnings_window[0]), close = day(er.earnings_window[1]);
+  if (!open || !close) return null;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (close < today) return null;
+  const title = `Estimated results window ${er.earnings_window[0]} to ${er.earnings_window[1]}, from SEC filing cadence at the snapshot date; not a confirmed date`;
+  if (open <= today) return { label: "Results due now", title };
+  const days = Math.round((open - today) / 86400000);
+  return days <= 21 ? { label: `Results ~${days}d`, title } : null;
+}
+
+function watchRowHtml(r) {
+  const q = watchQuotes[r.t], snap = watchSnapshot(r.t);
+  const hasPx = q && isNum(q.price);
+  const dayPct = hasPx && isNum(q.change_pct) ? q.change_pct / 100 : null;
+  const px = hasPx ? fUsd(q.price)
+    : q && q.status === "unknown" ? "Unknown" : q && (q.status === "deferred" || q.status === "error") ? "—" : "…";
+  const bits = [];
+  if (hasPx && snap && isNum(snap.price) && snap.price > 0) {
+    const since = q.price / snap.price - 1;
+    const when = snap.when ? new Date(String(snap.when).replace(" ", "T")) : null;
+    const whenLabel = when && !isNaN(when) ? when.toLocaleDateString([], { month: "short", day: "numeric" }) : "snapshot";
+    bits.push(`<span class="${signCls(since)}" title="Change since the saved analysis (${esc(fUsd(snap.price))})">${since >= 0 ? "+" : ""}${fPct(since, 1)} since ${esc(whenLabel)}</span>`);
+  } else if (!snap) {
+    bits.push(`<span>Not analyzed yet</span>`);
+  }
+  if (q && q.status === "stale") bits.push(`<span title="The quote provider is busy; this is the last known price">delayed ${Math.round((q.age_s || 0) / 60)}m</span>`);
+  if (q && q.status === "unknown") bits.push(`<span>No quote for this symbol</span>`);
+  const ev = watchEventFlag(snap && snap.event);
+  if (ev) bits.push(`<span class="watch-event" title="${escAttr(ev.title)}">${esc(ev.label)}</span>`);
+  return `<div class="watch-row" data-t="${escAttr(r.t)}">
+    <button class="watch-open" type="button" title="${sessions[r.t] ? "Open the saved analysis" : "Analyze"} ${escAttr(r.t)}">
+      <span class="watch-line"><b>${esc(r.t)}</b><span class="watch-px">${px}</span>${isNum(dayPct)
+        ? `<span class="pill ${dayPct >= 0 ? "up" : "down"}">${dayPct >= 0 ? "▲" : "▼"} ${fPct(Math.abs(dayPct))}</span>` : ""}</span>
+      ${bits.length ? `<span class="watch-sub">${bits.join('<i aria-hidden="true">·</i>')}</span>` : ""}
+    </button>
+    <button class="watch-del" type="button" aria-label="Remove ${escAttr(r.t)} from the watchlist" title="Remove">×</button>
+  </div>`;
+}
+
+function renderWatchlist() {
+  const rows = document.getElementById("watchRows");
+  const count = document.getElementById("watchCount");
+  if (count) count.textContent = watchlist.length ? String(watchlist.length) : "";
+  if (!rows) return;
+  rows.innerHTML = watchlist.length ? watchlist.map(watchRowHtml).join("")
+    : `<p class="watch-empty">Nothing watched yet. Add a ticker above, or use the ☆ beside a ticker you've analyzed.</p>`;
+  const stamp = document.getElementById("watchStamp");
+  if (stamp) stamp.textContent = watchFetchedAt ? `updated ${new Date(watchFetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const note = document.getElementById("watchNote");
+  if (note) note.textContent = watchNotice;
+  document.getElementById("watchRefresh")?.classList.toggle("spin", watchInflight);
+}
+
+async function refreshWatchQuotes(force) {
+  if (!watchlist.length || watchInflight) return;
+  if (!force && Date.now() - watchFetchedAt < WATCH_REFRESH_MS - 1000) return;
+  watchInflight = true; renderWatchlist();
+  try {
+    const res = await fetch(`/quotes?symbols=${encodeURIComponent(watchlist.map(r => r.t).join(","))}`, { cache: "no-store" });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 429) watchNotice = body.error || "Refreshing too often — try again in a moment.";
+    else if (!res.ok) watchNotice = body.error || "Prices could not be loaded right now.";
+    else if (body.available === false) watchNotice = body.message || "Live quotes are unavailable.";
+    else {
+      Object.assign(watchQuotes, body.quotes || {});
+      watchFetchedAt = Date.now();
+      const missing = Object.values(body.quotes || {}).filter(q => q.status === "deferred" || q.status === "error").length;
+      watchNotice = missing ? `${missing} price${missing === 1 ? "" : "s"} unavailable right now — the next refresh will try again.` : "";
+    }
+  } catch (_) {
+    watchNotice = "Prices could not be loaded — check your connection.";
+  } finally {
+    watchInflight = false;
+    renderWatchlist();
+  }
+}
+
+const watchMenuOpen = () => document.getElementById("watchMenu")?.classList.contains("open") || false;
+function openWatchMenu() {
+  const menu = document.getElementById("watchMenu"), btn = document.getElementById("watchBtn");
+  if (!menu || !btn) return;
+  closeSavedMenu(false);
+  menu.classList.add("open");
+  btn.setAttribute("aria-expanded", "true");
+  renderWatchlist();
+  refreshWatchQuotes(false);
+  clearInterval(watchTimer);
+  watchTimer = setInterval(() => { if (!document.hidden) refreshWatchQuotes(false); }, WATCH_REFRESH_MS);
+  (watchlist.length ? menu.querySelector(".watch-open") : document.getElementById("watchInput"))?.focus();
+}
+function closeWatchMenu(refocus) {
+  const menu = document.getElementById("watchMenu"), btn = document.getElementById("watchBtn");
+  if (!menu || !menu.classList.contains("open")) return;
+  menu.classList.remove("open");
+  btn?.setAttribute("aria-expanded", "false");
+  clearInterval(watchTimer); watchTimer = null;
+  if (refocus) btn?.focus();
+}
+function openWatchedTicker(t) {
+  closeWatchMenu(false);
+  if (sessions[t]) return switchTicker(t);
+  if (!IS_ANALYZER_PAGE) return gotoAnalyzer(t);
+  const input = document.getElementById("ticker");
+  if (input) { input.value = t; runAnalysis(); }
+}
+
+/* The ☆ in the ticker bar. #tickerBar is re-rendered wholesale by renderStrip, so the
+   toggle is wired by delegation and its pressed state is re-synced after every change. */
+function syncWatchToggle() {
+  const btn = document.getElementById("sWatch");
+  if (!btn) return;
+  const on_ = isWatched(btn.dataset.t);
+  btn.setAttribute("aria-pressed", on_ ? "true" : "false");
+  btn.textContent = on_ ? "★" : "☆";
+  btn.title = on_ ? `Remove ${btn.dataset.t} from the watchlist` : `Add ${btn.dataset.t} to the watchlist`;
+}
+
+loadWatchlist();
+renderWatchlist();
+on("watchBtn", "click", () => watchMenuOpen() ? closeWatchMenu(false) : openWatchMenu());
+on("watchRefresh", "click", () => refreshWatchQuotes(true));
+on("watchAdd", "submit", e => {
+  e.preventDefault();
+  const input = document.getElementById("watchInput");
+  const r = addToWatchlist(input?.value);
+  watchNotice = r.ok ? "" : r.message;
+  if (r.ok && input) input.value = "";
+  renderWatchlist(); syncWatchToggle();
+  if (r.ok) refreshWatchQuotes(true);
+});
+on("watchRows", "click", e => {
+  const row = e.target.closest?.(".watch-row");
+  if (!row) return;
+  if (e.target.closest(".watch-del")) { removeFromWatchlist(row.dataset.t); watchNotice = ""; renderWatchlist(); syncWatchToggle();
+    (document.querySelector("#watchRows .watch-open") || document.getElementById("watchInput"))?.focus(); return; }
+  if (e.target.closest(".watch-open")) openWatchedTicker(row.dataset.t);
+});
+on("watchMenu", "keydown", e => {
+  const opts = [...document.querySelectorAll("#watchMenu .watch-open")];
+  const from = opts.indexOf(document.activeElement);
+  if (from < 0) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); opts[(from + 1) % opts.length]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); opts[(from - 1 + opts.length) % opts.length]?.focus(); }
+});
+on("tickerBar", "click", e => { const b = e.target.closest?.("#sWatch"); if (b) toggleWatch(b.dataset.t); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && watchMenuOpen()) { e.stopPropagation(); closeWatchMenu(true); } }, true);
+document.addEventListener("pointerdown", e => {
+  if (!watchMenuOpen()) return;
+  const menu = document.getElementById("watchMenu"), btn = document.getElementById("watchBtn");
+  if (!menu.contains(e.target) && !btn?.contains(e.target)) closeWatchMenu(false);
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden && watchMenuOpen()) refreshWatchQuotes(false); });
+/* Another tab edited the list — follow it rather than overwrite it on our next write. */
+window.addEventListener("storage", e => { if (e.key === WATCH_STORAGE_KEY) { loadWatchlist(); renderWatchlist(); syncWatchToggle(); } });
+
 function switchTicker(t) {
   if (!sessions[t]) return;
   if (IS_SCREENER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the other page
@@ -1738,6 +1962,7 @@ function renderStrip(d) {
   if (!strip) return;
   strip.innerHTML = `
     <span id="sTicker">${esc(d.ticker)}</span>
+    <button id="sWatch" type="button" data-t="${escAttr(d.ticker)}" aria-pressed="false"></button>
     <span id="sCompany" title="${esc(d.company_name)}${q.exchange ? " · " + esc(q.exchange) : ""}">${esc(d.company_name)}</span>
     <span id="sPrice" title="Saved snapshot; Analyze refreshes the research">${fUsd(price)}</span>
     ${asOfStamp(q.quote_time || q.fetched_at || d.today)}
@@ -1749,6 +1974,7 @@ function renderStrip(d) {
           both for anyone who wants them without opening the card. */""}
     ${regime.label && regime.label !== "INSUFFICIENT DATA" ? `<span class="regime-badge" title="Historical price/volume classification; not a forecast">${esc(regime.label)}</span>` : ""}
     ${eventBadge(d.event_risk)}`;
+  syncWatchToggle();
   strip.classList.add("show");
   document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
 

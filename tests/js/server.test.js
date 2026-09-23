@@ -993,3 +993,71 @@ test("both models are env-overridable and independent of each other", () => {
   // An empty value is not a model name; it must fall back rather than send "".
   assert.equal(read({ SQUALL_AI_MODEL: "" }).a, dflt.a);
 });
+
+/* ── Watchlist quotes ─────────────────────────────────────────────────────── */
+function quoteServer() {
+  const s = require("../../server");
+  s.quoteCache.clear();
+  s.quoteUpstream.length = 0;
+  return s;
+}
+const finnhubOk = price => async () => ({ ok: true, status: 200, json: async () => ({ c: price, d: 1, dp: 0.5, pc: price - 1, h: price + 1, l: price - 2, t: 1758000000 }) });
+
+test("quote symbols are upper-cased, de-duplicated, format-checked and capped", () => {
+  const { parseQuoteSymbols, LIM } = quoteServer();
+  const { symbols, rejected } = parseQuoteSymbols("aapl, AAPL,msft,,brk.b,<script>,toolongticker");
+  assert.deepEqual(symbols, ["AAPL", "MSFT", "BRK.B"]);
+  assert.ok(rejected.includes("<SCRIPT>") && rejected.includes("TOOLONGTICKE"));
+  const many = Array.from({ length: LIM.QUOTE_MAX_SYMBOLS + 5 }, (_, i) => `A${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`);
+  assert.equal(parseQuoteSymbols(many.join(",")).symbols.length, LIM.QUOTE_MAX_SYMBOLS);
+});
+
+test("finnhub's zero price means an unknown symbol, not a quote of $0", () => {
+  const { normalizeFinnhubQuote } = quoteServer();
+  assert.equal(normalizeFinnhubQuote({ c: 0, d: null, dp: null, pc: 0, t: 0 }), null);
+  const q = normalizeFinnhubQuote({ c: 190.5, d: -1.5, dp: -0.78, pc: 192, h: 193, l: 189, t: 1758000000 });
+  assert.equal(q.price, 190.5); assert.equal(q.change_pct, -0.78); assert.match(q.quote_time, /^2025-09-/);
+});
+
+test("a cached quote is served without an upstream call, and concurrent misses share one", async () => {
+  const { resolveQuotes } = quoteServer();
+  let calls = 0;
+  const fetchImpl = async (...a) => { calls += 1; return finnhubOk(100)(...a); };
+  const [a, b] = await Promise.all([resolveQuotes(["QQQA"], { token: "t", fetchImpl }), resolveQuotes(["QQQA"], { token: "t", fetchImpl })]);
+  assert.equal(calls, 1);
+  assert.equal(a.QQQA.status, "fresh"); assert.equal(b.QQQA.price, 100);
+  const again = await resolveQuotes(["QQQA"], { token: "t", fetchImpl });
+  assert.equal(calls, 1);
+  assert.equal(again.QQQA.status, "fresh");
+});
+
+test("past the upstream budget a quote is served stale or deferred, never fetched", async () => {
+  const { resolveQuotes, LIM, quoteCache, quoteUpstream } = quoteServer();
+  quoteCache.set("OLDQ", { quote: { price: 50 }, at: Date.now() - LIM.QUOTE_TTL_MS - 5000 });
+  for (let i = 0; i < LIM.QUOTE_UPSTREAM_PER_MIN; i++) quoteUpstream.push(Date.now());
+  let calls = 0;
+  const r = await resolveQuotes(["OLDQ", "NEWQ"], { token: "t", fetchImpl: async () => { calls += 1; return finnhubOk(1)(); } });
+  assert.equal(calls, 0);
+  assert.equal(r.OLDQ.status, "stale"); assert.equal(r.OLDQ.price, 50);
+  assert.equal(r.NEWQ.status, "deferred");
+});
+
+test("an upstream failure keeps the last known quote instead of erasing it", async () => {
+  const { resolveQuotes, LIM, quoteCache } = quoteServer();
+  quoteCache.set("FAILQ", { quote: { price: 75 }, at: Date.now() - LIM.QUOTE_TTL_MS - 1000 });
+  const r = await resolveQuotes(["FAILQ", "GONEQ"], { token: "t", fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({}) }) });
+  assert.equal(r.FAILQ.status, "stale"); assert.equal(r.FAILQ.price, 75);
+  assert.equal(r.GONEQ.status, "error");
+});
+
+test("the quote gate is per client and does not draw on the analysis allowance", () => {
+  const { admitQuotes, LIM, buckets } = quoteServer();
+  const req = { socket: { remoteAddress: "203.0.113.77" }, headers: {} };
+  const before = buckets.get("203.0.113.77");
+  const now = Date.UTC(2026, 8, 23, 12, 0, 5);
+  for (let i = 0; i < LIM.QUOTE_IP_PER_MIN; i++) assert.equal(admitQuotes(req, now).ok, true);
+  const denied = admitQuotes(req, now);
+  assert.equal(denied.ok, false); assert.ok(denied.retryAfter > 0 && denied.retryAfter <= 60);
+  assert.equal(admitQuotes(req, now + 60000).ok, true);
+  assert.equal(buckets.get("203.0.113.77"), before);
+});

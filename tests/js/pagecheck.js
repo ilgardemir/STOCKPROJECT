@@ -349,7 +349,7 @@ for (const [page, scripts] of JOBS) {
  * app.js, an include that did not expand, an element an extension removed. The pages above
  * prove app.js runs when the DOM is perfect; this proves it survives when it is not.
  */
-const FRAGILE_CHROME = ["themeBtn", "themeMenu", "profileBtn", "tickerBar", "ticker", "searchForm"];
+const FRAGILE_CHROME = ["themeBtn", "themeMenu", "profileBtn", "tickerBar", "ticker", "searchForm", "watchBtn", "watchMenu", "watchRows", "watchAdd"];
 for (const page of ["index.html", "screener.html", "ilgar.html"]) {
   const scripts = unitsOf(assemble(page));
   const r = run(page, scripts, undefined, FRAGILE_CHROME);

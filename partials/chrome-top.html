@@ -54,6 +54,29 @@
     </div>
   </form>
   <div class="util-rail">
+    <!-- Watchlist. Same popover idiom as Saved, but always shown: an empty watchlist is
+         the state in which someone needs to find it. Rows are filled by renderWatchlist();
+         prices come from GET /quotes (Finnhub only — never a scraper run). -->
+    <button id="watchBtn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="watchMenu" title="Watchlist — live prices for tickers you follow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z"/></svg>
+      <span>Watch</span><b id="watchCount" aria-hidden="true"></b>
+    </button>
+    <span class="rail-div" aria-hidden="true"></span>
+    <div id="watchMenu" role="dialog" aria-label="Watchlist">
+      <div class="watch-head">
+        <span class="menu-head">Watchlist</span>
+        <span id="watchStamp" class="as-of" aria-live="polite"></span>
+        <button id="watchRefresh" type="button" title="Refresh prices" aria-label="Refresh prices">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+        </button>
+      </div>
+      <form id="watchAdd" autocomplete="off">
+        <input id="watchInput" type="text" placeholder="Add ticker, e.g. MSFT" maxlength="10" spellcheck="false" aria-label="Ticker to add to the watchlist">
+        <button type="submit">Add</button>
+      </form>
+      <div id="watchRows"></div>
+      <p id="watchNote" class="watch-note" role="status"></p>
+    </div>
     <!-- Saved work was a permanent 37px tab strip under the header. It is on-demand
          information — you look at it when you want to switch — so it costs nothing here
          and 37px there. Same popover idiom as #themeMenu below; #analysisTabs keeps its

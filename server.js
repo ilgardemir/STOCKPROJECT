@@ -226,6 +226,17 @@ const LIM = {
   // people analyzing the same ticker after the same piece of news.
   ANALYSIS_CACHE_TTL_MS: envInt("SQUALL_ANALYSIS_CACHE_TTL_MS", 300000),  // 5 min
   ANALYSIS_CACHE_MAX:    envInt("SQUALL_ANALYSIS_CACHE_MAX", 60),         // entries
+  // Watchlist quotes (GET /quotes). Finnhub-only, never a scraper run, and deliberately
+  // NOT charged through admit(): a watchlist refreshes on its own clock, and charging it
+  // like an analysis would spend a visitor's hourly allowance on price ticks. It has its
+  // own two gates instead. QUOTE_UPSTREAM_PER_MIN is the provider-standing one — it is
+  // site-wide, and set to half of Finnhub's ~60/min free tier because every analysis
+  // spends ~4 Finnhub calls out of the same key. Cache hits never touch it.
+  QUOTE_TTL_MS:           envInt("SQUALL_QUOTE_TTL_MS", 60000),
+  QUOTE_MAX_SYMBOLS:      envInt("SQUALL_QUOTE_MAX_SYMBOLS", 25),
+  QUOTE_UPSTREAM_PER_MIN: envInt("SQUALL_QUOTE_UPSTREAM_PER_MIN", 30),
+  QUOTE_IP_PER_MIN:       envInt("SQUALL_QUOTE_IP_PER_MIN", 6),
+  QUOTE_CACHE_MAX:        envInt("SQUALL_QUOTE_CACHE_MAX", 1000),
   MAX_CHAT_BODY:       envInt("SQUALL_MAX_CHAT_BODY", 262144),   // 256 KiB
   MAX_ANALYZE_BODY:    envInt("SQUALL_MAX_ANALYZE_BODY", 4096),
   MAX_CHAT_MESSAGES:   envInt("SQUALL_MAX_CHAT_MESSAGES", 24),
@@ -2244,6 +2255,7 @@ function limitStats() {
     // is heading for a block, which is the one failure here that cannot be undone.
     providers: touchProviderHealth().sources,
     analysis_cache: analysisCacheStats(),
+    quotes: quoteStats(),
     keys: buckets.size,
     top,
     state_file: { path: LIM.STATE_PATH, mtime },
@@ -2360,6 +2372,153 @@ function analysisCacheStats() {
     misses: analysisCacheMisses,
     hit_rate: total ? Number((analysisCacheHits / total).toFixed(3)) : null,
     ttl_s: Math.round(LIM.ANALYSIS_CACHE_TTL_MS / 1000)
+  };
+}
+
+// ── Watchlist quotes ──────────────────────────────────────────────────────────
+// The watchlist asks "where is it now?" for up to QUOTE_MAX_SYMBOLS tickers at once, on
+// a timer. Answered by the scraper that would be a full 7-stage run per symbol against
+// Yahoo and SEC — the exact pressure "Protecting provider standing" exists to prevent —
+// so this path is one Finnhub /quote per symbol and nothing else, behind three layers:
+//   1. a per-symbol cache (QUOTE_TTL_MS), so twenty visitors watching AAPL cost one call;
+//   2. in-flight coalescing, so two refreshes landing together share one request;
+//   3. a site-wide upstream window (QUOTE_UPSTREAM_PER_MIN). Past it a symbol is served
+//      stale if we have it and marked `deferred` if not — never retried harder.
+// A 429 stops upstream calls for the rest of the minute and is recorded under
+// providers.finnhub in /stats, the same place the engines report it.
+const quoteCache = new Map();      // symbol → { quote, at }
+const quoteInflight = new Map();   // symbol → Promise<quote|null>
+const quoteUpstream = [];          // timestamps of upstream calls in the last minute
+const quoteClients = new Map();    // client key → { minute, n }
+let quoteBlockedUntil = 0;
+
+function quoteUpstreamRoom(now) {
+  while (quoteUpstream.length && now - quoteUpstream[0] > 60000) quoteUpstream.shift();
+  return now >= quoteBlockedUntil && quoteUpstream.length < LIM.QUOTE_UPSTREAM_PER_MIN;
+}
+
+function recordQuoteWarning(message, rateLimited) {
+  const h = touchProviderHealth();
+  const s = h.sources.finnhub || (h.sources.finnhub = { warn: 0, rate_limited: 0, last: null, last_at: null });
+  s.warn += 1;
+  if (rateLimited) s.rate_limited += 1;
+  s.last = `quotes: ${message}`.slice(0, 200);
+  s.last_at = new Date().toISOString();
+  console.warn(`QUOTES ${message.slice(0, 300)}`);
+}
+
+/** Finnhub's /quote shape → ours. c === 0 with no timestamp is how it says "unknown symbol". */
+function normalizeFinnhubQuote(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const num = v => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const price = num(raw.c);
+  if (!price || price <= 0) return null;
+  return {
+    price,
+    change: num(raw.d),
+    change_pct: num(raw.dp),
+    prev_close: num(raw.pc),
+    high: num(raw.h),
+    low: num(raw.l),
+    quote_time: num(raw.t) ? new Date(raw.t * 1000).toISOString() : null
+  };
+}
+
+/** Parse ?symbols=… into a de-duplicated, format-checked, capped list. */
+function parseQuoteSymbols(raw) {
+  const seen = new Set();
+  const symbols = [], rejected = [];
+  for (const part of String(raw || "").split(",")) {
+    const t = part.trim().toUpperCase();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    if (!validateTickerFormat(t).ok) { rejected.push(t.slice(0, 12)); continue; }
+    if (symbols.length >= LIM.QUOTE_MAX_SYMBOLS) { rejected.push(t); continue; }
+    symbols.push(t);
+  }
+  return { symbols, rejected };
+}
+
+/** Per-client minute window. Separate from admit() on purpose — see the LIM note. */
+function admitQuotes(req, now = Date.now()) {
+  const key = clientKey(req);
+  const minute = Math.floor(now / 60000);
+  let e = quoteClients.get(key);
+  if (!e || e.minute !== minute) { e = { minute, n: 0 }; quoteClients.set(key, e); }
+  if (e.n >= LIM.QUOTE_IP_PER_MIN) return { ok: false, retryAfter: Math.max(1, 60 - Math.floor((now % 60000) / 1000)) };
+  e.n += 1;
+  if (quoteClients.size > LIM.MAX_KEYS) quoteClients.delete(quoteClients.keys().next().value);
+  return { ok: true };
+}
+
+async function fetchFinnhubQuote(symbol, token, fetchImpl = fetch) {
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(token)}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetchImpl(url, { signal: ctrl.signal });
+    if (res.status === 429) {
+      quoteBlockedUntil = Date.now() + 60000;
+      recordQuoteWarning("HTTP 429 from Finnhub /quote; pausing upstream quotes for 60s", true);
+      return { failed: true };
+    }
+    if (!res.ok) { recordQuoteWarning(`HTTP ${res.status} from Finnhub /quote for ${symbol}`, false); return { failed: true }; }
+    return { quote: normalizeFinnhubQuote(await res.json()) };
+  } catch (error) {
+    recordQuoteWarning(`Finnhub /quote ${symbol}: ${error && error.name === "AbortError" ? "timeout" : (error && error.message) || error}`, false);
+    return { failed: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Resolve quotes for a list of symbols. Each result carries a `status`:
+ *   fresh    — from cache inside the TTL, or fetched just now
+ *   stale    — upstream unavailable or over budget; last known value with its age
+ *   deferred — over budget and nothing cached; the client should try again later
+ *   unknown  — Finnhub answered but does not know the symbol
+ *   error    — the fetch failed and nothing is cached
+ */
+async function resolveQuotes(symbols, { token = process.env.FINNHUB_API_KEY, fetchImpl = fetch, now = Date.now() } = {}) {
+  const out = {};
+  await Promise.all(symbols.map(async symbol => {
+    const hit = quoteCache.get(symbol);
+    const age = hit ? now - hit.at : Infinity;
+    if (hit && age <= LIM.QUOTE_TTL_MS) {
+      out[symbol] = hit.quote ? { status: "fresh", ...hit.quote, age_s: Math.round(age / 1000) } : { status: "unknown" };
+      return;
+    }
+    let pending = quoteInflight.get(symbol);
+    if (!pending) {
+      if (!token || !quoteUpstreamRoom(Date.now())) {
+        out[symbol] = hit && hit.quote ? { status: "stale", ...hit.quote, age_s: Math.round(age / 1000) } : { status: token ? "deferred" : "error" };
+        return;
+      }
+      quoteUpstream.push(Date.now());
+      pending = fetchFinnhubQuote(symbol, token, fetchImpl).then(r => {
+        if (!r.failed) {
+          quoteCache.delete(symbol);
+          quoteCache.set(symbol, { quote: r.quote, at: Date.now() });
+          while (quoteCache.size > LIM.QUOTE_CACHE_MAX) quoteCache.delete(quoteCache.keys().next().value);
+        }
+        return r;
+      }).finally(() => quoteInflight.delete(symbol));
+      quoteInflight.set(symbol, pending);
+    }
+    const r = await pending;
+    if (!r.failed) out[symbol] = r.quote ? { status: "fresh", ...r.quote, age_s: 0 } : { status: "unknown" };
+    else out[symbol] = hit && hit.quote ? { status: "stale", ...hit.quote, age_s: Math.round(age / 1000) } : { status: "error" };
+  }));
+  return out;
+}
+
+function quoteStats() {
+  return {
+    cached: quoteCache.size,
+    upstream_last_min: quoteUpstream.filter(t => Date.now() - t <= 60000).length,
+    upstream_limit_per_min: LIM.QUOTE_UPSTREAM_PER_MIN,
+    paused: Date.now() < quoteBlockedUntil
   };
 }
 
@@ -2625,6 +2784,29 @@ const handleRequest = async (req, res) => {
     if (!ok) { sendNotFound(req, res, true); return; }
     res.writeHead(200, {"Content-Type":"application/json", "Cache-Control":"no-store"});
     res.end(JSON.stringify(limitStats(), null, 2));
+    return;
+  }
+
+  // Watchlist quotes. Plain JSON, not SSE — a refresh is one short request — so a limit
+  // can be a real 429 with a body app.js reads. Never spawns anything and never spends AI.
+  if (req.method === "GET" && req.url.startsWith("/quotes")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
+    const { symbols, rejected } = parseQuoteSymbols(url.searchParams.get("symbols"));
+    if (!process.env.FINNHUB_API_KEY) {
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ available: false, message: "Live quotes are not configured on this server.", quotes: {}, rejected }));
+      return;
+    }
+    const gate = admitQuotes(req);
+    if (!gate.ok) {
+      res.writeHead(429, { ...headers, "Retry-After": String(gate.retryAfter) });
+      res.end(JSON.stringify({ error: "Refreshing too often — try again in a moment.", limited: true, retry_after: gate.retryAfter }));
+      return;
+    }
+    const quotes = await resolveQuotes(symbols);
+    res.writeHead(200, headers);
+    res.end(JSON.stringify({ available: true, quotes, rejected, ttl_s: Math.round(LIM.QUOTE_TTL_MS / 1000), fetched_at: new Date().toISOString() }));
     return;
   }
 
@@ -3499,6 +3681,8 @@ module.exports = {
   LIM, COST, clientKey, clientIp, isPrivateAddr, expandV6,
   admit, spendAi, buckets, globals, sweepBuckets, loadLimitState, flushLimitState,
   acquirePy, readBody, validateChatPayload, limitStats,
+  // Watchlist quotes — exported so the cache and upstream budget are testable offline.
+  parseQuoteSymbols, normalizeFinnhubQuote, resolveQuotes, admitQuotes, quoteCache, quoteUpstream,
   // AI stream termination — exported so truncation detection is testable without a provider.
   newAiStreamState, readAiStreamLine, aiStreamTruncated, describeAiStream, AI_SAMPLING,
   // Model selection — exported so the env override is testable without a provider.

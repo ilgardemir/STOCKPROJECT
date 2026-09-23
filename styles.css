@@ -229,8 +229,7 @@ body.hero-up .util-rail { margin-left: auto; }
 .util-rail > button[hidden], .rail-div[hidden] { display: none; }
 /* :first-of-type is positional and still resolves to #savedBtn while it is hidden, so the
    rail's left cap has to be handed over explicitly rather than inferred. */
-#savedBtn[hidden] ~ #screenerNav { border-radius: calc(var(--radius-md) - 1px) 0 0 calc(var(--radius-md) - 1px); }
-#savedBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
+#savedBtn[aria-expanded="true"], #watchBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
 #screenerNav:hover svg { transform: translateX(2px); }
 #themeBtn { width: 38px; padding: 0; }
 #themeBtn svg { width: 16px; height: 16px; }
@@ -416,9 +415,12 @@ body.has-analysis #searchForm { max-width: 280px; }
    are the analysis. Same collapse the rail already does at 720px, keyed to has-analysis so
    the landing page keeps its labels. */
 @media (max-width: 1400px) {
-  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #savedBtn span { display: none; }
+  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #savedBtn span, body.has-analysis #watchBtn span { display: none; }
   body.has-analysis .util-rail > button { width: 38px; padding: 0; }
   body.has-analysis #savedBtn { width: auto; padding: 0 9px; }
+  /* The watchlist gave the ticker bar's badges ~80px less room here. Its count is the
+     part that can go — the popover shows the rows — so it drops to a bare 38px icon. */
+  body.has-analysis #watchCount { display: none; }
 }
 @media (max-width: 1180px) { #tickerBar .regime-badge:not(.event-badge) { display: none; } }
 @media (max-width: 1060px) { #tickerBar .sector-badge { display: none; } }
@@ -438,6 +440,56 @@ body.has-analysis #searchForm { max-width: 280px; }
   background: var(--accent-soft); border-radius: var(--radius-xs); padding: 1px 5px; margin-left: 1px; }
 #savedCount:empty { display: none; }
 #analysisTabs { display: flex; flex-direction: column; gap: 2px; }
+/* Watchlist popover. Same housing as #savedMenu. A row is two lines — ticker, price and
+   the day's move on a shared axis, then what changed since the saved snapshot — because
+   the second line is the reason to keep a watchlist rather than a bookmark. */
+#watchMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 70; display: none;
+  width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - var(--header-h) - 24px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 6px; }
+#watchMenu.open { display: block; animation: sugIn .14s var(--ease-out); }
+#watchCount { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--radius-xs); padding: 1px 5px; margin-left: 1px; }
+#watchCount:empty { display: none; }
+.watch-head { display: flex; align-items: center; gap: 8px; }
+.watch-head .menu-head { flex: 1; }
+#watchRefresh { appearance: none; border: 0; background: none; color: var(--ink-dim); cursor: pointer;
+  width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--radius-xs); }
+#watchRefresh:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+#watchRefresh svg { width: 14px; height: 14px; }
+#watchRefresh.spin svg { animation: watchSpin .8s linear infinite; }
+@keyframes watchSpin { to { transform: rotate(360deg); } }
+#watchAdd { display: flex; gap: 6px; padding: 0 4px 8px; }
+#watchInput { flex: 1; min-width: 0; height: 28px; padding: 0 9px; font-family: var(--mono); font-size: var(--t-data);
+  text-transform: uppercase; color: var(--ink-bright); background: var(--chrome-0); border: 1px solid var(--rule); border-radius: var(--radius-xs); }
+#watchInput::placeholder { text-transform: none; color: var(--ink-dim); }
+#watchInput:focus { outline: none; border-color: var(--accent); }
+#watchAdd button { appearance: none; height: 28px; padding: 0 11px; font-family: var(--mono); font-size: var(--t-micro); font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: var(--radius-xs); cursor: pointer; }
+#watchAdd button:hover { background: var(--chrome-hi); }
+#watchRows { display: flex; flex-direction: column; gap: 2px; }
+.watch-row { display: flex; align-items: stretch; border-radius: var(--radius-xs); color: var(--ink); }
+.watch-row:hover { background: var(--chrome-hi); }
+.watch-open, .watch-del { appearance: none; border: 0; background: none; color: inherit; cursor: pointer; }
+.watch-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding: 7px 5px 7px 10px; text-align: left; }
+.watch-line { display: flex; align-items: baseline; gap: 8px; }
+.watch-line b { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; letter-spacing: .02em; color: var(--ink-bright); }
+.watch-px { font-family: var(--mono); font-size: var(--t-data); font-weight: 600; color: var(--ink-bright); }
+.watch-line .pill { font-size: var(--t-micro); padding: 1px 7px; }
+.watch-sub { display: flex; flex-wrap: wrap; gap: 3px 6px; font-family: var(--mono); font-size: var(--t-micro); color: var(--ink-dim); }
+.watch-sub i { font-style: normal; }
+.watch-sub .green { color: var(--up); } .watch-sub .red { color: var(--down); }
+.watch-sub .watch-event { color: var(--warn); }
+.watch-del { width: 30px; border-radius: var(--radius-sm); font-size: 17px; color: var(--ink-dim); opacity: .65; }
+.watch-del:hover { opacity: 1; color: var(--down); background: var(--down-soft); }
+.watch-empty { margin: 0; padding: 4px 8px 10px; font-size: var(--t-data); line-height: var(--lh-tight); color: var(--ink-dim); }
+.watch-note { margin: 0; padding: 0 8px; font-family: var(--mono); font-size: var(--t-micro); color: var(--warn); }
+.watch-note:not(:empty) { padding: 6px 8px 4px; }
+/* The ticker bar's star. Direction colors are reserved, so "watched" is the accent. */
+#sWatch { flex-shrink: 0; appearance: none; border: 0; background: none; cursor: pointer; padding: 0 2px; margin-left: -4px;
+  font-size: var(--t-lead); line-height: 1; color: var(--ink-dim); }
+#sWatch:hover { color: var(--ink-bright); }
+#sWatch[aria-pressed="true"] { color: var(--accent); }
 #analysisTabs:empty::after { content: "Nothing saved yet."; display: block; padding: 4px 8px 10px; font-size: var(--t-data); color: var(--ink-dim); }
 /* Saved tabs can fail for one reason the user can act on — a full origin storage budget —
    and that failure used to be entirely silent. Warn role, not a new hue: --warn already
@@ -808,7 +860,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 @media (max-width: 900px) { #analyzeBtn { width: 30px; padding: 0; justify-content: center; } #analyzeBtn .btn-label { display: none; } }
 @media (max-width: 720px) {
   /* Rail collapses to icons — the labels go, the controls stay. */
-  #profileBtn span, #screenerNav span, #savedBtn span { display: none; }
+  #profileBtn span, #screenerNav span, #savedBtn span, #watchBtn span { display: none; }
   .util-rail > button { width: 38px; padding: 0; }
   /* The search box sits far right in a crowded header, so a dropdown anchored to it
      overhangs the left edge of the screen. Anchor to the viewport instead. */
@@ -879,8 +931,8 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   body[data-page="notfound"] > header .wordmark .wm-title { display: inline; font-size: 16px; }
 
   #tickerSuggest { top: calc(var(--header-h) + 6px); right: 10px; width: calc(100vw - 20px); }
-  #savedMenu, #themeMenu { position: fixed; top: calc(var(--header-h) + 6px); right: 10px; max-width: calc(100vw - 20px); }
-  body.hero-up #savedMenu, body.hero-up #themeMenu { top: 58px; }
+  #savedMenu, #themeMenu, #watchMenu { position: fixed; top: calc(var(--header-h) + 6px); right: 10px; max-width: calc(100vw - 20px); }
+  body.hero-up #savedMenu, body.hero-up #themeMenu, body.hero-up #watchMenu { top: 58px; }
 
   #progressWrap.show { height: 42px; }
   #progressInner { gap: 9px; padding: 0 12px; }

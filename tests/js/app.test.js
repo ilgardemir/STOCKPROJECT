@@ -764,3 +764,49 @@ test("volume labels stay short enough for a 46px band", () => {
   assert.equal(APP.fVolShort(842), "842");
   assert.equal(APP.fVolShort(null), "");
 });
+
+/* ── Watchlist ────────────────────────────────────────────────────────────── */
+test("the watchlist normalizes, rejects junk and duplicates, and caps its length", () => {
+  const app = loadApp();
+  assert.equal(app("addToWatchlist")(" $aapl ").ok, true);
+  assert.equal(app("isWatched")("AAPL"), true);
+  assert.match(app("addToWatchlist")("AAPL").message, /already/);
+  assert.match(app("addToWatchlist")("not a ticker").message, /isn't a ticker/);
+  for (let i = 0; app("watchlist.length") < app("WATCH_MAX"); i++)
+    app("addToWatchlist")(`W${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`);
+  assert.match(app("addToWatchlist")("ZZZZ").message, /up to/);
+  // Persisted, and reloaded through the same validation.
+  const stored = JSON.parse(app("localStorage.getItem(WATCH_STORAGE_KEY)"));
+  assert.equal(stored.length, app("WATCH_MAX"));
+  app("localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify([{t:'MSFT'},{t:'MSFT'},{t:'<b>'},{x:1}]))");
+  app("loadWatchlist()");
+  assert.deepEqual(JSON.parse(app("JSON.stringify(watchlist.map(r => r.t))")), ["MSFT"]);
+});
+
+test("a watched results window is judged from today, not from the snapshot's day counts", () => {
+  const flag = APP.watchEventFlag;
+  const now = new Date(2026, 8, 23);
+  // Stored "91 days away" at snapshot time, but the window now opens in 9 days.
+  const er = { earnings_window: ["2026-10-02", "2026-10-20"], days_until_earnings_window_opens: 91, imminent: false };
+  assert.equal(flag(er, now).label, "Results ~9d");
+  assert.equal(flag({ earnings_window: ["2026-09-20", "2026-09-30"] }, now).label, "Results due now");
+  assert.equal(flag({ earnings_window: ["2026-08-01", "2026-08-20"] }, now), null);   // window passed
+  assert.equal(flag({ earnings_window: ["2026-12-01", "2026-12-20"] }, now), null);   // too far off
+  assert.equal(flag(null, now), null);
+});
+
+test("a watch row shows the move since the saved snapshot and never invents a price", () => {
+  const app = loadApp();
+  app("addToWatchlist")("NVDA");
+  app(`sessions.NVDA = { data: { ticker: "NVDA", live_quote: { last_price: 100, quote_time: "2026-09-01 16:00" } } }`);
+  app(`watchQuotes.NVDA = { status: "fresh", price: 110, change_pct: -1.25 }`);
+  const html = app("watchRowHtml")({ t: "NVDA" });
+  assert.match(html, /\$110\.00/);
+  assert.match(html, /\+10\.0% since/);
+  assert.match(html, /▼ 1\.25%/);
+  app(`watchQuotes.NVDA = { status: "deferred" }`);
+  const pending = app("watchRowHtml")({ t: "NVDA" });
+  assert.doesNotMatch(pending, /since/);
+  assert.match(pending, /watch-px">—/);
+  assert.match(app("watchRowHtml")({ t: "AMD" }), /Not analyzed yet/);
+});
