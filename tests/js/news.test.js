@@ -298,3 +298,12 @@ test("news: SQUALL_NEWS_EXCLUDE_DOMAINS overrides the built-in list, and none cl
   assert.deepEqual(read({ SQUALL_NEWS_EXCLUDE_DOMAINS: " Fool.com, ,reddit.com " }), ["fool.com", "reddit.com"]);
   assert.deepEqual(read({ SQUALL_NEWS_EXCLUDE_DOMAINS: "none" }), []);
 });
+
+test("news: a source written as a markdown link or URL is reduced to a publisher name", () => {
+  const url = "https://www.sec.gov/Archives/edgar/data/1045810/x.htm";
+  const src = source => sanitizeNewsDigest({ items: [item({ url, source })] }, { citations: cite(url), today: TODAY }).items[0].source;
+  assert.equal(src("[sec.gov](https://www.sec.gov/Archives/edgar/data/1045810/000104581026000078/nvd"), "sec.gov");
+  assert.equal(src("[NVIDIA](https://investor.nvidia.com/news)"), "NVIDIA");
+  assert.equal(src("https://www.sec.gov/Archives/edgar"), "sec.gov");
+  assert.equal(src("Reuters"), "Reuters");
+});

@@ -146,8 +146,10 @@ function sanitizeNewsDigest(raw, { citations, today, lookbackDays = 45, maxItems
     const headKey = headline.toLowerCase();
     if (seenUrl.has(key) || seenHead.has(headKey)) { dropped.duplicate++; continue; }
     seenUrl.add(key); seenHead.add(headKey);
-    let source = clean(it.source, 80);
-    if (!source) source = new URL(String(it.url).trim()).hostname.replace(/^www\./, "");
+    // The model sometimes writes the source as a markdown link or a bare URL; keep the
+    // link text, and fall back to the item's host when what's left is still a URL.
+    let source = clean(String(it.source == null ? "" : it.source).replace(/\[([^\]]*)\]\([^)]*\)?/g, "$1"), 80);
+    if (!source || /https?:\/\/|\]\(/i.test(source)) source = new URL(String(it.url).trim()).hostname.replace(/^www\./, "");
     items.push({
       date: dateMatch[1], source, url: clean(it.url, 1200), headline,
       event: EVENTS.includes(it.event) ? it.event : "other",
