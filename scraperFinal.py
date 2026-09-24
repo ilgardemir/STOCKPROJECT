@@ -18,8 +18,41 @@ import numpy as np
 import warnings
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 warnings.filterwarnings("ignore")
+
+
+class _LineAtomicStream:
+    """
+    Makes each stderr line reach the server whole. The market-data fetch runs on a
+    worker thread beside the SEC stages, and print() issues the text and the newline
+    as two writes, so a worker's FINNHUB_WARN could land in the middle of a STAGE| or
+    RESOLVED| line. A spliced RESOLVED line silently delays the news search until
+    after the scrape. Lines are buffered per thread and written under one lock.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    def write(self, text):
+        buf = getattr(self._local, "buf", "") + text
+        if "\n" in buf:
+            head, _, buf = buf.rpartition("\n")
+            with self._lock:
+                self._inner.write(head + "\n")
+                self._inner.flush()
+        self._local.buf = buf
+        return len(text)
+
+    def flush(self):
+        with self._lock:
+            self._inner.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 TODAY     = datetime.now()
 TODAY_STR = TODAY.strftime("%B %d, %Y")
@@ -455,7 +488,8 @@ def _sec_throttle():
     historically bypassed _sec_get and were the densest part of a run.
 
     Safe without a lock: all SEC access in this script is sequential on the main
-    thread (the only ThreadPoolExecutor is Finnhub's).
+    thread. The worker threads (the market-data fetch and Finnhub's pool) never
+    touch sec.gov; keep it that way or add a lock here.
     """
     global _sec_last_request, _sec_request_count
     _sec_request_count += 1
@@ -1579,6 +1613,35 @@ def generate_analysis_payload(query: str) -> dict:
     if resolve_err:
         return {"error": resolve_err, "invalid_ticker": True, "ticker": query}
 
+    # ── STAGE 3 (started early): Finnhub + Yahoo on a worker thread ─────────
+    # Needs only the ticker, so it runs beside stages 1–2 instead of after them.
+    # All SEC access stays on the main thread: _sec_throttle has no lock and the SEC
+    # side is one lane by design, so this changes when Yahoo/Finnhub are asked,
+    # never how fast sec.gov is. Joined at stage 3; exceptions re-raise there.
+    def fetch_market_data():
+        finnhub = fetch_finnhub_bundle(ticker)
+        yqd = YQData(ticker)
+        hist = yqd.history(period="5y", interval="1d")
+        history_source = "Yahoo"
+        if hist is None or hist.empty:
+            hist = fetch_finnhub_candles(ticker, years=5)
+            history_source = "Finnhub" if hist is not None and not hist.empty else "Unavailable"
+        spy_hist = YQData("SPY").history(period="5y", interval="1d")
+        # With no price history the run may end at the validation gate, so skip the
+        # rest rather than spend Yahoo requests on a ticker that is about to be rejected.
+        # The main thread fetches them after the gate if the run continues.
+        if hist is None or hist.empty:
+            return finnhub, yqd, hist, history_source, spy_hist, None, None
+        inc_df = yqd.income_stmt()
+        cf_df  = yqd.cashflow_stmt()
+        # Touch each module so YQData caches it here; the main thread reads the cache.
+        yqd.financial_data; yqd.key_stats; yqd.summary_detail; yqd.asset_profile; yqd.price_mod
+        return finnhub, yqd, hist, history_source, spy_hist, inc_df, cf_df
+
+    market_pool = ThreadPoolExecutor(max_workers=1)
+    market_job = market_pool.submit(fetch_market_data)
+    market_pool.shutdown(wait=False)
+
     # ── STAGE 1: SEC EDGAR ───────────────────────────────────────────────────
     stage(1, "Querying SEC EDGAR filings")
     cik           = get_cik_from_ticker(ticker)
@@ -1683,22 +1746,14 @@ def generate_analysis_payload(query: str) -> dict:
 
     # ── STAGE 3: Finnhub primary quote/news + Yahoo history/fundamentals ───────
     stage(3, "Fetching Finnhub quote/news & market history")
-    finnhub = fetch_finnhub_bundle(ticker)
+    finnhub, yqd, hist, history_source, spy_hist, inc_df, cf_df = market_job.result()
     fh_quote = finnhub.get("quote", {})
     fh_profile = finnhub.get("profile", {})
     fh_metrics = finnhub.get("metrics", {})
     company_news = finnhub.get("news", [])
-    yqd = YQData(ticker)
 
     if not sec_available:
         company_name = fh_profile.get("name") or yqd.asset_profile.get("longName") or yqd.price_mod.get("longName") or ticker
-
-    hist     = yqd.history(period="5y", interval="1d")
-    history_source = "Yahoo"
-    if hist is None or hist.empty:
-        hist = fetch_finnhub_candles(ticker, years=5)
-        history_source = "Finnhub" if hist is not None and not hist.empty else "Unavailable"
-    spy_hist = YQData("SPY").history(period="5y", interval="1d")
 
     # Validation gate — need at least one live data source
     if not sec_available and (hist is None or hist.empty):
@@ -1706,8 +1761,8 @@ def generate_analysis_payload(query: str) -> dict:
                           "No SEC filings and no market data were found."),
                 "invalid_ticker": True, "ticker": ticker}
 
-    inc_df = yqd.income_stmt()
-    cf_df  = yqd.cashflow_stmt()
+    if inc_df is None: inc_df = yqd.income_stmt()
+    if cf_df is None:  cf_df  = yqd.cashflow_stmt()
 
     # Unified info dict built from yahooquery modules
     fd  = yqd.financial_data     # margins, targets, ratios
@@ -2236,6 +2291,7 @@ If §10 marks the next results IMMINENT, say whether the trade holds through the
 if __name__ == "__main__":
     # argv[1] may be a ticker OR a company name (possibly multi-word / quoted).
     q = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else "AAPL"
+    sys.stderr = _LineAtomicStream(sys.stderr)
     try:
         # allow_nan=False on purpose. The default emits bare NaN/Infinity, which is not
         # valid JSON: Python raises nothing, and the failure only shows up downstream as

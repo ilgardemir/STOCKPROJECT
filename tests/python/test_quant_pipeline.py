@@ -46,6 +46,21 @@ class YahooFixture:
 
 
 class PipelineRegressionTests(unittest.TestCase):
+    def test_market_data_fetch_overlaps_the_sec_stages(self):
+        # Stage 3 needs only the ticker, so it must start before SEC work finishes.
+        # The SEC lookup blocks until the Finnhub fetch has begun; run sequentially,
+        # it would time out and the assertion would fail.
+        import threading
+        market_started = threading.Event()
+        def finnhub(_ticker):
+            market_started.set(); return {}
+        def cik(_ticker):
+            self.assertTrue(market_started.wait(5), "market data did not start during the SEC stage")
+            return None
+        with patch.object(scraper,'YQData',YahooFixture), patch.object(scraper,'resolve_query',return_value=('AAA',None)),              patch.object(scraper,'get_cik_from_ticker',side_effect=cik),              patch.object(scraper,'fetch_finnhub_bundle',side_effect=finnhub),              patch.object(scraper,'fetch_fmp_data',return_value=None),              patch.object(scraper,'fetch_intraday_data',return_value={}), contextlib.redirect_stderr(io.StringIO()):
+            payload=scraper.generate_analysis_payload('AAA')
+        self.assertNotIn('error', payload)
+
     def test_complete_analyzer_payload_preserves_units_dates_and_missing_values(self):
         with patch.object(scraper,'YQData',YahooFixture), patch.object(scraper,'resolve_query',return_value=('AAA',None)), \
              patch.object(scraper,'get_cik_from_ticker',return_value=None), \

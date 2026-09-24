@@ -331,3 +331,19 @@ class KeyLevelNoteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LineAtomicStderrTests(unittest.TestCase):
+    """The market-data worker writes stderr while the main thread prints STAGE|/RESOLVED|."""
+
+    def test_worker_line_cannot_splice_a_main_thread_line(self):
+        import io, threading
+        sink = io.StringIO()
+        stream = scraper._LineAtomicStream(sink)
+        # print() writes the text and the newline separately; force the worst interleave.
+        stream.write("RESOLVED|AAPL|Apple Inc.")
+        worker = threading.Thread(target=stream.write, args=("FINNHUB_WARN|/quote|HTTP 429\n",))
+        worker.start(); worker.join()
+        stream.write("\n")
+        self.assertEqual(sink.getvalue().splitlines(),
+                         ["FINNHUB_WARN|/quote|HTTP 429", "RESOLVED|AAPL|Apple Inc."])
