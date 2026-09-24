@@ -3,7 +3,7 @@
 // AI web-search news digest for the live analyzer (never /ilgar — a search runs TODAY,
 // so it would leak post-cutoff news into a point-in-time replay).
 //
-// One OpenRouter call with the web plugin asks a search-enabled model for the few
+// Two parallel OpenRouter calls with the web plugin ask a search-enabled model for the few
 // stories that actually move this stock, as strict JSON. The model's output is then
 // treated exactly like screener output: untrusted until re-validated here. The load-
 // bearing check is GROUNDING — an item survives only if its URL is one the search
@@ -22,6 +22,20 @@ const DIRECTIONS = ["positive", "negative", "mixed", "neutral"];
 const IMPACT_RANK = { high: 0, medium: 1, low: 2 };
 
 const DAY_MS = 86400000;
+
+// Each focus is one search, run in parallel and merged. A single query stuffed with every
+// category drew the same generic coverage (price recaps, "should you buy") and left the
+// model with one or two usable stories; two narrower queries pull different result sets.
+const NEWS_QUERIES = [
+  "earnings, guidance, analyst ratings, price targets",
+  "deals, contracts, lawsuits, regulation, product launches, management changes"
+];
+
+// Opinion farms, auto-generated rating pages and social sites. Their hits fill the result
+// set but the model is told to skip them, so every one excluded is a slot for reporting.
+const DEFAULT_EXCLUDE_DOMAINS = ["fool.com", "investorplace.com", "marketbeat.com", "simplywall.st",
+  "seekingalpha.com", "zacks.com", "stocktwits.com", "reddit.com", "youtube.com", "x.com",
+  "twitter.com", "facebook.com", "tiktok.com", "thecryptobasic.com"];
 
 const DIGEST_SCHEMA = {
   type: "object", additionalProperties: false,
@@ -48,7 +62,7 @@ const DIGEST_SCHEMA = {
 
 function isoDay(d) { return new Date(d).toISOString().slice(0, 10); }
 
-function buildNewsMessages({ ticker, company, today, lookbackDays, maxItems }) {
+function buildNewsMessages({ ticker, company, today, lookbackDays, maxItems, focus = NEWS_QUERIES[0] }) {
   const from = isoDay(Date.parse(today) - lookbackDays * DAY_MS);
   const name = company && company.toUpperCase() !== ticker ? `${company} (${ticker})` : ticker;
   const month = new Date(today).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
@@ -68,7 +82,7 @@ Return JSON with:
 - "items": up to ${maxItems} distinct events, most important first. One item per event (merge duplicate coverage, keep the best source). Fields: "date" (publication date, YYYY-MM-DD), "source" (publisher name), "url", "headline", "event" (${EVENTS.join("|")}), "impact" on the stock (high|medium|low), "direction" for the stock as reported (positive|negative|mixed|neutral), "summary" (at most 40 words, concrete facts and figures from the article).
 - "upcoming": up to 3 scheduled future events sources mention (earnings date, investor day, regulatory decision, vote), each with "date" (YYYY-MM-DD or a short approximate like "late Oct 2026"), "event", and the source "url".
 If nothing relevant is in the results, return empty arrays.` },
-    { role: "user", content: `${name} stock news ${month}: earnings, guidance, analyst ratings, deals, lawsuits, regulation, products, management` }
+    { role: "user", content: `${name} stock news ${month}: ${focus}` }
   ];
 }
 
@@ -228,57 +242,85 @@ function newsSearchStatus(result) {
 }
 
 /**
- * One search call. Never throws: every failure resolves { ok:false, error }.
- * `fetchImpl` is injectable so the whole path is testable offline.
+ * One OpenRouter call with the web plugin. Resolves { ok, raw, citations, usage } or
+ * { ok:false, error }; never throws. A 400 that names an optional feature (structured
+ * output, domain filtering — both engine-dependent) drops that feature and retries once each.
  */
-async function researchNews({ ticker, company, apiKey, model, engine, maxResults, timeoutMs,
-                              lookbackDays = 45, maxItems = 8, now = new Date(), fetchImpl = fetch }) {
-  const started = Date.now();
-  const today = isoDay(now);
-  const plugin = { id: "web", max_results: maxResults };
-  if (engine) plugin.engine = engine;
-  const base = {
-    model, max_tokens: 3000, reasoning: { effort: "low" },
-    plugins: [plugin],
-    messages: buildNewsMessages({ ticker, company, today, lookbackDays, maxItems })
-  };
-  const call = async (withSchema) => {
-    const body = withSchema
-      ? { ...base, response_format: { type: "json_schema", json_schema: { name: "news_digest", strict: true, schema: DIGEST_SCHEMA } } }
-      : base;
+async function searchOnce({ base, excludeDomains, apiKey, timeoutMs, fetchImpl }) {
+  let withSchema = true, withExclude = excludeDomains.length > 0;
+  const call = async () => {
+    const plugin = { ...base.plugins[0] };
+    if (withExclude) plugin.exclude_domains = excludeDomains;
+    const body = { ...base, plugins: [plugin] };
+    if (withSchema) body.response_format = { type: "json_schema", json_schema: { name: "news_digest", strict: true, schema: DIGEST_SCHEMA } };
     const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", signal: AbortSignal.timeout(timeoutMs),
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}`,
         "HTTP-Referer": "http://localhost", "X-Title": "Squall" },
       body: JSON.stringify(body)
     });
-    const text = await res.text();
-    return { status: res.status, text };
+    return { status: res.status, text: await res.text() };
   };
+  let r = await call();
+  for (let tries = 0; r.status === 400 && tries < 2; tries++) {
+    if (withSchema && /response_format|json_schema|structured/i.test(r.text)) withSchema = false;
+    else if (withExclude && /exclude_domains|domain/i.test(r.text)) withExclude = false;
+    else break;
+    r = await call();
+  }
+  if (r.status !== 200) return { ok: false, error: `OpenRouter ${r.status}: ${r.text.slice(0, 200)}` };
+  const data = JSON.parse(r.text);
+  const message = data && data.choices && data.choices[0] && data.choices[0].message;
+  const raw = firstJson(message && message.content);
+  if (!raw) return { ok: false, error: "search returned no JSON digest" };
+  return { ok: true, raw, citations: citationsFrom(message), usage: data.usage || null };
+}
+
+/**
+ * The digest: one search per focus in `queries`, in parallel, merged and then validated
+ * once. A focus that fails costs only its own results. Never throws: every failure
+ * resolves { ok:false, error }. `fetchImpl` is injectable so the whole path is testable offline.
+ */
+async function researchNews({ ticker, company, apiKey, model, engine, maxResults, timeoutMs,
+                              lookbackDays = 45, maxItems = 8, queries = NEWS_QUERIES,
+                              excludeDomains = DEFAULT_EXCLUDE_DOMAINS, now = new Date(), fetchImpl = fetch }) {
+  const started = Date.now();
+  const today = isoDay(now);
+  const plugin = { id: "web", max_results: maxResults };
+  if (engine) plugin.engine = engine;
   try {
-    let r = await call(true);
-    // Structured output alongside the web plugin is provider-dependent; a 400 that
-    // names it gets one plain retry, and firstJson() recovers the object from prose.
-    if (r.status === 400 && /response_format|json_schema|structured/i.test(r.text)) r = await call(false);
-    if (r.status !== 200) return { ok: false, error: `OpenRouter ${r.status}: ${r.text.slice(0, 200)}`, ms: Date.now() - started };
-    const data = JSON.parse(r.text);
-    const message = data && data.choices && data.choices[0] && data.choices[0].message;
-    const raw = firstJson(message && message.content);
-    if (!raw) return { ok: false, error: "search returned no JSON digest", ms: Date.now() - started };
-    const citations = citationsFrom(message);
+    const runs = await Promise.all(queries.map(focus => searchOnce({
+      base: { model, max_tokens: 3000, reasoning: { effort: "low" }, plugins: [plugin],
+        messages: buildNewsMessages({ ticker, company, today, lookbackDays, maxItems, focus }) },
+      excludeDomains: excludeDomains || [], apiKey, timeoutMs, fetchImpl
+    }).catch(error => ({ ok: false, error: error.name === "TimeoutError" ? `timed out after ${timeoutMs}ms` : error.message }))));
+    const good = runs.filter(r => r.ok);
+    if (!good.length) return { ok: false, error: runs.map(r => r.error).join("; "), ms: Date.now() - started };
+
+    // Items keep query order, so the sanitizer's duplicate check keeps the first copy.
+    const raw = {
+      overview: (good.find(r => r.raw.overview) || good[0]).raw.overview,
+      items: good.flatMap(r => Array.isArray(r.raw.items) ? r.raw.items : []),
+      upcoming: good.flatMap(r => Array.isArray(r.raw.upcoming) ? r.raw.upcoming : [])
+    };
+    const seen = new Set();
+    const citations = good.flatMap(r => r.citations).filter(c => !seen.has(urlKey(c.url)) && seen.add(urlKey(c.url)));
+    const usage = { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
+    for (const r of good) for (const k of Object.keys(usage)) usage[k] += Number(r.usage && r.usage[k]) || 0;
+
     const digest = sanitizeNewsDigest(raw, { citations, today, lookbackDays, maxItems });
     if (!digest.items.length) {
       return { ok: false, error: `no grounded items (citations=${citations.length}, dropped=${JSON.stringify(digest.dropped)})`, ms: Date.now() - started };
     }
-    return { ok: true, digest, citations: citations.length, model, today,
-      searchedAt: new Date().toISOString(), usage: data.usage || null, ms: Date.now() - started };
+    return { ok: true, digest, citations: citations.length, searches: `${good.length}/${runs.length}`, model, today,
+      searchedAt: new Date().toISOString(), usage, ms: Date.now() - started };
   } catch (error) {
-    return { ok: false, error: error.name === "TimeoutError" ? `timed out after ${timeoutMs}ms` : error.message, ms: Date.now() - started };
+    return { ok: false, error: error.message, ms: Date.now() - started };
   }
 }
 
 module.exports = {
-  EVENTS, IMPACTS, DIRECTIONS, DIGEST_SCHEMA,
+  EVENTS, IMPACTS, DIRECTIONS, DIGEST_SCHEMA, NEWS_QUERIES, DEFAULT_EXCLUDE_DOMAINS,
   buildNewsMessages, urlKey, citationsFrom, firstJson, sanitizeNewsDigest,
   formatNewsSection, spliceNewsSection, digestToCompanyNews, applyNewsDigest, newsSearchStatus, researchNews
 };

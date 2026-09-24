@@ -5,7 +5,7 @@ const os   = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { replayPolicy, parseReplayDecision, replayMessages, simulateReplay } = require("./replay-engine");
-const { researchNews, applyNewsDigest, newsSearchStatus } = require("./news-research");
+const { researchNews, applyNewsDigest, newsSearchStatus, DEFAULT_EXCLUDE_DOMAINS } = require("./news-research");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -51,6 +51,11 @@ const NEWS_MODEL   = process.env.SQUALL_NEWS_MODEL || "openai/gpt-6-luna";
 const NEWS_ENGINE_RAW = process.env.SQUALL_NEWS_ENGINE || "exa";
 const NEWS_ENGINE  = ["native", "exa", "parallel", "perplexity"].includes(NEWS_ENGINE_RAW)
   ? NEWS_ENGINE_RAW : NEWS_ENGINE_RAW === "auto" ? undefined : "exa";
+// Comma-separated domains the search skips; unset keeps the built-in list, "none" clears it.
+const NEWS_EXCLUDE_RAW = (process.env.SQUALL_NEWS_EXCLUDE_DOMAINS || "").trim();
+const NEWS_EXCLUDE_DOMAINS = !NEWS_EXCLUDE_RAW ? DEFAULT_EXCLUDE_DOMAINS
+  : NEWS_EXCLUDE_RAW.toLowerCase() === "none" ? []
+  : NEWS_EXCLUDE_RAW.split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
 const PYTHON      = process.env.PYTHON_BIN || "python3";
 const STAGE_TOTAL = 7;  // scraper now emits 7 stages
 
@@ -247,7 +252,7 @@ const LIM = {
   // cache on purpose: news moves slower than a quote, and every miss is a paid search.
   NEWS_TIMEOUT_MS:     envInt("SQUALL_NEWS_TIMEOUT_MS", 45000),
   NEWS_CACHE_TTL_MS:   envInt("SQUALL_NEWS_CACHE_TTL_MS", 1800000),  // 30 min
-  NEWS_MAX_RESULTS:    envInt("SQUALL_NEWS_MAX_RESULTS", 10),        // search hits per call
+  NEWS_MAX_RESULTS:    envInt("SQUALL_NEWS_MAX_RESULTS", 20),        // hits per search; Exa bills 10 included + $0.001 each over
   NEWS_MAX_ITEMS:      envInt("SQUALL_NEWS_MAX_ITEMS", 8),           // items kept for the prompt
   NEWS_LOOKBACK_DAYS:  envInt("SQUALL_NEWS_LOOKBACK_DAYS", 45),
   // Watchlist quotes (GET /quotes). Finnhub-only, never a scraper run, and deliberately
@@ -2418,13 +2423,13 @@ function getNewsDigest(ticker, company, researchImpl = researchNews) {
   newsSearches += 1;
   const promise = researchImpl({
     ticker: key, company, apiKey: API_KEY, model: NEWS_MODEL, engine: NEWS_ENGINE,
-    maxResults: LIM.NEWS_MAX_RESULTS, maxItems: LIM.NEWS_MAX_ITEMS,
+    maxResults: LIM.NEWS_MAX_RESULTS, maxItems: LIM.NEWS_MAX_ITEMS, excludeDomains: NEWS_EXCLUDE_DOMAINS,
     lookbackDays: LIM.NEWS_LOOKBACK_DAYS, timeoutMs: LIM.NEWS_TIMEOUT_MS
   }).catch(error => ({ ok: false, error: error.message, ms: 0 })).then(result => {
     if (result && result.ok) {
       const u = result.usage || {};
       console.log(`news ${key}: ${result.digest.items.length} items, ${result.digest.upcoming.length} upcoming, ` +
-        `citations=${result.citations} dropped=${JSON.stringify(result.digest.dropped)} ` +
+        `searches=${result.searches} citations=${result.citations} dropped=${JSON.stringify(result.digest.dropped)} ` +
         `tokens=${u.prompt_tokens ?? "?"}/${u.completion_tokens ?? "?"} cost=${u.cost ?? "?"} ${result.ms}ms`);
     } else {
       newsFailures += 1;
@@ -3782,5 +3787,5 @@ module.exports = {
   // Reasoning budget — exported so the absolute cap can be checked without a provider.
   reasoningConfig, REASON_MAX_TOKENS, REASON_EFFORT, ANALYSIS_MAX,
   // News digest cache — exported so sharing, eviction and budget gating are testable offline.
-  getNewsDigest, newsCache, NEWS_MODEL, NEWS_ENGINE
+  getNewsDigest, newsCache, NEWS_MODEL, NEWS_ENGINE, NEWS_EXCLUDE_DOMAINS
 };

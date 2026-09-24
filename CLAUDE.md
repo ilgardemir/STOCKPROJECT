@@ -65,7 +65,7 @@ The screener adds an LLM step that turns the query into a recipe before `screene
 | `screener.py` | Multi-index screener. Job JSON on stdin, deterministic scoring, `PROGRESS\|pct\|label` on stderr |
 | `backtester.py` | Hidden point-in-time engine for `/ilgar`. `snapshot` and `outcomes` are kept separate; `ai_prompt` is built from `snapshot` only |
 | `replay-engine.js` | `/ilgar` research replay v2 policy (see below) |
-| `news-research.js` | Web-search news digest that replaces the Finnhub records in `ai_prompt` §14 (live analyzer only) |
+| `news-research.js` | Two parallel web searches (`NEWS_QUERIES`), merged into a digest that replaces the Finnhub records in `ai_prompt` §14 (live analyzer only) |
 | `event_calendar.py` | `event_risk` (next results window). No dependencies; backtester re-exports it |
 | `financial_rules.py` | Business-model applicability, bid/ask validation |
 | `app.js` / `styles.css` | Shared by every page: one script, one stylesheet |
@@ -280,7 +280,8 @@ retuned from the Railway dashboard without a deploy.
 | `SQUALL_NEWS_MODEL` | `openai/gpt-6-luna` | The search-and-digest call. Charged `COST.news` (3 credits) per real search |
 | `SQUALL_NEWS_ENGINE` | `exa` | Exa returns its results as citations, which grounding needs. Native OpenAI search returned none for JSON output. `auto` = OpenRouter picks |
 | `SQUALL_NEWS_TIMEOUT_MS` / `_CACHE_TTL_MS` | 45000 / 1800000 | Timeout is the longest the dashboard waits after the scrape |
-| `SQUALL_NEWS_MAX_RESULTS` / `_MAX_ITEMS` / `_LOOKBACK_DAYS` | 10 / 8 / 45 | Search hits, items kept for the prompt, window |
+| `SQUALL_NEWS_MAX_RESULTS` / `_MAX_ITEMS` / `_LOOKBACK_DAYS` | 20 / 8 / 45 | Hits **per search** (two searches run), items kept for the prompt, window. Exa: $0.007/search incl. 10 hits, +$0.001 per extra hit |
+| `SQUALL_NEWS_EXCLUDE_DOMAINS` | built-in list | Comma list the search skips (`DEFAULT_EXCLUDE_DOMAINS`); `none` clears it |
 | `FINNHUB_API_KEY` | — | Quotes, profile, metrics, fallback news, `/quotes` |
 | `FMP_API_KEY` | — | Optional cross-checks |
 | `SEC_USER_AGENT` | built-in | EDGAR requires a real UA |

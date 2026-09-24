@@ -5,7 +5,7 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const {
   urlKey, sanitizeNewsDigest, spliceNewsSection, formatNewsSection,
-  applyNewsDigest, researchNews, firstJson
+  applyNewsDigest, researchNews, firstJson, NEWS_QUERIES
 } = require("../../news-research");
 
 const TODAY = "2026-09-23";
@@ -147,27 +147,71 @@ const okBody = (content, urls) => ({
   usage: { prompt_tokens: 5000, completion_tokens: 600, cost: 0.02 }
 });
 
-test("news: a provider that rejects structured output gets one plain retry", async () => {
+test("news: a provider that rejects structured output gets one plain retry per search", async () => {
   const bodies = [];
   const fetchImpl = async (_url, init) => {
-    bodies.push(JSON.parse(init.body));
-    return bodies.length === 1
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    return body.response_format
       ? fakeResponse(400, { error: { message: "response_format json_schema is not supported with plugins" } })
       : fakeResponse(200, okBody("Here you go: " + JSON.stringify({ overview: "o", items: [item()], upcoming: [] }),
           ["https://reuters.com/markets/acme-q3"]));
   };
+  const r = await researchNews({ ticker: "ACME", company: "Acme Corp", apiKey: "k", model: "m", maxResults: 20,
+    timeoutMs: 5000, now: new Date(TODAY + "T15:00:00Z"), fetchImpl });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(bodies.length, 4);                       // two searches, one plain retry each
+  assert.equal(bodies.filter(b => b.response_format).length, 2);
+  assert.equal(bodies[0].plugins[0].engine, undefined);   // engine left to OpenRouter
+  assert.equal(bodies[0].plugins[0].max_results, 20);
+  assert.ok(bodies[0].plugins[0].exclude_domains.includes("fool.com"));
+  // Each user message is a search query: short, naming the company, one focus per search.
+  const queries = new Set(bodies.map(b => b.messages[1].content));
+  assert.equal(queries.size, NEWS_QUERIES.length);
+  for (const q of queries) { assert.ok(q.startsWith("Acme Corp (ACME) stock news September 2026")); assert.ok(q.length < 160); }
+  assert.equal(r.digest.items.length, 1);                // the same story from both searches merges
+  assert.equal(r.citations, 1);
+  assert.equal(r.searches, "2/2");
+  assert.equal(r.usage.cost, 0.04);                      // usage sums across searches
+});
+
+test("news: an engine that rejects domain filtering is retried without it", async () => {
+  const bodies = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    return body.plugins[0].exclude_domains
+      ? fakeResponse(400, { error: { message: "exclude_domains is not supported for this engine" } })
+      : fakeResponse(200, okBody(JSON.stringify({ overview: "o", items: [item()], upcoming: [] }), ["https://reuters.com/markets/acme-q3"]));
+  };
+  const r = await researchNews({ ticker: "ACME", company: "Acme Corp", apiKey: "k", model: "m", maxResults: 10,
+    queries: ["one focus"], timeoutMs: 5000, now: new Date(TODAY + "T15:00:00Z"), fetchImpl });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies[1].response_format, "only the domain filter is dropped");
+  // An empty list sends no filter at all.
+  bodies.length = 0;
+  await researchNews({ ticker: "ACME", company: "", apiKey: "k", model: "m", maxResults: 10, queries: ["q"],
+    excludeDomains: [], timeoutMs: 5000, now: new Date(TODAY), fetchImpl });
+  assert.equal(bodies[0].plugins[0].exclude_domains, undefined);
+});
+
+test("news: one failed search still yields the other's items; both failing falls back", async () => {
+  const second = item({ url: "https://www.cnbc.com/acme-deal", headline: "Acme agrees to buy Widget Co", event: "m_and_a" });
+  const fetchImpl = async (_url, init) => {
+    const q = JSON.parse(init.body).messages[1].content;
+    if (q.endsWith(NEWS_QUERIES[0])) return fakeResponse(502, "bad gateway");
+    return fakeResponse(200, okBody(JSON.stringify({ overview: "o", items: [second], upcoming: [] }), [second.url]));
+  };
   const r = await researchNews({ ticker: "ACME", company: "Acme Corp", apiKey: "k", model: "m", maxResults: 10,
     timeoutMs: 5000, now: new Date(TODAY + "T15:00:00Z"), fetchImpl });
   assert.equal(r.ok, true, r.error);
-  assert.equal(bodies.length, 2);
-  assert.ok(bodies[0].response_format);
-  assert.equal(bodies[1].response_format, undefined);
-  assert.deepEqual(bodies[0].plugins, [{ id: "web", max_results: 10 }]);   // engine left to OpenRouter
-  // The user message is the search query: short, and naming the company.
-  assert.ok(bodies[0].messages[1].content.startsWith("Acme Corp (ACME) stock news September 2026"));
-  assert.ok(bodies[0].messages[1].content.length < 160);
-  assert.equal(r.digest.items.length, 1);
-  assert.equal(r.citations, 1);
+  assert.equal(r.searches, "1/2");
+  assert.equal(r.digest.items[0].headline, "Acme agrees to buy Widget Co");
+  const dead = await researchNews({ ticker: "ACME", company: "", apiKey: "k", model: "m", maxResults: 10,
+    timeoutMs: 5000, now: new Date(TODAY), fetchImpl: async () => fakeResponse(502, "bad gateway") });
+  assert.equal(dead.ok, false);
+  assert.match(dead.error, /OpenRouter 502.*; OpenRouter 502/);
 });
 
 test("news: errors, empty answers and ungrounded answers all resolve ok:false, never throw", async () => {
@@ -245,4 +289,12 @@ test("news: Exa is the default engine because it returns citations; auto hands t
   assert.equal(read({ SQUALL_NEWS_ENGINE: "auto" }), "undefined");
   assert.equal(read({ SQUALL_NEWS_ENGINE: "native" }), "native");
   assert.equal(read({ SQUALL_NEWS_ENGINE: "typo" }), "exa");
+});
+
+test("news: SQUALL_NEWS_EXCLUDE_DOMAINS overrides the built-in list, and none clears it", () => {
+  const read = env => JSON.parse(execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(require('./server').NEWS_EXCLUDE_DOMAINS))"],
+    { cwd: path.join(__dirname, "../.."), env: { ...process.env, SQUALL_NEWS_EXCLUDE_DOMAINS: "", ...env }, encoding: "utf8" }));
+  assert.ok(read({}).includes("fool.com"));
+  assert.deepEqual(read({ SQUALL_NEWS_EXCLUDE_DOMAINS: " Fool.com, ,reddit.com " }), ["fool.com", "reddit.com"]);
+  assert.deepEqual(read({ SQUALL_NEWS_EXCLUDE_DOMAINS: "none" }), []);
 });
