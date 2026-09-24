@@ -1230,7 +1230,7 @@ function finalizeAiRender(d) {
   const scroll = document.getElementById("aiScroll");
   const keep = scroll.scrollTop;
   ai.className = "prose";
-  ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
+  ai.innerHTML = aiWarnHtml(d) + (d.aiSummary ? staleNoticeHtml(d, "ai") : "") + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
   scroll.scrollTop = keep;
 }
 
@@ -1269,7 +1269,68 @@ function showWorkspace(skipAnim) {
   if (skipAnim || hero.style.display === "none") reveal();
   else { hero.classList.add("leaving"); setTimeout(reveal, 260); }
 }
+/* "Return to saved research" used to reopen whichever item was touched last, which is only
+   the right answer when there is one. It opens a picker instead: everything saved, newest
+   first, grouped by day, filterable, with old snapshots marked so a stale one is not opened
+   by mistake. Analyses are dated by when they ran (a chat or a range change does not make
+   the data newer); screens are dated by their last run. */
+function savedResearchItems() {
+  return [
+    ...Object.keys(sessions).map(key => { const s = sessions[key], d = s.data || {};
+      return { kind: "analysis", key, at: s.createdAt, title: key, sub: d.company_name || "",
+        price: d.live_quote?.last_price ?? d.raw_data?.technicals?.current_price }; }),
+    ...Object.keys(screeners).map(key => { const s = screeners[key];
+      return { kind: "screen", key, at: s.updatedAt || s.createdAt, title: s.title || "Saved screen", sub: s.query || "" }; })
+  ].sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+let resumeReturnFocus = null;
+function renderResumeList() {
+  const list = document.getElementById("resumeList"); if (!list) return;
+  const q = (document.getElementById("resumeFilter")?.value || "").trim().toLowerCase();
+  const all = savedResearchItems();
+  const items = q ? all.filter(it => (it.title + " " + it.sub).toLowerCase().includes(q)) : all;
+  const meta = document.getElementById("resumeMeta");
+  if (meta) meta.textContent = q ? `${items.length} of ${all.length}` : `${all.length} saved`;
+  if (!items.length) { list.innerHTML = `<p class="resume-empty">${all.length ? "Nothing saved matches that." : "Nothing saved yet."}</p>`; return; }
+  let group = "", html = "";
+  for (const it of items) {
+    const days = isNum(it.at) ? calendarDaysSince(it.at) : Infinity;
+    const g = days <= 0 ? "Today" : days < 7 ? "This week" : "Older";
+    if (g !== group) { group = g; html += `<div class="resume-group">${g}</div>`; }
+    const tier = ageTier(it.at);
+    html += `<button class="resume-row" type="button" data-kind="${it.kind}" data-key="${esc(it.key)}">
+      <span class="resume-kind">${it.kind === "screen" ? "Screen" : "Stock"}</span>
+      <span class="resume-name"><b>${esc(it.title)}</b><small>${esc(it.sub)}</small></span>
+      <span class="resume-price">${it.kind === "analysis" && isNum(it.price) ? fUsd(it.price) : ""}</span>
+      <time class="resume-when${tier ? " stale " + tier : ""}"${isNum(it.at) ? ` datetime="${new Date(it.at).toISOString()}"` : ""} title="${tier ? "Saved snapshot; open it and select Refresh to re-run" : "Saved today"}">${esc(ageLabel(it.at))}</time>
+    </button>`;
+  }
+  list.innerHTML = html;
+}
+function openResumePicker() {
+  const modal = document.getElementById("resumeModal"); if (!modal) return false;
+  resumeReturnFocus = document.activeElement;
+  const filter = document.getElementById("resumeFilter"); if (filter) filter.value = "";
+  renderResumeList();
+  modal.classList.add("open"); modal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  setTimeout(() => filter?.focus(), 0);
+  return true;
+}
+function closeResumePicker(refocus = true) {
+  const modal = document.getElementById("resumeModal");
+  if (!modal || !modal.classList.contains("open")) return;
+  modal.classList.remove("open"); modal.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  if (refocus) resumeReturnFocus?.focus?.();
+}
+function openResumeItem(kind, key) {
+  closeResumePicker(false);
+  if (kind === "screen") return openSavedScreener(key);
+  switchTicker(key);
+}
 function resumeSavedWorkspace() {
+  if (openResumePicker()) return;
   const latestAnalysis = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0];
   const latestScreen = Object.keys(screeners).sort((a, b) => screeners[b].updatedAt - screeners[a].updatedAt)[0];
   if (latestScreen && (!latestAnalysis || screeners[latestScreen].updatedAt > sessions[latestAnalysis].updatedAt)) { openSavedScreener(latestScreen); return; }
@@ -1277,6 +1338,18 @@ function resumeSavedWorkspace() {
   if (!active) return;
   showWorkspace(true); renderTickerPills(); renderAll(sessions[active].data);
 }
+on("resumeFilter", "input", renderResumeList);
+on("resumeList", "click", e => { const row = e.target.closest(".resume-row"); if (row) openResumeItem(row.dataset.kind, row.dataset.key); });
+on("resumeModal", "click", e => { if (e.target.id === "resumeModal") closeResumePicker(); });
+on("resumeModal", "keydown", e => {
+  const rows = [...document.querySelectorAll("#resumeList .resume-row")];
+  const filter = document.getElementById("resumeFilter");
+  const from = rows.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeResumePicker(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); rows[Math.min(from + 1, rows.length - 1)]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); from <= 0 ? filter?.focus() : rows[from - 1].focus(); }
+  else if (e.key === "Enter" && document.activeElement === filter && rows[0]) { e.preventDefault(); openResumeItem(rows[0].dataset.kind, rows[0].dataset.key); }
+});
 
 /* ════════════════ NATURAL-LANGUAGE MULTI-INDEX SCREENER ════════════════ */
 const SCREEN_CONCEPT_LABELS = {
@@ -1604,11 +1677,13 @@ function renderTickerPills() {
   if (!el) return;
   el.innerHTML = items.map(item => {
     const s = item.kind === "analysis" ? sessions[item.key] : screeners[item.key];
-    const when = new Date(s.createdAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const savedAt = item.kind === "analysis" ? s.createdAt : (s.updatedAt || s.createdAt);
+    const when = new Date(savedAt || Date.now()).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const tier = ageTier(savedAt);
     const label = item.kind === "analysis" ? item.key : (s.title || "Saved screen");
     const selected = item.kind === "analysis" ? (!activeScreen && item.key === active) : item.key === activeScreen;
     return `<div class="analysis-tab ${item.kind === "screen" ? "screener-tab" : ""} ${selected ? "active" : ""}" data-kind="${item.kind}" data-key="${esc(item.key)}">
-      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "Screen · " : ""}${esc(label)}</b><span>${esc(when)}</span></button>
+      <button class="analysis-tab-main" type="button" title="Open saved ${item.kind}"><b>${item.kind === "screen" ? "Screen · " : ""}${esc(label)}</b><span class="${tier ? "stale " + tier : ""}" title="${esc(ageLabel(savedAt))}">${esc(when)}</span></button>
       <button class="analysis-tab-close" type="button" aria-label="Delete saved ${esc(label)}" title="Delete this saved item">×</button>
     </div>`;
   }).join("");
@@ -1946,8 +2021,9 @@ function clearTickerBar() {
    "TR…" and "Tec…". It is metadata, not a category, so it reads as muted text; the full
    value stays on the title. Today shows the time (freshness is the question), anything
    older shows the date (staleness is). */
-function asOfStamp(raw) {
-  if (!raw) return `<span class="as-of" title="Snapshot time unknown">as of —</span>`;
+function asOfStamp(raw, savedAt) {
+  const tier = ageTier(savedAt), cls = tier ? ` stale ${tier}` : "";
+  if (!raw) return `<span class="as-of${cls}" title="Snapshot time unknown">as of —</span>`;
   const dt = new Date(String(raw).replace(" ", "T"));
   let label = String(raw);
   if (!isNaN(dt)) {
@@ -1958,7 +2034,49 @@ function asOfStamp(raw) {
       : dt.toLocaleDateString([], { month: "short", day: "numeric",
           ...(dt.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
   }
-  return `<span class="as-of" title="Snapshot as of ${esc(raw)} — Analyze refreshes it">as of ${esc(label)}</span>`;
+  return `<span class="as-of${cls}" title="Snapshot as of ${esc(raw)} (${esc(ageLabel(savedAt))}); Analyze refreshes it">as of ${esc(label)}</span>`;
+}
+
+/* ── Snapshot age ─────────────────────────────────────────────────────────────
+   A saved analysis never updates itself, so reopening one raises the question of how far
+   the market has moved since. The tier counts weekdays, not calendar days: a Friday
+   snapshot read on Sunday is still the last session's data and gets no mark, but one read
+   on Monday does. "aging" is one or more sessions behind; "old" is a week of sessions or
+   more. The label stays calendar-based ("3 days ago"), because that is how people read dates. */
+const SNAPSHOT_OLD_SESSIONS = 5;
+function startOfDay(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d; }
+function calendarDaysSince(ts) { return Math.round((startOfDay(Date.now()) - startOfDay(ts)) / 864e5); }
+function sessionsSince(ts) {
+  const days = calendarDaysSince(ts);
+  if (days > 60) return days;                       // far past every tier boundary; skip the walk
+  let n = 0; const d = startOfDay(ts);
+  for (let i = 0; i < days; i++) { d.setDate(d.getDate() + 1); const wd = d.getDay(); if (wd !== 0 && wd !== 6) n++; }
+  return n;
+}
+function ageTier(ts) {
+  if (!isNum(ts) || ts <= 0) return "";
+  const n = sessionsSince(ts);
+  return n >= SNAPSHOT_OLD_SESSIONS ? "old" : n >= 1 ? "aging" : "";
+}
+function ageLabel(ts) {
+  if (!isNum(ts) || ts <= 0) return "Unknown date";
+  const days = calendarDaysSince(ts), dt = new Date(ts);
+  if (days <= 0) return "Today " + dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days} days ago`;
+  const date = dt.toLocaleDateString([], { month: "short", day: "numeric",
+    ...(dt.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
+  return `${date} · ${days}d ago`;
+}
+// Shared by the Market Snapshot card and the written analysis, which read from the same
+// snapshot. Empty for current data, so a fresh run carries no extra line.
+function staleNoticeHtml(d, where) {
+  const sess = d && sessions[d.ticker], tier = ageTier(sess?.createdAt);
+  if (!tier) return "";
+  const what = where === "ai" ? "This write-up was generated from a saved snapshot." : "These figures are a saved snapshot.";
+  const tail = tier === "old" ? "Prices, filings and news have likely moved since." : "The market has traded since.";
+  return `<div class="stale-note ${tier}" role="note"><span><b>${esc(ageLabel(sess.createdAt))}</b> · ${what} ${tail}</span>
+    <button type="button" class="chip" onclick="retryAnalysis('${jsAttr(d.ticker)}')" title="Re-run the analysis with current data">${RETRY_SVG}<span>Refresh</span></button></div>`;
 }
 
 function renderStrip(d) {
@@ -1972,7 +2090,7 @@ function renderStrip(d) {
     <button id="sWatch" type="button" data-t="${escAttr(d.ticker)}" aria-pressed="false"></button>
     <span id="sCompany" title="${esc(d.company_name)}${q.exchange ? " · " + esc(q.exchange) : ""}">${esc(d.company_name)}</span>
     <span id="sPrice" title="Saved snapshot; Analyze refreshes the research">${fUsd(price)}</span>
-    ${asOfStamp(q.quote_time || q.fetched_at || d.today)}
+    ${asOfStamp(q.quote_time || q.fetched_at || d.today, sessions[d.ticker]?.createdAt)}
     ${isNum(chg) ? `<span class="pill ${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "▲" : "▼"} ${fPct(chg)}</span>` : ""}
     ${company.sector ? `<span class="sector-badge" title="${esc(company.industry || company.sector)}">${esc(company.sector)}</span>` : ""}
     ${/* Label only. The confidence used to ride along here, and "DISTRIBUTION · 86%" is
@@ -2218,7 +2336,7 @@ function renderAll(d) {
   const add = (section, markup) => { bucket[section] += markup; };
 
   /* Snapshot */
-  let snap = `<div class="mgrid">
+  let snap = staleNoticeHtml(d, "data") + `<div class="mgrid">
     ${metric("Last Price", fUsd(q.last_price ?? t.current_price))}
     ${metric("Day Change", fPct(t.daily_change), signCls(t.daily_change))}
     ${metric("Open", fUsd(q.open))}
@@ -2237,7 +2355,7 @@ function renderAll(d) {
           came from is where they belong. */""}
     ${pa.trend ? metric("Market Structure", esc(pa.trend)) : ""}
     ${q.market_state ? metric("Market State", esc(q.market_state)) : ""}
-    ${q.fetched_at ? metric("Data Fetched", esc(q.fetched_at)) : ""}
+    ${q.fetched_at ? metric("Data Fetched", esc(q.fetched_at), ageTier(sessions[d.ticker]?.createdAt) ? "stale-val" : "") : ""}
   </div>`;
   snap += rangeBar("Day range", q.day_low, q.day_high, q.last_price ?? t.current_price);
   snap += rangeBar("52-week range", t.low_52w ?? q.year_low, t.high_52w ?? q.year_high, q.last_price ?? t.current_price);
@@ -2507,7 +2625,7 @@ function renderAll(d) {
   } else {
     const ai = document.getElementById("aiSummary");
     ai.className = "prose";
-    ai.innerHTML = aiWarnHtml(d) + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
+    ai.innerHTML = aiWarnHtml(d) + (d.aiSummary ? staleNoticeHtml(d, "ai") : "") + thinkingBlock(d.aiReasoning) + renderAnalysisBody(d.aiSummary) + aiDisclaimerHtml(d);
     document.getElementById("aiScroll").scrollTop = 0;
   }
 
