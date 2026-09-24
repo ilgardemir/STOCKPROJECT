@@ -263,6 +263,45 @@ information-first layouts and treats decoration as suspect.
   `--chrome-1`) in all six themes. Daylight is the worst case. Confirm hover and active states
   differ from their backdrop.
 
+### UI / design guidelines
+
+When modifying UI, preserve and extend the existing design system rather than inventing a new one.
+
+Avoid stereotypical AI-generated UI patterns:
+- excessive cards and nested containers
+- excessive rounded corners
+- gradient text, glowing borders, decorative gradients, or background blobs
+- large shadows on ordinary components
+- oversized headings in application interfaces
+- icons attached to every label or heading
+- excessive pills, badges, and decorative labels
+- unnecessary borders around every section
+- arbitrary spacing or one-off colors
+- filling whitespace with decorative elements
+- creating new components when an existing component can be extended
+
+Prefer:
+- strong alignment and grid structure
+- consistent spacing tokens
+- restrained typography hierarchy
+- subtle borders and shadows
+- purposeful color usage
+- information density appropriate to the application
+- whitespace instead of decorative containers
+- one clear primary action per section
+- reusable existing components
+- predictable responsive behavior
+
+Before implementing a UI change:
+1. Inspect neighboring components and pages.
+2. Identify existing spacing, typography, colors, radii, and component patterns.
+3. Reuse those patterns wherever possible.
+4. Make the smallest design change necessary to accomplish the requested goal.
+5. Review the result for visual consistency with the rest of the product.
+
+The finished interface should look intentionally designed, not like a generic AI-generated SaaS
+template.
+
 ## Environment variables
 
 Every limit and knob reads an env var and falls back to its default on a typo, so values can be
