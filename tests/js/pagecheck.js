@@ -272,10 +272,10 @@ function run(page, units, poisonId, dropIds) {
   return { page, ok: true, ids: ids.size };
 }
 
-const PAGES = ["index.html", "screener.html", "ilgar.html", "404.html"];
+const PAGES = ["index.html", "screener.html", "portfolio.html", "ilgar.html", "404.html"];
 const JOBS = PAGES.map(page => [page, unitsOf(assemble(page))]);
 // Saved analyses can be removed from shared chrome on secondary pages too.
-for (const page of ["index.html", "screener.html", "ilgar.html"]) {
+for (const page of ["index.html", "screener.html", "portfolio.html", "ilgar.html"]) {
   JOBS.push([page, [...unitsOf(assemble(page)), {
     name: "delete-saved-analysis",
     // Driven off whatever the seed actually contains rather than off hardcoded tickers:
@@ -361,7 +361,7 @@ for (const [page, scripts] of JOBS) {
  * prove app.js runs when the DOM is perfect; this proves it survives when it is not.
  */
 const FRAGILE_CHROME = ["themeBtn", "themeMenu", "profileBtn", "tickerBar", "ticker", "searchForm", "watchBtn", "watchMenu", "watchRows", "watchAdd"];
-for (const page of ["index.html", "screener.html", "ilgar.html"]) {
+for (const page of ["index.html", "screener.html", "portfolio.html", "ilgar.html"]) {
   const scripts = unitsOf(assemble(page));
   const r = run(page, scripts, undefined, FRAGILE_CHROME);
   if (r.ok) console.log(`ok - ${page} survives missing shared chrome (${FRAGILE_CHROME.length} ids removed)`);

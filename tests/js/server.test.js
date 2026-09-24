@@ -26,7 +26,7 @@ test("static server publishes assets but never repository files or traversal pat
   for (const url of ["/server.js", "/CLAUDE.md", "/.env", "/.git/config", "/tests/js/run.js",
     "/partials/chrome-top.html", "/%2e%2e/server.js", "/assets/%2e%2e/server.js", "/%ZZ"])
     assert.equal((await read(url)).status, 404, url);
-  for (const url of ["/", "/?t=JPM", "/screener", "/ilgar", "/app.js", "/styles.css", "/assets/favicon.ico"])
+  for (const url of ["/", "/?t=JPM", "/screener", "/portfolio", "/ilgar", "/app.js", "/styles.css", "/assets/favicon.ico"])
     assert.equal((await read(url)).status, 200, url);
 });
 

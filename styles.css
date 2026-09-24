@@ -474,7 +474,7 @@ body.has-analysis #searchForm { max-width: 280px; }
    are the analysis. Same collapse the rail already does at 720px, keyed to has-analysis so
    the landing page keeps its labels. */
 @media (max-width: 1400px) {
-  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #savedBtn span, body.has-analysis #watchBtn span { display: none; }
+  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #portfolioNav span, body.has-analysis #savedBtn span, body.has-analysis #watchBtn span { display: none; }
   body.has-analysis .util-rail > button { width: 38px; padding: 0; }
   body.has-analysis #savedBtn { width: auto; padding: 0 9px; }
   /* The watchlist gave the ticker bar's badges ~80px less room here. Its count is the
@@ -585,6 +585,77 @@ body.has-analysis #searchForm { max-width: 280px; }
    an in-app transition from another view, and replaying it on navigation would be exactly
    the arrival-announcing motion the design direction removed everywhere else. */
 body[data-page="screener"] #screenerView { display: block; animation: none; }
+
+/* ── Portfolio (/portfolio) ─────────────────────────────────────────────────
+   Borrows the screener's shell and head. Numbers are right-aligned tabular mono so a
+   column of values reads down by magnitude; green/red only on changes and P&L. */
+#portfolioView { flex: 1; min-height: 0; overflow-y: auto; padding: 26px clamp(16px, 4vw, 54px) 70px; background: var(--chrome-0); }
+#pfSummary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 18px; border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--chrome-1); }
+#pfSummary:empty { display: none; }
+.pf-stat { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; min-width: 0; }
+.pf-stat + .pf-stat { border-left: 1px solid var(--rule); }
+.pf-stat small { color: var(--ink-dim); font-size: var(--t-micro); letter-spacing: .04em; text-transform: uppercase; }
+.pf-stat b { color: var(--ink-bright); font-size: var(--t-lead); font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-stat span { font-size: var(--t-data); font-variant-numeric: tabular-nums; color: var(--ink-dim); }
+.pf-stat .green, .pf-table .green { color: var(--up); } .pf-stat .red, .pf-table .red { color: var(--down); }
+#pfAdd { display: flex; margin-top: 18px; align-items: flex-end; flex-wrap: wrap; gap: 10px; padding: 10px; border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--chrome-1); }
+.pf-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 140px; min-width: 0; }
+.pf-field.pf-ticker { flex: 0 1 120px; }
+.pf-field span { color: var(--ink-dim); font-size: var(--t-micro); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.pf-field em { font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.pf-field input, #pfImportText { width: 100%; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--chrome-0); color: var(--ink-bright); padding: 8px 10px; font: var(--t-body) var(--mono); }
+.pf-field input:focus, #pfImportText:focus { outline: none; border-color: var(--accent); }
+#pfTicker { text-transform: uppercase; }
+#pfSubmit, #pfCancel, #pfImportBtn { height: 36px; min-width: 88px; padding: 0 16px; border-radius: var(--radius-sm); cursor: pointer; font: 600 var(--t-data) var(--mono); }
+#pfSubmit, #pfImportBtn { border: 0; background: var(--accent); color: var(--accent-ink); }
+#pfCancel { border: 1px solid var(--rule); background: transparent; color: var(--ink); }
+#pfCancel:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+#pfCancel[hidden] { display: none; }
+.pf-note { margin: 6px 2px 0; min-height: 1em; font-size: var(--t-data); color: var(--warn); }
+.pf-note.ok { color: var(--ink-dim); }
+#pfImport { margin: 8px 0 0; }
+#pfImport summary { cursor: pointer; color: var(--ink-dim); font-size: var(--t-data); }
+#pfImport summary:hover { color: var(--ink-bright); }
+#pfImportText { display: block; margin-top: 8px; resize: vertical; line-height: var(--lh-tight); }
+.pf-import-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; color: var(--ink-dim); font-size: var(--t-micro); }
+.pf-table-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.pf-table-head .menu-head { flex: 1; padding: 0; }
+#pfRefresh { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: var(--radius-xs); background: none; color: var(--ink-dim); cursor: pointer; }
+#pfRefresh:hover { color: var(--ink-bright); background: var(--chrome-hi); }
+#pfRefresh svg { width: 14px; height: 14px; }
+#pfRefresh.spin svg { animation: spin 1s linear infinite; }
+.pf-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--chrome-1); }
+.pf-table { width: 100%; border-collapse: collapse; font-size: var(--t-data); font-variant-numeric: tabular-nums; }
+.pf-table th { padding: 9px 12px; border-bottom: 1px solid var(--rule); color: var(--ink-dim); font-size: var(--t-micro); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; text-align: right; white-space: nowrap; }
+.pf-table td { padding: 9px 12px; border-bottom: 1px solid var(--rule); color: var(--ink); text-align: right; white-space: nowrap; }
+.pf-table th:first-child, .pf-table td:first-child { text-align: left; }
+.pf-table tbody tr:hover { background: var(--chrome-hi); }
+.pf-table tfoot td { border-bottom: 0; color: var(--ink-bright); font-weight: 600; }
+.pf-table td.pf-val { color: var(--ink-bright); font-weight: 600; }
+.pf-sym { border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink-bright); font: 600 var(--t-data) var(--mono); letter-spacing: .02em; }
+.pf-sym:hover { color: var(--accent); text-decoration: underline; }
+.pf-sub { display: block; color: var(--ink-dim); font-size: var(--t-micro); }
+td:first-child > .pf-sub { max-width: 26ch; overflow: hidden; text-overflow: ellipsis; }
+.pf-weight { display: inline-flex; align-items: center; gap: 8px; }
+.pf-weight i { display: block; width: 48px; height: 4px; border-radius: 2px; background: var(--chrome-2); overflow: hidden; }
+.pf-weight i::before { content: ""; display: block; width: var(--w, 0%); height: 100%; background: var(--accent); }
+.pf-act { display: inline-flex; gap: 2px; }
+.pf-act button { width: 28px; height: 26px; border: 0; border-radius: var(--radius-xs); background: none; color: var(--ink-dim); cursor: pointer; font-size: var(--t-body); }
+.pf-act button:hover { color: var(--ink-bright); background: var(--chrome-2); }
+.pf-act .pf-del:hover { color: var(--down); background: var(--down-soft); }
+.pf-table tr.editing td { background: var(--accent-soft); }
+.pf-empty { padding: 26px 14px; text-align: center; color: var(--ink-dim); font-size: var(--t-body); }
+@media (max-width: 720px) {
+  #portfolioView { padding: 20px 12px calc(40px + env(safe-area-inset-bottom, 0px)); }
+  #pfSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pf-stat:nth-child(3) { border-left: 0; }
+  .pf-stat:nth-child(n+3) { border-top: 1px solid var(--rule); }
+  /* Today's move is in the summary; value and P&L are what a phone row has room for. */
+  .pf-col-cost, .pf-col-weight, .pf-col-shares, .pf-col-day { display: none; }
+  .pf-table th, .pf-table td { padding: 9px 6px; }
+  .pf-act { flex-direction: column; }
+  td:first-child > .pf-sub { max-width: 12ch; }
+}
 
 /* ── Private point-in-time analyzer (/ilgar) ──────────────────────────────── */
 body[data-page="backtester"] { overflow: auto; }
@@ -919,7 +990,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 @media (max-width: 900px) { #analyzeBtn { width: 30px; padding: 0; justify-content: center; } #analyzeBtn .btn-label { display: none; } }
 @media (max-width: 720px) {
   /* Rail collapses to icons — the labels go, the controls stay. */
-  #profileBtn span, #screenerNav span, #savedBtn span, #watchBtn span { display: none; }
+  #profileBtn span, #screenerNav span, #portfolioNav span, #savedBtn span, #watchBtn span { display: none; }
   .util-rail > button { width: 38px; padding: 0; }
   /* The search box sits far right in a crowded header, so a dropdown anchored to it
      overhangs the left edge of the screen. Anchor to the viewport instead. */

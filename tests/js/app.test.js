@@ -810,3 +810,59 @@ test("a watch row shows the move since the saved snapshot and never invents a pr
   assert.match(pending, /watch-px">—/);
   assert.match(app("watchRowHtml")({ t: "AMD" }), /Not analyzed yet/);
 });
+
+/* ── Portfolio ────────────────────────────────────────────────────────────── */
+test("portfolio lots merge at a weighted cost, and a lot without a cost clears it", () => {
+  const app = loadApp();
+  assert.equal(app("upsertHolding")(" $aapl ", "10", "100").ok, true);
+  const merged = app("upsertHolding")("AAPL", "30", "$200");
+  assert.equal(merged.ok, true);
+  assert.equal(app("portfolio[0].shares"), 40);
+  assert.equal(app("portfolio[0].cost"), 175);            // (10×100 + 30×200) / 40
+  assert.match(app("upsertHolding")("AAPL", "5", "").message, /cleared/);
+  assert.equal(app("portfolio[0].cost"), null);
+  assert.equal(app("upsertHolding")("AAPL", "2", "50", true).ok, true);   // edit replaces
+  assert.equal(app("portfolio[0].shares"), 2);
+  assert.equal(app("portfolio[0].cost"), 50);
+  assert.match(app("upsertHolding")("not a ticker", "1", "").message, /isn't a ticker/);
+  assert.match(app("upsertHolding")("MSFT", "0", "").message, /above zero/);
+  assert.match(app("upsertHolding")("MSFT", "1", "abc").message, /valid price/);
+  assert.equal(app("portfolio.length"), 1);
+});
+
+test("portfolio paste import reads comma, space and tab lines and reports the rest", () => {
+  const app = loadApp();
+  const r = app("importPortfolioText")("Symbol,Shares,Cost\nAAPL, 25, 142.10\nMSFT 10 310\nVOO\t1,250\t400.5\n\n# note\nNVDA, lots");
+  assert.equal(r.added, 3);
+  assert.deepEqual([...r.failed], [1, 7]);
+  assert.equal(app("portfolio.find(h => h.t === 'VOO').shares"), 1250);   // tab line keeps the thousands comma
+  assert.equal(app("portfolio.find(h => h.t === 'AAPL').cost"), 142.1);
+  // Reload goes through the same validation.
+  app("localStorage.setItem(PF_STORAGE_KEY, JSON.stringify([{t:'AMD',shares:3,cost:null},{t:'AMD',shares:1},{t:'<b>',shares:1},{t:'X',shares:-2}]))");
+  app("loadPortfolio()");
+  assert.equal(app("JSON.stringify(portfolio)"), JSON.stringify([{ t: "AMD", shares: 3, cost: null }]));
+});
+
+test("portfolio totals count only priced holdings and P&L only holdings with a cost", () => {
+  const app = loadApp();
+  app("upsertHolding")("AAA", "10", "50");
+  app("upsertHolding")("BBB", "4", "");
+  app("upsertHolding")("CCC", "1", "10");
+  app(`pfQuotes.AAA = { status: "fresh", price: 60, change: 1, change_pct: 1.69 };
+       pfQuotes.BBB = { status: "fresh", price: 100, change: -2, change_pct: -1.96 };
+       pfQuotes.CCC = { status: "deferred" };`);
+  const v = app("portfolioView()");
+  assert.equal(v.value, 1000);                       // 600 + 400; CCC has no price
+  assert.equal(v.priced, 2);
+  assert.equal(v.day, 2);                            // +10 − 8
+  assert.equal(v.pnl, 100);                          // AAA only: BBB has no cost, CCC no price
+  assert.equal(v.ret, 0.2);
+  assert.equal(v.rows[0].t, "AAA");                  // largest first, unpriced last
+  assert.equal(v.rows[2].t, "CCC");
+  assert.equal(v.rows[0].weight, 0.6);
+  app("renderPortfolio()");
+  const sum = app(`document.getElementById("pfSummary").innerHTML`);
+  assert.match(sum, /2 of 3 priced/);
+  assert.match(sum, /1 of 3 with cost/);
+  assert.match(app(`document.getElementById("pfTable").innerHTML`), /Add an average cost/);
+});

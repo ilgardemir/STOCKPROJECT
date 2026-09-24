@@ -11,6 +11,7 @@ const PAGE = document.body.dataset.page || "analyzer";
 const IS_ANALYZER_PAGE = PAGE === "analyzer";
 const IS_SCREENER_PAGE = PAGE === "screener";
 const IS_BACKTESTER_PAGE = PAGE === "backtester";
+const IS_PORTFOLIO_PAGE = PAGE === "portfolio";
 function on(id, ev, fn, opts) {
   const el = document.getElementById(id);
   if (el) el.addEventListener(ev, fn, opts);
@@ -1242,6 +1243,7 @@ function finalizeAiRender(d) {
    deep-link handler at the bottom of this file picks the state back up on arrival. Saved
    tabs and MySquall survive the trip because they were always localStorage, not memory. */
 function gotoScreener(id) { location.href = id ? `/screener?id=${encodeURIComponent(id)}` : "/screener"; }
+function gotoPortfolio() { if (!IS_PORTFOLIO_PAGE) location.href = "/portfolio"; }
 function gotoAnalyzer(ticker) { location.href = ticker ? `/?t=${encodeURIComponent(ticker)}` : "/"; }
 
 function goHome() {
@@ -1964,9 +1966,266 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && wa
 /* Another tab edited the list — follow it rather than overwrite it on our next write. */
 window.addEventListener("storage", e => { if (e.key === WATCH_STORAGE_KEY) { loadWatchlist(); renderWatchlist(); syncWatchToggle(); } });
 
+/* ════════════════ PORTFOLIO ════════════════
+   Holdings someone owns: ticker, share count and an optional average cost. Same storage and
+   quote story as the watchlist — the list lives in localStorage only, prices come from
+   GET /quotes and are never persisted, and they refresh only while /portfolio is visible.
+   Deliberately no AI here yet. Totals only count holdings that actually have a price, and
+   P&L only counts holdings that have a cost, and the summary says so rather than quietly
+   treating a missing number as zero. */
+const PF_STORAGE_KEY = "squall-portfolio-v1";
+const PF_MAX = 25;                   // one /quotes call; matches SQUALL_QUOTE_MAX_SYMBOLS' default
+const PF_MAX_SHARES = 1e9, PF_MAX_COST = 1e7;
+let portfolio = [];                  // [{ t, shares, cost: number|null }]
+const pfQuotes = {};                 // ticker → last /quotes row, memory only
+let pfFetchedAt = 0, pfTimer = null, pfInflight = false, pfNotice = "", pfNoticeOk = false, pfEditing = null;
+
+/* A positive finite number, or null. Accepts "$1,234.50" as typed or pasted. */
+function pfNum(v, allowZero = false) {
+  if (typeof v === "string") v = v.trim().replace(/^\$/, "").replace(/,/g, "");
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return isFinite(n) && (allowZero ? n >= 0 : n > 0) ? n : null;
+}
+function loadPortfolio() {
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(PF_STORAGE_KEY) || "[]"); } catch (_) { raw = []; }
+  if (!Array.isArray(raw)) raw = [];
+  const seen = new Set();
+  portfolio = raw.filter(r => r && typeof r.t === "string" && WATCH_TICKER_RE.test(r.t) && !seen.has(r.t) && seen.add(r.t))
+    .map(r => ({ t: r.t, shares: pfNum(r.shares), cost: pfNum(r.cost, true) }))
+    .filter(r => r.shares && r.shares <= PF_MAX_SHARES).slice(0, PF_MAX);
+}
+function persistPortfolio() {
+  try { localStorage.setItem(PF_STORAGE_KEY, JSON.stringify(portfolio)); return true; }
+  catch (_) { showStorageNotice("Browser storage is full — the portfolio change could not be saved."); return false; }
+}
+
+/* Add a lot, or (replace) overwrite a holding. Adding to a ticker already held merges the
+   lots at a share-weighted average cost; that average is only honest when both lots have a
+   cost, so a lot without one clears it rather than inventing a number. */
+function upsertHolding(rawT, rawShares, rawCost, replace = false) {
+  const t = normalizeWatchTicker(rawT);
+  if (!WATCH_TICKER_RE.test(t)) return { ok: false, message: `"${String(rawT ?? "").trim().slice(0, 12)}" isn't a ticker symbol.` };
+  const shares = pfNum(rawShares);
+  if (!shares || shares > PF_MAX_SHARES) return { ok: false, message: `Enter a share count above zero for ${t}.` };
+  const costGiven = String(rawCost ?? "").trim() !== "";
+  const cost = costGiven ? pfNum(rawCost, true) : null;
+  if (costGiven && (cost === null || cost > PF_MAX_COST)) return { ok: false, message: `The average cost for ${t} isn't a valid price.` };
+  const held = portfolio.find(r => r.t === t);
+  if (held && replace) { held.shares = shares; held.cost = cost; return { ok: true, t, message: `Updated ${t}.` }; }
+  if (held) {
+    const total = held.shares + shares;
+    if (total > PF_MAX_SHARES) return { ok: false, message: `That would put ${t} above ${PF_MAX_SHARES.toLocaleString("en-US")} shares.` };
+    const both = held.cost !== null && cost !== null;
+    held.cost = both ? (held.shares * held.cost + shares * cost) / total : null;
+    held.shares = total;
+    return { ok: true, t, message: both ? `Added to ${t}; average cost is now ${fUsd(held.cost)}.`
+      : `Added to ${t}. The average cost was cleared because one lot had none — edit it to set one.` };
+  }
+  if (portfolio.length >= PF_MAX) return { ok: false, message: `The portfolio holds up to ${PF_MAX} tickers — remove one first.` };
+  portfolio.push({ t, shares, cost });
+  return { ok: true, t, message: `Added ${t}.` };
+}
+function removeHolding(t) {
+  portfolio = portfolio.filter(r => r.t !== t);
+  delete pfQuotes[t];
+}
+
+/* "AAPL, 25, 142.10" / "MSFT 10 310" / tab-separated, one holding per line. A line whose
+   share field isn't a number (a pasted header row, a note) is skipped and reported. */
+function parsePortfolioText(text) {
+  const rows = [], skipped = [];
+  String(text || "").split(/\r?\n/).forEach((line, i) => {
+    const s = line.trim();
+    if (!s || s.startsWith("#")) return;
+    // Tab- or semicolon-separated lines (spreadsheet pastes) may carry "1,250" thousands
+    // separators, so commas split only when neither is present.
+    const parts = (/[\t;]/.test(s) ? s.split(/[\t;]+/) : s.split(/[\s,]+/)).map(x => x.trim()).filter(Boolean);
+    if (parts.length < 2 || pfNum(parts[1]) === null) { skipped.push(i + 1); return; }
+    rows.push({ t: parts[0], shares: parts[1], cost: parts[2] ?? "", line: i + 1 });
+  });
+  return { rows, skipped };
+}
+function importPortfolioText(text) {
+  const { rows, skipped } = parsePortfolioText(text);
+  let added = 0; const failed = [...skipped];
+  for (const r of rows) { if (upsertHolding(r.t, r.shares, r.cost).ok) added += 1; else failed.push(r.line); }
+  if (added) persistPortfolio();
+  return { added, failed: failed.sort((a, b) => a - b) };
+}
+
+/* Per-holding numbers plus totals. Everything a missing quote or cost would poison is
+   computed over the subset that has it, and the counts travel with the totals. */
+function portfolioView() {
+  const rows = portfolio.map(h => {
+    const q = pfQuotes[h.t];
+    const price = q && isNum(q.price) ? q.price : null;
+    const value = price !== null ? price * h.shares : null;
+    const day = price !== null && isNum(q.change) ? q.change * h.shares : null;
+    const basis = h.cost !== null ? h.cost * h.shares : null;
+    const pnl = value !== null && basis !== null ? value - basis : null;
+    return { ...h, q, price, value, day, dayPct: q && isNum(q.change_pct) ? q.change_pct / 100 : null,
+      basis, pnl, ret: pnl !== null && basis > 0 ? pnl / basis : null };
+  });
+  const priced = rows.filter(r => r.value !== null);
+  const value = priced.reduce((a, r) => a + r.value, 0);
+  const dayRows = priced.filter(r => r.day !== null);
+  const day = dayRows.reduce((a, r) => a + r.day, 0);
+  const dayBase = dayRows.reduce((a, r) => a + r.value - r.day, 0);
+  const pnlRows = rows.filter(r => r.pnl !== null);
+  const pnl = pnlRows.reduce((a, r) => a + r.pnl, 0);
+  const pnlBasis = pnlRows.reduce((a, r) => a + r.basis, 0);
+  const basis = rows.reduce((a, r) => a + (r.basis ?? 0), 0);
+  for (const r of rows) r.weight = r.value !== null && value > 0 ? r.value / value : null;
+  // Largest position first; unpriced holdings keep their entry order at the bottom.
+  rows.sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+  return { rows, value, priced: priced.length, day: dayRows.length ? day : null, dayPct: dayBase > 0 ? day / dayBase : null,
+    pnl: pnlRows.length ? pnl : null, ret: pnlBasis > 0 ? pnl / pnlBasis : null, pnlCount: pnlRows.length,
+    basis, costCount: rows.filter(r => r.basis !== null).length };
+}
+
+const fSignedUsd = v => !isNum(v) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + fUsd(Math.abs(v));
+const fSignedPct = (v, dp = 2) => !isNum(v) ? "" : (v > 0 ? "+" : v < 0 ? "−" : "") + fPct(Math.abs(v), dp);
+const fShares = v => isNum(v) ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "—";
+
+function pfPriceCell(r) {
+  if (r.price !== null) return fUsd(r.price);
+  const s = r.q && r.q.status;
+  return s === "unknown" ? `<span title="The quote provider does not know this symbol">Unknown</span>` : s ? "—" : "…";
+}
+function pfRowHtml(r, editing) {
+  const name = watchSnapshot(r.t)?.name;
+  return `<tr data-t="${escAttr(r.t)}"${editing ? ' class="editing"' : ""}>
+    <td><button class="pf-sym" type="button" title="Analyze ${escAttr(r.t)}">${esc(r.t)}</button>${name ? `<span class="pf-sub">${esc(name)}</span>` : ""}</td>
+    <td class="pf-col-shares">${fShares(r.shares)}</td>
+    <td class="pf-col-cost">${r.cost !== null ? fUsd(r.cost) : `<span class="pf-sub">—</span>`}</td>
+    <td>${pfPriceCell(r)}${r.q && r.q.status === "stale" ? `<span class="pf-sub" title="The quote provider is busy; this is the last known price">delayed ${Math.round((r.q.age_s || 0) / 60)}m</span>` : ""}</td>
+    <td class="pf-col-day ${signCls(r.day)}">${fSignedUsd(r.day)}${isNum(r.dayPct) ? `<span class="pf-sub ${signCls(r.dayPct)}">${fSignedPct(r.dayPct)}</span>` : ""}</td>
+    <td class="pf-val">${r.value !== null ? fUsd(r.value) : "—"}</td>
+    <td class="${signCls(r.pnl)}">${r.pnl !== null ? fSignedUsd(r.pnl) : `<span class="pf-sub" title="${r.cost === null ? "Add an average cost to see profit or loss" : "Waiting for a price"}">—</span>`}${isNum(r.ret) ? `<span class="pf-sub ${signCls(r.ret)}">${fSignedPct(r.ret)}</span>` : ""}</td>
+    <td class="pf-col-weight">${isNum(r.weight) ? `<span class="pf-weight"><i style="--w:${(r.weight * 100).toFixed(1)}%"></i>${fPct(r.weight, 1)}</span>` : "—"}</td>
+    <td><span class="pf-act"><button class="pf-edit" type="button" aria-label="Edit ${escAttr(r.t)}" title="Edit">✎</button><button class="pf-del" type="button" aria-label="Remove ${escAttr(r.t)}" title="Remove">×</button></span></td>
+  </tr>`;
+}
+
+function renderPortfolio() {
+  const table = document.getElementById("pfTable");
+  if (!table) return;
+  const v = portfolioView(), n = portfolio.length;
+  table.className = "pf-table";
+  const head = `<thead><tr><th scope="col">Holding</th><th scope="col" class="pf-col-shares">Shares</th><th scope="col" class="pf-col-cost">Avg cost</th><th scope="col">Price</th><th scope="col" class="pf-col-day">Day</th><th scope="col">Value</th><th scope="col">P&amp;L</th><th scope="col" class="pf-col-weight">Weight</th><th scope="col" aria-label="Actions"></th></tr></thead>`;
+  table.innerHTML = n ? head + `<tbody>${v.rows.map(r => pfRowHtml(r, r.t === pfEditing)).join("")}</tbody>
+    <tfoot><tr><td>Total</td><td class="pf-col-shares"></td><td class="pf-col-cost">${v.costCount ? fUsd(v.basis) : ""}</td><td></td>
+      <td class="pf-col-day ${signCls(v.day)}">${fSignedUsd(v.day)}</td><td>${v.priced ? fUsd(v.value) : "—"}</td>
+      <td class="${signCls(v.pnl)}">${fSignedUsd(v.pnl)}</td><td class="pf-col-weight"></td><td></td></tr></tfoot>`
+    : `<tbody><tr><td class="pf-empty" colspan="9">No holdings yet. Add a ticker below, or paste a list.</td></tr></tbody>`;
+
+  const sum = document.getElementById("pfSummary");
+  if (sum) sum.innerHTML = !n ? "" : [
+    ["Market value", v.priced ? fUsd(v.value) : "—", v.priced < n ? `${v.priced} of ${n} priced` : `${n} holding${n === 1 ? "" : "s"}`, ""],
+    ["Today", fSignedUsd(v.day), fSignedPct(v.dayPct), signCls(v.day)],
+    ["Unrealized P&L", fSignedUsd(v.pnl), v.pnl === null ? "Add average costs to see it" : fSignedPct(v.ret) + (v.pnlCount < n ? ` · ${v.pnlCount} of ${n} with cost` : ""), signCls(v.pnl)],
+    ["Cost basis", v.costCount ? fUsd(v.basis) : "—", v.costCount < n ? `${v.costCount} of ${n} with cost` : "", ""]
+  ].map(([k, val, sub, cls]) => `<div class="pf-stat"><small>${esc(k)}</small><b class="${cls}">${val}</b><span class="${cls}">${esc(sub)}</span></div>`).join("");
+
+  const stamp = document.getElementById("pfStamp");
+  if (stamp) stamp.textContent = pfFetchedAt ? `updated ${new Date(pfFetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const note = document.getElementById("pfNote");
+  if (note) { note.textContent = pfNotice; note.classList.toggle("ok", pfNoticeOk); }
+  document.getElementById("pfRefresh")?.classList.toggle("spin", pfInflight);
+}
+function setPfNotice(msg, ok = false) { pfNotice = msg || ""; pfNoticeOk = ok; }
+
+async function refreshPortfolioQuotes(force) {
+  if (!portfolio.length || pfInflight) return;
+  if (!force && Date.now() - pfFetchedAt < WATCH_REFRESH_MS - 1000) return;
+  pfInflight = true; renderPortfolio();
+  try {
+    const res = await fetch(`/quotes?symbols=${encodeURIComponent(portfolio.map(r => r.t).join(","))}`, { cache: "no-store" });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 429) setPfNotice(body.error || "Refreshing too often — try again in a moment.");
+    else if (!res.ok) setPfNotice(body.error || "Prices could not be loaded right now.");
+    else if (body.available === false) setPfNotice(body.message || "Live quotes are unavailable.");
+    else {
+      Object.assign(pfQuotes, body.quotes || {});
+      pfFetchedAt = Date.now();
+      const missing = Object.values(body.quotes || {}).filter(q => q.status === "deferred" || q.status === "error").length;
+      if (missing) setPfNotice(`${missing} price${missing === 1 ? "" : "s"} unavailable right now — the next refresh will try again.`);
+      else if (!pfNoticeOk) setPfNotice("");
+    }
+  } catch (_) {
+    setPfNotice("Prices could not be loaded — check your connection.");
+  } finally {
+    pfInflight = false;
+    renderPortfolio();
+  }
+}
+
+function pfFormFields() {
+  return { t: document.getElementById("pfTicker"), s: document.getElementById("pfShares"), c: document.getElementById("pfCost") };
+}
+function setPfEditing(t) {
+  pfEditing = t;
+  const f = pfFormFields(), h = portfolio.find(r => r.t === t);
+  if (h && f.t) { f.t.value = h.t; f.s.value = String(h.shares); f.c.value = h.cost !== null ? String(+h.cost.toFixed(4)) : ""; }
+  else if (f.t) { f.t.value = f.s.value = f.c.value = ""; }
+  const submit = document.getElementById("pfSubmit"), cancel = document.getElementById("pfCancel");
+  if (submit) submit.textContent = h ? "Update" : "Add";
+  if (cancel) cancel.hidden = !h;
+  renderPortfolio();
+  (h ? f.s : f.t)?.focus();
+}
+
+if (IS_PORTFOLIO_PAGE) {
+  loadPortfolio();
+  renderPortfolio();
+  refreshPortfolioQuotes(true);
+  pfTimer = setInterval(() => { if (!document.hidden) refreshPortfolioQuotes(false); }, WATCH_REFRESH_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshPortfolioQuotes(false); });
+  window.addEventListener("storage", e => { if (e.key === PF_STORAGE_KEY) { loadPortfolio(); renderPortfolio(); refreshPortfolioQuotes(true); } });
+}
+on("pfAdd", "submit", e => {
+  e.preventDefault();
+  const f = pfFormFields();
+  const editing = pfEditing, next = normalizeWatchTicker(f.t?.value);
+  // Renaming a holding while editing moves it: the old ticker goes, the new one is written whole.
+  const prev = editing && next !== editing ? portfolio.find(r => r.t === editing) : null;
+  if (prev) removeHolding(editing);
+  const r = upsertHolding(f.t?.value, f.s?.value, f.c?.value, !!editing);
+  if (!r.ok && prev) portfolio.push(prev);   // put it back rather than lose it to a typo
+  setPfNotice(r.message, r.ok);
+  if (!r.ok) return renderPortfolio();
+  persistPortfolio();
+  setPfEditing(null);
+  refreshPortfolioQuotes(true);
+});
+on("pfCancel", "click", () => { setPfNotice(""); setPfEditing(null); });
+on("pfRefresh", "click", () => refreshPortfolioQuotes(true));
+on("pfImportBtn", "click", () => {
+  const box = document.getElementById("pfImportText");
+  const { added, failed } = importPortfolioText(box?.value);
+  const failNote = failed.length ? ` Skipped line${failed.length === 1 ? "" : "s"} ${failed.slice(0, 8).join(", ")}${failed.length > 8 ? "…" : ""} — expected "ticker, shares, cost".` : "";
+  setPfNotice(added ? `Imported ${added} holding${added === 1 ? "" : "s"}.${failNote}` : `Nothing imported.${failNote}`, !!added && !failed.length);
+  if (added && box) { box.value = ""; document.getElementById("pfImport")?.removeAttribute("open"); }
+  renderPortfolio();
+  if (added) refreshPortfolioQuotes(true);
+});
+on("pfTable", "click", e => {
+  const row = e.target.closest?.("tr[data-t]");
+  if (!row) return;
+  const t = row.dataset.t;
+  if (e.target.closest(".pf-del")) {
+    removeHolding(t); persistPortfolio();
+    if (pfEditing === t) setPfEditing(null);
+    setPfNotice(`Removed ${t}.`, true); renderPortfolio();
+  } else if (e.target.closest(".pf-edit")) { setPfNotice(""); setPfEditing(t); }
+  else if (e.target.closest(".pf-sym")) gotoAnalyzer(t);
+});
+
 function switchTicker(t) {
   if (!sessions[t]) return;
-  if (IS_SCREENER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the other page
+  if (!IS_ANALYZER_PAGE) return gotoAnalyzer(t);   // saved analyses live on the analyzer page
   const prev = active;
   active = t; activeScreen = null;
   // Opening the tab you are comparing against swaps the two panes rather than silently
@@ -3787,6 +4046,7 @@ syncChatThinkBtn();
 on("ticker", "keydown", e => { if (e.key === "Enter") { e.preventDefault(); runAnalysis(); } });
 renderTickerPills();
 if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria-current", "page");
+if (IS_PORTFOLIO_PAGE) document.getElementById("portfolioNav")?.setAttribute("aria-current", "page");
 
 /* ════════════════ DEEP LINKS ════════════════
    /?t=TICKER opens an analysis, /screener?id=<screen> opens a saved screen. This is the
@@ -3802,7 +4062,7 @@ if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria
     else document.getElementById("screenQuery")?.focus();
     return;
   }
-  if (IS_BACKTESTER_PAGE) return;
+  if (!IS_ANALYZER_PAGE) return;   // /ilgar and /portfolio have no deep links
   const t = (params.get("t") || "").trim().toUpperCase();
   if (!t) { focusHeroSearch(); return; }
   const field = document.getElementById("ticker");

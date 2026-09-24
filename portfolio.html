@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="noir" data-mode="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Portfolio — Track Your Holdings | Squall</title>
+<meta name="description" content="Enter your holdings and track market value, daily change and profit or loss with live prices. Stored only in your browser." />
+<link rel="canonical" href="https://squall.up.railway.app/portfolio" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://squall.up.railway.app/portfolio" />
+<meta property="og:site_name" content="Squall" />
+<meta property="og:title" content="Portfolio — Track Your Holdings" />
+<meta property="og:description" content="Market value, daily change and profit or loss for your holdings, with live prices." />
+<meta name="twitter:card" content="summary" />
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="portfolio">
+
+<!--#include chrome-top-->
+
+<!--#include chrome-tabs-->
+
+<section id="portfolioView" aria-label="Portfolio">
+  <div class="screen-shell">
+    <div class="screen-head">
+      <div>
+        <div class="screen-kicker">Portfolio</div>
+        <h1>Your holdings.</h1>
+        <p>Enter what you own to track value, daily change and profit or loss at live prices. Holdings are saved in this browser only.</p>
+      </div>
+    </div>
+
+    <!-- Totals. Filled by renderPortfolio(); hidden until there is at least one holding. -->
+    <div id="pfSummary" aria-live="polite"></div>
+
+    <div class="pf-table-head">
+      <span class="menu-head">Holdings</span>
+      <span id="pfStamp" class="as-of" aria-live="polite"></span>
+      <button id="pfRefresh" type="button" title="Refresh prices" aria-label="Refresh prices">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+      </button>
+    </div>
+    <div class="pf-scroll"><table id="pfTable"></table></div>
+
+    <form id="pfAdd" autocomplete="off">
+      <label class="pf-field pf-ticker"><span>Ticker</span>
+        <input id="pfTicker" type="text" placeholder="AAPL" maxlength="10" spellcheck="false" required></label>
+      <label class="pf-field"><span>Shares</span>
+        <input id="pfShares" type="number" inputmode="decimal" min="0" step="any" placeholder="10" required></label>
+      <label class="pf-field"><span>Avg cost / share <em>optional</em></span>
+        <input id="pfCost" type="number" inputmode="decimal" min="0" step="any" placeholder="150.00"></label>
+      <button id="pfSubmit" type="submit">Add</button>
+      <button id="pfCancel" type="button" hidden>Cancel</button>
+    </form>
+    <p id="pfNote" class="pf-note" role="status"></p>
+
+    <details id="pfImport">
+      <summary>Paste several holdings at once</summary>
+      <textarea id="pfImportText" rows="5" spellcheck="false" aria-label="Holdings to import, one per line"
+        placeholder="One per line: ticker, shares, avg cost (optional)&#10;AAPL, 25, 142.10&#10;MSFT 10 310&#10;VOO	4"></textarea>
+      <div class="pf-import-row">
+        <button id="pfImportBtn" type="button">Import</button>
+        <span>Existing tickers are added to as a new lot.</span>
+      </div>
+    </details>
+  </div>
+</section>
+
+<script src="sp500.js"></script>
+<script src="market-universes.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

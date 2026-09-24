@@ -41,7 +41,7 @@ Screener env knobs for fast tests: `SCREENER_LIMIT=N`, `SCREENER_CACHE_TTL`, `SC
 
 - `tests/js/run.js` awaits each test. `stream-failsafe.test.js` still has its own older runner.
 - `tests/js/pagecheck.js` runs each page's scripts (including inline `<script>` blocks) against
-  that page's real id set for `index.html`, `screener.html`, `ilgar.html` and `404.html`. It seeds
+  that page's real id set for `index.html`, `screener.html`, `portfolio.html`, `ilgar.html` and `404.html`. It seeds
   a saved analysis whose **newest** tab has intraday bars, a **derived** range tier and a
   **legacy numeric** `range`, so the returning-visitor path and the range migration both run.
   Don't weaken that seed.
@@ -69,7 +69,7 @@ The screener adds an LLM step that turns the query into a recipe before `screene
 | `event_calendar.py` | `event_risk` (next results window). No dependencies; backtester re-exports it |
 | `financial_rules.py` | Business-model applicability, bid/ask validation |
 | `app.js` / `styles.css` | Shared by every page: one script, one stylesheet |
-| `index.html` (`/`), `screener.html`, `ilgar.html`, `404.html` | Pages. `partials/chrome-top.html`, `partials/chrome-tabs.html` hold shared chrome via `<!--#include name-->` |
+| `index.html` (`/`), `screener.html`, `portfolio.html`, `ilgar.html`, `404.html` | Pages. `partials/chrome-top.html`, `partials/chrome-tabs.html` hold shared chrome via `<!--#include name-->` |
 | `sp500.js`, `market-universes.js` | Index constituents (S&P 500, Nasdaq-100, Dow 30, combined) |
 
 ### Engine contracts (Python ↔ Node)
@@ -237,6 +237,9 @@ which hides it but does not protect it.
   async and every transition promise needs a `catch`.
 - Watchlist: store tickers only (`squall-watchlist-v1`) and refresh only while the popover is open
   and the tab is visible.
+- Portfolio (`/portfolio`): holdings `{t, shares, cost|null}` in `squall-portfolio-v1`, priced from
+  `/quotes` (never stored), refreshed only while the page is visible. Totals count only priced
+  holdings and P&L only holdings with a cost; the summary shows those counts. No AI yet.
 - `404.html` shares only `styles.css`, with no `app.js` and no partials.
 
 ## Design system ("precision instrument")
