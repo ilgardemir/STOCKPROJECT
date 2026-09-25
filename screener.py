@@ -23,7 +23,7 @@ CACHE_PATH = Path(os.getenv("SCREENER_CACHE_PATH", "/tmp/squall-sp500-screen-cac
 CACHE_TTL = int(os.getenv("SCREENER_CACHE_TTL", "1800"))
 TEST_LIMIT = int(os.getenv("SCREENER_LIMIT", "0"))
 STAGES = 5
-CACHE_VERSION = 9  # industry-based financial-model classification (V/MA/exchanges are operating)
+CACHE_VERSION = 10  # confirmed upstream coverage; empty Yahoo responses never poison the cache
 
 # Missing bank capital/credit and REIT FFO data must not be replaced with industrial ratios.
 MODEL_UNSUPPORTED = {
@@ -65,6 +65,18 @@ THROTTLE_BACKOFF = float(os.getenv("SCREENER_THROTTLE_BACKOFF", "5.0"))
 
 _throttled = False        # sticky for the run once Yahoo signals backpressure
 _retry_budget_left = RETRY_BUDGET
+
+
+class EmptyHistoryResponse(RuntimeError):
+    """Yahoo completed the request but supplied no usable history rows."""
+
+
+class HistoryResult(dict):
+    """Price frames plus the symbols the upstream response actually accounted for."""
+
+    def __init__(self):
+        super().__init__()
+        self.confirmed = set()
 
 
 def looks_throttled(exc):
@@ -279,13 +291,15 @@ def get_symbol_modules(tickers):
 
 
 def get_history(tickers):
-    frames = {}
+    frames = HistoryResult()
     def load_batch(batch, label, retry=True):
         try:
             hist = Ticker(batch, asynchronous=True, max_workers=12, timeout=25).history(period="2y", interval="1d", adj_ohlc=True)
             if not isinstance(hist, pd.DataFrame) or hist.empty:
-                return
+                raise EmptyHistoryResponse("Yahoo returned an empty history response")
             if isinstance(hist.index, pd.MultiIndex):
+                answered = {str(symbol).upper() for symbol in hist.index.get_level_values(0).unique()}
+                frames.confirmed.update(symbol for symbol in batch if symbol.upper() in answered)
                 for symbol in batch:
                     try:
                         part = hist.xs(symbol, level=0).copy()
@@ -293,8 +307,10 @@ def get_history(tickers):
                             frames[symbol] = part
                     except (KeyError, ValueError):
                         pass
-            elif len(batch) == 1 and len(hist) >= 65:
-                frames[batch[0]] = hist.copy()
+            elif len(batch) == 1:
+                frames.confirmed.add(batch[0])
+                if len(hist) >= 65:
+                    frames[batch[0]] = hist.copy()
         except Exception as exc:
             throttled = note_failure(exc)
             # The |429 marker is what makes this line machine-readable upstream: the
@@ -313,7 +329,7 @@ def get_history(tickers):
                     if not take_retry_budget():
                         break
                     load_batch(batch[offset:offset + 10], f"{label}+{offset}", retry=False)
-            elif len(batch) > 1:
+            elif retry and len(batch) > 1:
                 for offset, symbol in enumerate(batch):
                     if not take_retry_budget():
                         break
@@ -478,11 +494,10 @@ def read_cache():
     write path merges: a file rewritten a moment ago can carry rows fetched much
     earlier, and an mtime check would keep renewing them forever.
 
-    `covered` is every ticker a previous run ATTEMPTED, which is deliberately a
-    superset of the tickers that produced rows. Judging coverage by rows alone meant
-    a single symbol with under 65 days of history — a new listing, a recent spin-off —
-    never appeared in the cache, failed the issubset check on every subsequent run,
-    and forced a full cold pull of the entire universe every time.
+    `covered` is every ticker accounted for by a non-empty upstream response, which
+    is deliberately a superset of the tickers that produced rows. This still records
+    a new listing with under 65 sessions when Yahoo actually returned it, but never
+    turns a total provider outage into a fresh, empty universe.
     """
     try:
         if not CACHE_PATH.exists():
@@ -555,14 +570,21 @@ def build_universe(tickers, names):
         progress(84, "Using current cached market data")
         return rank_universe([cached_rows[t] for t in tickers if t in cached_rows]), True
 
-    stage(1, f"Loading price history for complete one-year windows for {len(tickers)} companies")
-    progress(12, f"Loading price history for complete one-year windows for {len(tickers)} companies")
-    histories = get_history(tickers)
+    pending = [ticker for ticker in tickers if ticker not in cached_covered]
+    stage(1, f"Loading price history for complete one-year windows for {len(pending)} companies")
+    progress(12, f"Loading price history for complete one-year windows for {len(pending)} companies")
+    histories = get_history(pending)
+    confirmed = set(getattr(histories, "confirmed", set(histories)))
+    if pending and not histories and not cached_rows:
+        raise RuntimeError("The market-data provider returned no price history. Try the screen again shortly.")
     stage(2, "Loading sectors, valuation, and company statistics")
     progress(58, "Loading sectors, valuation, and company statistics")
-    modules = get_symbol_modules(tickers)
+    # A company without a usable price frame cannot produce a row, so requesting five
+    # company modules for all 500 names after a thin history response only compounds
+    # provider pressure without improving coverage.
+    modules = get_symbol_modules(list(histories))
     rows = []
-    for ticker in tickers:
+    for ticker in pending:
         feat = history_features(histories.get(ticker)) if ticker in histories else None
         if not feat:
             continue
@@ -655,7 +677,9 @@ def build_universe(tickers, names):
     merged_rows = dict(cached_rows)
     merged_rows.update({r["ticker"]: r for r in rows if r.get("ticker")})
     merged_covered = dict(cached_covered)
-    merged_covered.update({t: now for t in tickers})
+    # Only upstream-confirmed symbols are fresh. The old attempted-ticker behavior
+    # cached a total provider outage as complete coverage: 518 covered, zero rows.
+    merged_covered.update({ticker: now for ticker in confirmed})
     try:
         # allow_nan=False so a NaN can never reach the cache. The default would write a
         # bare NaN, json.loads would happily read it back, and the poisoned rows would

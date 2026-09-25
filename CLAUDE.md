@@ -163,7 +163,7 @@ checks for drift.
   `_throttled`, and a budget (`SCREENER_RETRY_BUDGET`).
 - `MAX_PY` sets the request rate. If you raise it, lower `SQUALL_SEC_RATE_PER_PROC` in the same change.
 - All sec.gov calls go through `_sec_throttle`. Per-filing fetch loops are capped by `SEC_MAX_FILING_FETCHES`.
-- Caches are load-shedding. The screener cache tracks *attempted* tickers, not rows produced.
+- Caches are load-shedding. The screener cache tracks tickers confirmed by non-empty upstream responses, not only rows produced; an empty provider response must never count as fresh coverage.
 - Every subprocess has a wall-clock timeout. Watch `providers.*.rate_limited` in `/stats`.
 
 ### `/ilgar`: research replay v2

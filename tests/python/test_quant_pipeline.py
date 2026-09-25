@@ -125,14 +125,52 @@ class PipelineRegressionTests(unittest.TestCase):
         cached={'BBB':dict(ticker='BBB',return_60d=0,return_1y=0,scores=dict(uptrend=50,momentum_medium=50,accumulation=50))}
         with tempfile.TemporaryDirectory() as tmp, patch.object(screener,'CACHE_PATH',Path(tmp)/'cache.json'), \
              patch.object(screener,'read_cache',return_value=(cached,{'BBB':1})), \
-             patch.object(screener,'get_history',return_value={'AAA':history()}), \
+             patch.object(screener,'get_history',return_value={'AAA':history()}) as get_history, \
              patch.object(screener,'get_symbol_modules',return_value={}), contextlib.redirect_stderr(io.StringIO()):
             rows,_=screener.build_universe(['AAA','BBB'],{})
             json.dumps(rows,allow_nan=False)
             self.assertTrue((Path(tmp)/'cache.json').exists())
+            get_history.assert_called_once_with(['AAA'])
         self.assertEqual(len(rows),2)
         self.assertIsNone(rows[0]['scores']['value'])
         self.assertEqual(rows[0]['scores']['relative_strength'],100)
+
+    def test_empty_history_response_is_not_recorded_as_coverage(self):
+        class EmptyYahoo:
+            def __init__(self, *_args, **_kwargs): pass
+            def history(self, **_kwargs): return pd.DataFrame()
+        with patch.object(screener,'Ticker',EmptyYahoo), \
+             patch.object(screener,'take_retry_budget',return_value=False), \
+             contextlib.redirect_stderr(io.StringIO()):
+            result=screener.get_history(['AAA','BBB'])
+        self.assertEqual(result,{})
+        self.assertEqual(result.confirmed,set())
+
+    def test_empty_batch_retries_in_smaller_bounded_requests(self):
+        class RecoveringYahoo:
+            def __init__(self, symbols, **_kwargs): self.symbols=symbols
+            def history(self, **_kwargs):
+                if len(self.symbols)>1: return pd.DataFrame()
+                return history()
+        with patch.object(screener,'Ticker',RecoveringYahoo), \
+             patch.object(screener,'take_retry_budget',return_value=True), \
+             contextlib.redirect_stderr(io.StringIO()):
+            result=screener.get_history(['AAA','BBB'])
+        self.assertEqual(set(result),{'AAA','BBB'})
+        self.assertEqual(result.confirmed,{'AAA','BBB'})
+
+    def test_total_history_outage_fails_instead_of_poisoning_the_cache(self):
+        empty=screener.HistoryResult()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(screener,'CACHE_PATH',Path(tmp)/'cache.json'), \
+             patch.object(screener,'read_cache',return_value=({},{})), \
+             patch.object(screener,'get_history',return_value=empty), \
+             patch.object(screener,'get_symbol_modules') as modules, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'no price history'):
+                screener.build_universe(['AAA','BBB'],{})
+            self.assertFalse((Path(tmp)/'cache.json').exists())
+            modules.assert_not_called()
 
     def test_macd_does_not_report_a_new_cross_on_an_existing_uptrend(self):
         frame=history(300)
