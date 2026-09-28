@@ -290,6 +290,29 @@ def get_symbol_modules(tickers):
     return out
 
 
+def probe_history(symbol):
+    """
+    One-shot diagnostic for a run where no history came back at all. yahooquery drops
+    every symbol whose chart request errored, so the batch surfaces only as an empty
+    frame and Yahoo's actual reply (429 text, crumb error, ...) is lost. Asking for one
+    symbol through both the async and sync paths records what Yahoo said and whether
+    concurrency is what it objects to. Two small requests, once per failed run.
+    """
+    out = []
+    for mode, kwargs in (("async", {"asynchronous": True, "max_workers": 12}), ("sync", {})):
+        try:
+            data = Ticker([symbol], timeout=15, **kwargs)._get_data("chart", {"range": "5d", "interval": "1d"})
+            reply = data.get(symbol) if isinstance(data, dict) else data
+            if isinstance(reply, dict) and "timestamp" in reply:
+                out.append(f"{mode}=ok:{len(reply['timestamp'])}bars")
+            else:
+                text = re.sub(r"\s+", " ", repr(reply))[:160]
+                out.append(f"{mode}={text}")
+        except Exception as exc:
+            out.append(f"{mode}={type(exc).__name__}:{str(exc)[:160]}")
+    return f"{symbol} " + " | ".join(out)
+
+
 def get_history(tickers):
     frames = HistoryResult()
     def load_batch(batch, label, retry=True):
@@ -576,7 +599,9 @@ def build_universe(tickers, names):
     histories = get_history(pending)
     confirmed = set(getattr(histories, "confirmed", set(histories)))
     if pending and not histories and not cached_rows:
-        raise RuntimeError("The market-data provider returned no price history. Try the screen again shortly.")
+        probe = probe_history(pending[0])
+        print(f"WARN|history-probe|{probe}", file=sys.stderr, flush=True)
+        raise RuntimeError(f"The market-data provider returned no price history. Try the screen again shortly. [probe: {probe}]")
     stage(2, "Loading sectors, valuation, and company statistics")
     progress(58, "Loading sectors, valuation, and company statistics")
     # A company without a usable price frame cannot produce a row, so requesting five
