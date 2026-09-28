@@ -299,7 +299,7 @@ def probe_history(symbol):
     concurrency is what it objects to. Two small requests, once per failed run.
     """
     out = []
-    for mode, kwargs in (("async", {"asynchronous": True, "max_workers": 12}), ("sync", {})):
+    for mode, kwargs in (("async", {"asynchronous": True, "max_workers": 10}), ("sync", {})):
         try:
             data = Ticker([symbol], timeout=15, **kwargs)._get_data("chart", {"range": "5d", "interval": "1d"})
             reply = data.get(symbol) if isinstance(data, dict) else data
@@ -317,7 +317,11 @@ def get_history(tickers):
     frames = HistoryResult()
     def load_batch(batch, label, retry=True):
         try:
-            hist = Ticker(batch, asynchronous=True, max_workers=12, timeout=25).history(period="2y", interval="1d", adj_ohlc=True)
+            # max_workers must stay <= 10. requests-futures 1.1 calls get_adapter() on the
+            # wrapped session above its default pool size, and yahooquery wraps a curl_cffi
+            # session that has none: every async batch then raised AttributeError and the
+            # screener returned nothing in production.
+            hist = Ticker(batch, asynchronous=True, max_workers=10, timeout=25).history(period="2y", interval="1d", adj_ohlc=True)
             if not isinstance(hist, pd.DataFrame) or hist.empty:
                 raise EmptyHistoryResponse("Yahoo returned an empty history response")
             if isinstance(hist.index, pd.MultiIndex):

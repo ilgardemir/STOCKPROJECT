@@ -1,4 +1,6 @@
 yahooquery>=2.3.7
+# 1.1 breaks yahooquery async sessions above 10 workers (get_adapter on curl_cffi).
+requests-futures<1.1
 pandas>=2.0
 numpy>=1.24
 requests>=2.28
