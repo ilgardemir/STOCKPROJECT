@@ -21,16 +21,17 @@
    and the mono wordmark's behavior. The theme has to be applied before first paint or the
    page flashes Noir at someone running Paper, so it is inline and synchronous, and the
    id→mode map mirrors THEMES in app.js (adding a palette means editing both). An unknown or
-   unreadable value falls through to the markup's Noir default rather than throwing. */
+   unreadable value falls back to the OS-derived default (Paper or Noir) rather than throwing. */
 (function () {
   var MODE = { dark:"dark", light:"light", noir:"dark", paper:"light", lagoon:"dark", matrix:"dark" };
+  var id;
   try {
-    var id = localStorage.getItem("squall-theme-v2");
-    if (id && MODE[id]) {
-      document.documentElement.dataset.theme = id;
-      document.documentElement.dataset.mode = MODE[id];
-    }
+    id = localStorage.getItem("squall-theme-v2");
   } catch (e) {}
+  // No explicit pick: follow the OS like app.js does (light → Paper, otherwise Noir).
+  if (!id || !MODE[id]) id = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "paper" : "noir";
+  document.documentElement.dataset.theme = id;
+  document.documentElement.dataset.mode = MODE[id];
 })();
 </script>
 </head>

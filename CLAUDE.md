@@ -230,7 +230,7 @@ which hides it but does not protect it.
 - The chat dock stays collapsed until used. `syncChatDock(focused)` takes focus explicitly. Clamp
   a stored `--chat-h`.
 - Two search fields share `attachTypeahead`. `#ticker` is the source of truth. Use `setAnalyzeBusy()`.
-- **Themes:** there are six (`THEMES`; default Noir; key `squall-theme-v2`, written only on an
+- **Themes:** there are six (`THEMES`; default follows the OS, Noir dark / Paper light; key `squall-theme-v2`, written only on an
   explicit pick). `404.html` mirrors the theme map inline, so adding a theme means editing both.
   Canvas code keys off `data-mode`. `cssVar` is memoized and invalidated by `squall:theme`, so
   mutate tokens only inside `commitTheme`. The crossfade is a view transition, so a token swap is

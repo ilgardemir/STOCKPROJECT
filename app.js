@@ -424,6 +424,15 @@ const THEMES = [
 const THEME_STORAGE_KEY = "squall-theme-v2";
 const LEGACY_THEME_KEY = "squall-theme";
 const DEFAULT_THEME = "noir";
+/* With no explicit pick, follow the OS: dark → Noir, light → Paper (Noir's mirror image, so
+   both defaults are the same monochrome identity). Never persisted, so a later OS switch is
+   followed live until the visitor picks a palette by hand. */
+const SYSTEM_LIGHT_THEME = "paper";
+const systemLightQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+function systemTheme() { return systemLightQuery && systemLightQuery.matches ? SYSTEM_LIGHT_THEME : DEFAULT_THEME; }
+function hasExplicitTheme() {
+  try { return THEMES.some(t => t.id === localStorage.getItem(THEME_STORAGE_KEY)); } catch (e) { return false; }
+}
 const themeBtn = document.getElementById("themeBtn");
 const themeMenu = document.getElementById("themeMenu");
 
@@ -517,9 +526,12 @@ if (themeMenu) themeMenu.innerHTML =
       localStorage.removeItem(LEGACY_THEME_KEY);
     }
   } catch (e) {}
-  // An unknown id (older build, hand-edited storage) falls back to the default.
-  if (!saved || !THEMES.some(t => t.id === saved)) saved = DEFAULT_THEME;
+  // An unknown id (older build, hand-edited storage) falls back to the OS-derived default.
+  if (!saved || !THEMES.some(t => t.id === saved)) saved = systemTheme();
   applyTheme(saved, false);
+  if (systemLightQuery && systemLightQuery.addEventListener) systemLightQuery.addEventListener("change", () => {
+    if (!hasExplicitTheme()) applyTheme(systemTheme(), true);
+  });
 })();
 
 /* Menu open/close + roving keyboard focus */
