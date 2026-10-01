@@ -109,8 +109,9 @@ checks for drift.
 ### Server routes
 
 - `GET /analyze-stream?ticker=&profile=`: the main path. SSE events: `progress`, `result`
-  (sent as soon as the scraper finishes), then `ai_start`/`ai_thinking`/`ai_delta` → `ai_done`
-  or `ai_error`. AI retries up to 3×, **only before the first token**.
+  (sent as soon as the scraper finishes; `news_pending: true` while the web search runs), `news`
+  (the digest fields, only when `news_pending` was set), then `ai_start`/`ai_thinking`/`ai_delta` →
+  `ai_done` or `ai_error`. AI retries up to 3×, **only before the first token**.
 - `GET /screen-stream?q=&universe=&profile=` (`existing=` + `result_count=` for refinement):
   `screen_*` events. All model output is re-sanitized against fixed enums and ranges.
 - `GET /backtest-stream?ticker=&as_of=`: `/ilgar`. Emits `backtest_outcomes` (with `audit`)
@@ -187,7 +188,9 @@ which hides it but does not protect it.
 - The analysis instruction block must stay under 2,600 characters (a test enforces this).
 - `ai_prompt` §6b (`build_price_bar_block`) carries actual bars. Headlines are untrusted source material.
 - **§14 news is a web-search digest** (`news-research.js`), spliced in by the server over the
-  scraper's Finnhub §14 before `result` is sent and before caching. An item survives only if its
+  scraper's Finnhub §14 after `result`, before caching and before the AI call. It reaches the
+  browser as the `news` event, and until then the News card shows a loader, **never** the Finnhub
+  records (the card shows only what the model reads; Finnhub shows on fallback). An item survives only if its
   URL is one the search **cited** (annotations). Dates must fall inside the lookback window, and
   labels are forced onto fixed enums. Finnhub records remain the fallback whenever the search is
   off, fails, times out, grounds nothing or the budget is gone. The digest is cached per ticker
