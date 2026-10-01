@@ -270,6 +270,8 @@ function trimBars(bars) {
 }
 function persistableSession(s) {
   const data = { ...s.data };
+  // A saved tab can never resume a search, so it is stored as the Finnhub state it holds.
+  delete data.news_pending;
   if (Array.isArray(data.price_history) && data.price_history.length) {
     data.price_history = trimBars(data.price_history);
     delete data.price_history_1y;   // only ever dropped when the series it aliases survived
@@ -1014,6 +1016,7 @@ function runAnalysis() {
   document.getElementById("screenerView")?.classList.remove("show");
   if (!query) { showProgress(0, 7, "Enter a ticker or company name first", true); hideProgress(2200); return; }
   if (_es) { _es.close(); _es = null; }
+  if (_newsTicker) { settleNewsPending(_newsTicker); _newsTicker = null; }
   finalizePartialStream();
 
   // Analyze explicitly requests a new analysis. Saved research opens through the Saved menu.
@@ -1047,6 +1050,7 @@ function runAnalysis() {
 
   es.addEventListener("error", e => {
     if (!e.data && gotResult) {   // terminal events close the stream themselves; this is a drop
+      settleNewsPending(key); _newsTicker = null;
       finalizePartialStream(key);
       if (_es === es) {
         showProgressPercent(100, "Dashboard ready · written analysis interrupted");
@@ -1092,7 +1096,20 @@ function runAnalysis() {
     renderAll(data);
     if (active === data.ticker) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
     setAnalyzeBusy(false);
-    showProgressPercent(72, "Dashboard ready · preparing the written analysis");
+    if (data.news_pending) {
+      _newsTicker = data.ticker; startNewsClock();
+      showProgressPercent(72, "Dashboard ready · gathering recent news");
+    } else {
+      showProgressPercent(72, "Dashboard ready · preparing the written analysis");
+    }
+  });
+
+  // The web-search digest, after the dashboard. The AI stream only starts once this lands,
+  // because the model reads the same §14 the card now shows.
+  es.addEventListener("news", e => {
+    applyNewsEvent(key, JSON.parse(e.data));
+    _newsTicker = null;
+    showProgressPercent(74, "Dashboard ready · preparing the written analysis");
   });
 
   es.addEventListener("ai_start", e => {
@@ -2591,6 +2608,125 @@ FOCUS_MQ.addEventListener("change", () => {
   renderAll(sessions[active].data);
 });
 
+/* The prompt and news cards are functions rather than inline renderAll blocks because the
+   `news` event replaces exactly these two in place (replaceCard): a full renderAll would
+   reset scroll, the chart and its zoom for a change that touches neither. */
+function promptCard(d) {
+  if (!d.ai_prompt) return "";
+  return card("prompt", "Exact Data Sent to the AI",
+    `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
+     <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
+     <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
+}
+
+/* Either a server-side web search digest (every item grounded in a cited URL) or Finnhub
+   records as the fallback; the analyst model explains these but never searches itself.
+   While the search is still running (news_pending) the card is a loader and the Finnhub
+   records stay hidden: the card shows only what the model will read, and the model reads
+   Finnhub only if the search falls back. */
+function newsCard(d) {
+  if (d.news_pending) return card("news", "Recent Company News", newsLoaderHtml(), { count: "Searching" });
+  const news = Array.isArray(d.company_news) ? d.company_news : [];
+  if (!news.length) return "";
+  const digest = d.news_digest && typeof d.news_digest === "object" ? d.news_digest : null;
+  const overview = digest && digest.overview ? `<p class="news-overview">${esc(digest.overview)}</p>` : "";
+  const upcoming = digest && Array.isArray(digest.upcoming) && digest.upcoming.length
+    ? `<div class="news-upcoming"><span>Upcoming</span>${digest.upcoming.map(u => {
+        const href = safeHttpUrl(u.url);
+        const text = `${esc(u.date || "")} · ${esc(u.event || "")}`;
+        return `<div>${href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</div>`;
+      }).join("")}</div>`
+    : "";
+  const note = digest
+    ? "Found by an AI web search and kept only where the item links a source the search actually cited. Impact and direction tags are the search's triage, not a verdict; the linked publisher remains the source of truth."
+    : "Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.";
+  const newsBody = `${overview}<div class="news-list">${news.slice(0, 10).map(item => {
+    const href = safeHttpUrl(item.url);
+    let date = "Date unavailable";
+    if (item.published_at) {
+      const parsed = new Date(item.published_at);
+      if (!Number.isNaN(parsed.getTime())) date = parsed.toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+    }
+    const headline = esc(item.headline || "Untitled story");
+    const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
+    const tags = [];
+    if (item.impact === "high" || item.impact === "medium") tags.push(`<span class="news-tag">${item.impact === "high" ? "High" : "Medium"} impact</span>`);
+    if (NEWS_EVENT_LABELS[item.category]) tags.push(`<span class="news-tag">${NEWS_EVENT_LABELS[item.category]}</span>`);
+    if (item.direction === "positive" || item.direction === "negative")
+      tags.push(`<span class="news-tag ${item.direction === "positive" ? "up" : "down"}">${item.direction === "positive" ? "Positive" : "Negative"}</span>`);
+    return `<article class="news-item">
+      <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
+      <h4>${title}</h4>
+      ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
+      ${tags.length ? `<div class="news-tags">${tags.join("")}</div>` : ""}
+    </article>`;
+  }).join("")}</div>${upcoming}<p class="learn-note">${note}</p>`;
+  return card("news", "Recent Company News", newsBody, { count: news.length });
+}
+
+/* Three ghost rows in the real .news-item shape, shimmer staggered by --i so it sweeps
+   down the list, under the wind glyph and a ticking elapsed counter (startNewsClock). */
+function newsLoaderHtml() {
+  const ghost = i => `<div class="news-item news-ghost" style="--i:${i}">
+    <div class="skeleton sk-line news-ghost-meta"></div><div class="skeleton sk-line news-ghost-h"></div>
+    <div class="skeleton sk-line"></div><div class="skeleton sk-line news-ghost-short"></div></div>`;
+  return `<div class="news-loading" role="status">
+    <div class="news-loading-head">${WIND_SVG}<span>Searching the web for recent news</span><time class="news-elapsed">${newsElapsedText()}</time></div>
+    <div class="news-list" aria-hidden="true">${[0, 1, 2].map(ghost).join("")}</div></div>`;
+}
+
+let _newsClock = null, _newsSince = 0;
+let _newsTicker = null;   // the session whose digest is still in flight
+function newsElapsedText() { return _newsSince ? `${Math.max(0, Math.round((Date.now() - _newsSince) / 1000))}s` : "0s"; }
+function startNewsClock() {
+  stopNewsClock();
+  _newsSince = Date.now();
+  _newsClock = setInterval(() => {
+    const el = document.querySelector(".news-elapsed");
+    if (el) el.textContent = newsElapsedText();
+  }, 1000);
+}
+function stopNewsClock() { if (_newsClock) clearInterval(_newsClock); _newsClock = null; _newsSince = 0; }
+
+/* Swap one rendered card for new markup, keeping the reader's open/closed choice. */
+function replaceCard(id, html) {
+  const old = document.getElementById("card-" + id);
+  if (!old) return;
+  const wasOpen = old.open;
+  old.outerHTML = html;
+  const fresh = document.getElementById("card-" + id);
+  if (fresh && typeof wasOpen === "boolean") fresh.open = wasOpen;
+  return fresh;
+}
+
+/* The digest arrived: adopt the five fields the server sent, so the dashboard, the saved
+   tab and chat context all match the prompt the model is about to read. */
+function applyNewsEvent(ticker, fields) {
+  const sess = sessions[ticker];
+  if (!sess) return;
+  for (const k of ["company_news", "news_digest", "news_search", "data_sources", "ai_prompt"]) {
+    if (fields[k] === null || fields[k] === undefined) delete sess.data[k]; else sess.data[k] = fields[k];
+  }
+  delete sess.data.news_pending;
+  sess.context = sess.data.ai_prompt || "";
+  stopNewsClock();
+  touchSession(sess); persistSessions();
+  if (active === ticker) {
+    replaceCard("news", newsCard(sess.data))?.classList.add("news-fresh");
+    replaceCard("prompt", promptCard(sess.data));
+  }
+}
+
+/* The stream ended before `news`. What the session holds is the Finnhub §14 — the same
+   prompt it saved — so the card falls back to those records rather than loading forever. */
+function settleNewsPending(ticker) {
+  const sess = sessions[ticker];
+  stopNewsClock();
+  if (!sess || !sess.data.news_pending) return;
+  delete sess.data.news_pending;
+  if (active === ticker) replaceCard("news", newsCard(sess.data));
+}
+
 /* ════════════════ RENDER: EVERYTHING ════════════════ */
 function renderAll(d) {
   renderStrip(d);
@@ -2828,52 +2964,10 @@ function renderAll(d) {
     add("filings", card("mda", "MD&A Excerpt (Latest 10-K)", `<div class="prose" style="font-size:13px"><blockquote>${esc(d.mda_excerpt)}</blockquote></div>`, { open: false, source: secSrc(d) }));
 
   /* Raw prompt */
-  if (d.ai_prompt)
-    add("filings", card("prompt", "Exact Data Sent to the AI",
-      `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
-       <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
-       <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false }));
+  add("filings", promptCard(d));
 
-  /* Sourced company news — last card, below the measurements. Either a server-side web
-     search digest (every item grounded in a cited URL) or Finnhub records as the
-     fallback; the analyst model explains these but never searches itself. */
-  const news = Array.isArray(d.company_news) ? d.company_news : [];
-  if (news.length) {
-    const digest = d.news_digest && typeof d.news_digest === "object" ? d.news_digest : null;
-    const overview = digest && digest.overview ? `<p class="news-overview">${esc(digest.overview)}</p>` : "";
-    const upcoming = digest && Array.isArray(digest.upcoming) && digest.upcoming.length
-      ? `<div class="news-upcoming"><span>Upcoming</span>${digest.upcoming.map(u => {
-          const href = safeHttpUrl(u.url);
-          const text = `${esc(u.date || "")} · ${esc(u.event || "")}`;
-          return `<div>${href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${text}</a>` : text}</div>`;
-        }).join("")}</div>`
-      : "";
-    const note = digest
-      ? "Found by an AI web search and kept only where the item links a source the search actually cited. Impact and direction tags are the search's triage, not a verdict; the linked publisher remains the source of truth."
-      : "Stories are dated source records returned by Finnhub. Squall can explain them, but the linked publisher remains the source of truth.";
-    const newsBody = `${overview}<div class="news-list">${news.slice(0, 10).map(item => {
-      const href = safeHttpUrl(item.url);
-      let date = "Date unavailable";
-      if (item.published_at) {
-        const parsed = new Date(item.published_at);
-        if (!Number.isNaN(parsed.getTime())) date = parsed.toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
-      }
-      const headline = esc(item.headline || "Untitled story");
-      const title = href ? `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${headline}</a>` : `<span>${headline}</span>`;
-      const tags = [];
-      if (item.impact === "high" || item.impact === "medium") tags.push(`<span class="news-tag">${item.impact === "high" ? "High" : "Medium"} impact</span>`);
-      if (NEWS_EVENT_LABELS[item.category]) tags.push(`<span class="news-tag">${NEWS_EVENT_LABELS[item.category]}</span>`);
-      if (item.direction === "positive" || item.direction === "negative")
-        tags.push(`<span class="news-tag ${item.direction === "positive" ? "up" : "down"}">${item.direction === "positive" ? "Positive" : "Negative"}</span>`);
-      return `<article class="news-item">
-        <div class="news-meta"><span>${esc(item.source || "Unknown source")}</span><time>${esc(date)}</time></div>
-        <h4>${title}</h4>
-        ${item.summary ? `<p>${esc(item.summary)}</p>` : ""}
-        ${tags.length ? `<div class="news-tags">${tags.join("")}</div>` : ""}
-      </article>`;
-    }).join("")}</div>${upcoming}<p class="learn-note">${note}</p>`;
-    add("filings", card("news", "Recent Company News", newsBody, { count: news.length }));
-  }
+  /* Sourced company news — last card, below the measurements. */
+  add("filings", newsCard(d));
 
   const body = document.getElementById("dataBody");
   body.innerHTML = renderViewRail(bucket);

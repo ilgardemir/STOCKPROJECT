@@ -85,7 +85,12 @@ function loadApp({ focus = false } = {}) {
     history: { replaceState() {}, pushState() {} },
     navigator: { userAgent: "node", maxTouchPoints: 0, clipboard: { writeText: () => Promise.resolve() } },
     console: { log() {}, warn() {}, error() {}, info() {} },
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    setTimeout, clearTimeout,
+    // Unref'd: app.js's news clock (startNewsClock) is real-timer-backed in this harness, and
+    // a test that exercises the loader without ever stopping the clock must not hang run.js,
+    // which has no process.exit and simply waits for the event loop to drain.
+    setInterval: (fn, ms) => { const t = setInterval(fn, ms); t.unref?.(); return t; },
+    clearInterval,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {},
     matchMedia: q => ({ matches: /max-height|max-width: 1100px/.test(String(q)) ? focus : false,
       addEventListener() {}, addListener() {} }),
@@ -146,6 +151,47 @@ test("connection loss between dashboard and AI start replaces the waiting indica
   assert.match(state("sessions.TEST.data.aiError"), /incomplete|interrupted/i);
   assert.match(state('document.getElementById("aiSummary").innerHTML'), /Retry analysis/);
   assert.equal(state("_es"), null);
+});
+
+function driveNewsRun(state) {
+  state(`EventSource = function () {
+    this.handlers = {}; this.addEventListener = (name, fn) => this.handlers[name] = fn;
+    this.close = () => {}; window.testSource = this;
+  };
+  document.getElementById("ticker").value = "TEST";
+  runAnalysis();
+  testSource.handlers.result({ data: JSON.stringify({ ticker: "TEST", news_pending: true, ai_prompt: "finnhub prompt",
+    company_news: [{ headline: "Finnhub story", source: "Finnhub", published_at: "2026-09-01T12:00:00Z" }] }) });`);
+}
+
+test("while the news search runs the card shows the loader, never the Finnhub records", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  const html = state(`newsCard(sessions.TEST.data)`);
+  assert.match(html, /Searching the web for recent news/);
+  assert.doesNotMatch(html, /Finnhub story/);
+  assert.doesNotMatch(state(`JSON.stringify(persistableSession(sessions.TEST))`), /news_pending/,
+    "a saved tab must never come back as a loader with no search behind it");
+});
+
+test("the news event swaps in the digest and the prompt the model will read", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  state(`testSource.handlers.news({ data: JSON.stringify({ ai_prompt: "digest prompt",
+    company_news: [{ headline: "Digest story", source: "Reuters", published_at: "2026-09-18T12:00:00Z" }],
+    news_digest: { overview: "Beat.", upcoming: [] }, news_search: { status: "ok" }, data_sources: { news: "AI web search" } }) });`);
+  assert.equal(state("sessions.TEST.data.news_pending"), undefined);
+  assert.equal(state("sessions.TEST.context"), "digest prompt");
+  assert.match(state(`newsCard(sessions.TEST.data)`), /Digest story/);
+  assert.match(state(`document.getElementById("card-news").outerHTML`), /Digest story/);
+});
+
+test("a stream lost before the news event falls back to the Finnhub records", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  state(`testSource.handlers.error({});`);
+  assert.equal(state("sessions.TEST.data.news_pending"), undefined);
+  assert.match(state(`newsCard(sessions.TEST.data)`), /Finnhub story/);
 });
 
 // Sandbox-allocated arrays carry that realm's prototype, and strict deepEqual compares

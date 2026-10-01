@@ -1234,6 +1234,17 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 .news-upcoming a { color: var(--ink); text-decoration: none; }
 .news-upcoming a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 
+.news-loading-head { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; color: var(--ink-dim); font-family: var(--mono); font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em; }
+.news-loading-head .wind { width: 22px; height: 19px; flex-shrink: 0; }
+.news-loading-head time { margin-left: auto; font-variant-numeric: tabular-nums; }
+.news-ghost { display: grid; gap: 7px; }
+.news-ghost .skeleton::after { animation-delay: calc(var(--i) * .18s); }
+.news-ghost-meta { width: 28%; height: 8px; }
+.news-ghost-h { width: 78%; height: 11px; }
+.news-ghost:nth-child(2) .news-ghost-h { width: 64%; }
+.news-ghost-short { width: 52%; }
+.news-fresh .news-list, .news-fresh .news-overview { animation: paneIn .35s var(--ease-out) backwards; }
+
 .signal { display: block; font-family: var(--mono); font-size: 12px; line-height: 1.55; padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 6px; border-left: 3px solid; transition: transform .15s var(--ease); }
 .signal:hover { transform: translateX(2px); } .signal b { font-weight: 600; }
 .signal.green { color: var(--up); background: var(--up-soft); border-color: var(--up); }
@@ -1565,8 +1576,9 @@ pre.raw { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; backgro
 /* LIVE GENERATION */
 #genIndicator { display: flex; align-items: center; gap: 10px; padding: 10px 0 16px; }
 #genIndicator .wind { width: 26px; height: 22px; flex-shrink: 0; }
-#genIndicator .wind path { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 60; animation: gust 1.8s var(--ease) infinite; }
-#genIndicator .wind path:nth-child(2) { animation-delay: .12s; } #genIndicator .wind path:nth-child(3) { animation-delay: .24s; }
+#genIndicator .wind path, .news-loading .wind path { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 60; animation: gust 1.8s var(--ease) infinite; }
+#genIndicator .wind path:nth-child(2), .news-loading .wind path:nth-child(2) { animation-delay: .12s; }
+#genIndicator .wind path:nth-child(3), .news-loading .wind path:nth-child(3) { animation-delay: .24s; }
 #genIndicator span { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink-dim);
   animation: genPulse 1.8s ease-in-out infinite; }
 @keyframes genPulse { 50% { color: var(--ink-bright); } }
