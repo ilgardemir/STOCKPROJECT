@@ -3453,7 +3453,16 @@ const handleRequest = async (req, res) => {
 
       // A scraper that never announced RESOLVED (an older build, a stub) still gets news.
       if (!newsJob) newsJob = getNewsDigest(payload.ticker, payload.company_name);
-      send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Reading recent news" });
+
+      // The dashboard does not need the digest — only the written analysis reads §14 — so
+      // with search on it ships now, flagged news_pending, and the digest follows as its own
+      // `news` event. app.js shows a loader in the News card meanwhile and never the Finnhub
+      // records, because those are not what the model will read unless the search falls back.
+      const newsPending = Boolean(newsSearchEnabled());
+      if (newsPending) {
+        send("progress", { stage: STAGE_TOTAL, total: STAGE_TOTAL, label: "Reading recent news" });
+        send("result", { ...payload, model: AI_MODEL, news_pending: true });
+      }
       const newsResult = await newsJob;
       payload = { ...applyNewsDigest(payload, newsResult), news_search: newsSearchStatus(newsResult) };
       if (res.writableEnded || res.destroyed) return;
@@ -3463,8 +3472,13 @@ const handleRequest = async (req, res) => {
       // the news digest applied, so a hit replays the same §14 the dashboard showed.
       putCachedAnalysis(query, payload);
 
-      // Scraper done — ship the dashboard payload immediately, then stream the AI on top.
-      send("result", { ...payload, model: AI_MODEL });
+      if (newsPending) {
+        send("news", { company_news: payload.company_news, news_digest: payload.news_digest || null,
+                       news_search: payload.news_search, data_sources: payload.data_sources,
+                       ai_prompt: payload.ai_prompt });
+      } else {
+        send("result", { ...payload, model: AI_MODEL });
+      }
       await streamAiAnalysis(payload);
     });
 
