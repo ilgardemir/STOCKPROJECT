@@ -20,10 +20,10 @@ const DIGEST = {
       event: "earnings", impact: "high", direction: "positive", summary: "Revenue up." }] }
 };
 
-function boot({ apiKey }) {
+function boot({ apiKey, researchResult = DIGEST }) {
   let handler; const aiBodies = [];
   const newsMod = { ...realRequire("./news-research"),
-    researchNews: () => new Promise(r => setTimeout(() => r(DIGEST), 40)) };
+    researchNews: () => new Promise(r => setTimeout(() => r(researchResult), 40)) };
   const sandbox = {
     require: name => name === "http" ? { createServer(fn) { handler = fn; return {}; } }
       : name === "./news-research" ? newsMod : realRequire(name),
@@ -98,5 +98,18 @@ async function drive(handler, route) {
     assert.equal(result.news_search.status, "off");
     assert.ok(!ev.some(e => e.name === "news"));
     console.log("ok - with news search off, result is unchanged and no news event is sent");
+  }
+  {
+    const { handler } = boot({ apiKey: "test-key", researchResult: { ok: false, error: "boom", ms: 5 } });
+    const ev = await drive(handler, "/analyze-stream?ticker=CCC");
+    const names = ev.map(e => e.name);
+    const iNews = names.indexOf("news");
+    const iAi = names.findIndex(n => n.startsWith("ai_"));
+    assert.ok(iNews >= 0 && iAi > iNews, `news must precede the AI stream, order was ${names.join(",")}`);
+    const news = ev[iNews].data;
+    assert.equal(news.news_digest, null);
+    assert.equal(news.news_search.status, "fallback");
+    assert.equal(news.company_news[0].source, "Stub Wire");
+    console.log("ok - a failed search falls back to Finnhub's records and still precedes the AI stream");
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

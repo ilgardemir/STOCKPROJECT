@@ -174,6 +174,28 @@ test("while the news search runs the card shows the loader, never the Finnhub re
     "a saved tab must never come back as a loader with no search behind it");
 });
 
+test("the AI pane stays on the loading skeleton until news resolves, then shows the reading indicator", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  // Nothing has called the model yet while news is pending — the skeleton stays up, not
+  // the "reading the data" indicator (that would claim work that hasn't started).
+  assert.doesNotMatch(state(`document.getElementById("aiSummary").innerHTML`), /reading the data/);
+  state(`testSource.handlers.news({ data: JSON.stringify({ ai_prompt: "digest prompt",
+    company_news: [{ headline: "Digest story", source: "Reuters", published_at: "2026-09-18T12:00:00Z" }],
+    news_digest: { overview: "Beat.", upcoming: [] }, news_search: { status: "ok" }, data_sources: { news: "AI web search" } }) });`);
+  // The news event is what actually starts the model, so the indicator appears now.
+  assert.match(state(`document.getElementById("aiSummary").innerHTML`), /reading the data/);
+});
+
+test("a malformed news event settles to Finnhub without crashing, clock stopped", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  state(`testSource.handlers.news({ data: "not json {{{" });`);
+  assert.equal(state("sessions.TEST.data.news_pending"), undefined);
+  assert.match(state(`newsCard(sessions.TEST.data)`), /Finnhub story/);
+  assert.equal(state("_newsClock"), null);
+});
+
 test("the news event swaps in the digest and the prompt the model will read", () => {
   const state = loadApp();
   driveNewsRun(state);

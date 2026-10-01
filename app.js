@@ -1097,7 +1097,11 @@ function runAnalysis() {
     active = data.ticker;
     renderTickerPills();
     renderAll(data);
-    if (active === data.ticker) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
+    // While news is still pending nothing has called the model yet, so the "reading the
+    // data" indicator would be a lie — leave the dashboard's own skeleton up (renderAll's
+    // else-branch renders it for a pending, answer-less session) and let the news listener
+    // below start it once the digest actually lands.
+    if (active === data.ticker && !data.news_pending) showAiThinking(data.model);   // fill the pane instantly; ai_start replaces it
     setAnalyzeBusy(false);
     if (data.news_pending) {
       _newsTicker = data.ticker; startNewsClock();
@@ -1110,8 +1114,11 @@ function runAnalysis() {
   // The web-search digest, after the dashboard. The AI stream only starts once this lands,
   // because the model reads the same §14 the card now shows.
   es.addEventListener("news", e => {
-    applyNewsEvent(key, JSON.parse(e.data));
+    let d; try { d = JSON.parse(e.data); } catch (_) { d = null; }
+    if (!d) { settleNewsPending(key); _newsTicker = null; return; }   // malformed event: fall back to Finnhub quietly
+    applyNewsEvent(key, d);
     _newsTicker = null;
+    if (active === key) showAiThinking(sessions[key]?.data?.model);   // the model is about to be called now
     showProgressPercent(74, "Dashboard ready · preparing the written analysis");
   });
 
@@ -2990,6 +2997,13 @@ function renderAll(d) {
       document.getElementById("thinkingPanel")?.classList.remove("show");
       flushStream(true);
     }
+  } else if (d.news_pending && !d.aiSummary && !d.aiError) {
+    // News search still in flight and the model hasn't been called yet (no stream, no
+    // answer, no error) — keep the loading skeleton up instead of rendering blank. Covers
+    // both the initial `result` event and switching back to this tab mid-search.
+    const ai = document.getElementById("aiSummary");
+    ai.className = "prose";
+    ai.innerHTML = aiSkeleton();
   } else {
     const ai = document.getElementById("aiSummary");
     ai.className = "prose";
