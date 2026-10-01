@@ -54,7 +54,8 @@ Unchanged: cache hits (digest already applied, no `news_pending`), `POST /analyz
 - **Fallback**: if the stream drops after `result` but before `news`, or a persisted
   session is restored with `news_pending` set, clear the flag and render Finnhub. That
   matches the saved context (Finnhub §14), so the rule holds.
-- `persistableSession` may persist the flag; restore clears it.
+- `persistableSession` strips the flag, so a saved tab is always stored as the Finnhub
+  state it holds and never restores as a loader.
 
 ## Loader (News card)
 
@@ -72,7 +73,9 @@ Unchanged: cache hits (digest already applied, no `news_pending`), `POST /analyz
 - Server test with the stub scraper and a stubbed `getNewsDigest`: event order is
   `result` (`news_pending: true`) → `news` → `ai_*`; the cache entry carries the digest.
   Search-off path emits no `news_pending` and no `news`.
-- Pagecheck runs the loader state and a restored session with `news_pending` set.
+- `app.test.js` drives `runAnalysis` with a fake EventSource: loader shown (no Finnhub
+  items) while pending, the flag never persisted, `news` swaps the card and context, a
+  drop before `news` falls back to Finnhub. Pagecheck must still pass.
 - Live DOM: loader contrast and layout in all six themes, 1280×720.
 
 ## Docs
