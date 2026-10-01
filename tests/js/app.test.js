@@ -184,6 +184,8 @@ test("the news event swaps in the digest and the prompt the model will read", ()
   assert.equal(state("sessions.TEST.context"), "digest prompt");
   assert.match(state(`newsCard(sessions.TEST.data)`), /Digest story/);
   assert.match(state(`document.getElementById("card-news").outerHTML`), /Digest story/);
+  assert.match(state(`document.getElementById("card-prompt").outerHTML`), /digest prompt/);
+  assert.equal(state("_newsClock"), null);
 });
 
 test("a stream lost before the news event falls back to the Finnhub records", () => {
@@ -192,6 +194,23 @@ test("a stream lost before the news event falls back to the Finnhub records", ()
   state(`testSource.handlers.error({});`);
   assert.equal(state("sessions.TEST.data.news_pending"), undefined);
   assert.match(state(`newsCard(sessions.TEST.data)`), /Finnhub story/);
+  assert.equal(state("_newsClock"), null);
+});
+
+test("a terminal error carrying data after the news search started still settles it", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  state(`testSource.handlers.error({ data: JSON.stringify({ error: "boom" }) });`);
+  assert.equal(state("sessions.TEST.data.news_pending"), undefined);
+  assert.match(state(`newsCard(sessions.TEST.data)`), /Finnhub story/);
+  assert.equal(state("_newsClock"), null);
+});
+
+test("starting a new analysis while a search is pending settles the old session", () => {
+  const state = loadApp();
+  driveNewsRun(state);
+  state(`document.getElementById("ticker").value = "OTHER"; runAnalysis();`);
+  assert.equal(state("sessions.TEST.data.news_pending"), undefined);
 });
 
 // Sandbox-allocated arrays carry that realm's prototype, and strict deepEqual compares

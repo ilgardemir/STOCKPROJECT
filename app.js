@@ -1049,8 +1049,11 @@ function runAnalysis() {
   es.addEventListener("progress", e => { const d = JSON.parse(e.data); showProgress(d.stage, d.total || 7, d.label); });
 
   es.addEventListener("error", e => {
+    // Any terminal error after `result` means the news search (if one was pending) is never
+    // coming — settle it here, before branching, so a data-carrying terminal error (e.g.
+    // failRequest's JSON payload) doesn't leave news_pending true with the clock still running.
+    if (gotResult) { settleNewsPending(key); _newsTicker = null; }
     if (!e.data && gotResult) {   // terminal events close the stream themselves; this is a drop
-      settleNewsPending(key); _newsTicker = null;
       finalizePartialStream(key);
       if (_es === es) {
         showProgressPercent(100, "Dashboard ready · written analysis interrupted");
@@ -2671,7 +2674,7 @@ function newsLoaderHtml() {
     <div class="skeleton sk-line news-ghost-meta"></div><div class="skeleton sk-line news-ghost-h"></div>
     <div class="skeleton sk-line"></div><div class="skeleton sk-line news-ghost-short"></div></div>`;
   return `<div class="news-loading" role="status">
-    <div class="news-loading-head">${WIND_SVG}<span>Searching the web for recent news</span><time class="news-elapsed">${newsElapsedText()}</time></div>
+    <div class="news-loading-head">${WIND_SVG}<span>Searching the web for recent news</span><time class="news-elapsed" aria-hidden="true">${newsElapsedText()}</time></div>
     <div class="news-list" aria-hidden="true">${[0, 1, 2].map(ghost).join("")}</div></div>`;
 }
 
@@ -2702,6 +2705,7 @@ function replaceCard(id, html) {
 /* The digest arrived: adopt the five fields the server sent, so the dashboard, the saved
    tab and chat context all match the prompt the model is about to read. */
 function applyNewsEvent(ticker, fields) {
+  stopNewsClock();
   const sess = sessions[ticker];
   if (!sess) return;
   for (const k of ["company_news", "news_digest", "news_search", "data_sources", "ai_prompt"]) {
@@ -2709,7 +2713,6 @@ function applyNewsEvent(ticker, fields) {
   }
   delete sess.data.news_pending;
   sess.context = sess.data.ai_prompt || "";
-  stopNewsClock();
   touchSession(sess); persistSessions();
   if (active === ticker) {
     replaceCard("news", newsCard(sess.data))?.classList.add("news-fresh");
