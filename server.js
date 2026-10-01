@@ -36,8 +36,9 @@ const PORT        = process.env.PORT || 3000;
 const AI_MODEL    = process.env.SQUALL_AI_MODEL || "openai/gpt-6-luna";
 // Translates/refines screener language only; no web plugin. Deliberately a separate
 // knob: this one is a cheap-and-fast job, and it should not be dragged upmarket just
-// because the analysis model was.
-const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4-flash";
+// because the analysis model was. Pinned to V4.1 Flash: the old `deepseek-v4-flash` id
+// was retired upstream and is now only a redirect, at a higher listed output price.
+const UTILITY_MODEL = process.env.SQUALL_UTILITY_MODEL || "deepseek/deepseek-v4.1-flash";
 // Web-search news digest that replaces the Finnhub records in ai_prompt §14 (see
 // news-research.js). Finnhub stays as the silent fallback whenever this is off, fails,
 // times out or grounds nothing, so the switch below is a pure revert with no deploy.
@@ -3651,7 +3652,10 @@ const handleRequest = async (req, res) => {
           ...(Array.isArray(messages) ? messages : [])
         ]
       };
-      if (think) reqBody.reasoning = reasoningConfig();
+      // With thinking off, say so explicitly. Omitting `reasoning` does not turn it off on a
+      // reasoning model like Luna: it falls back to the model's default effort, so the user
+      // pays for (and waits on) thinking the "Show thinking" toggle says is disabled.
+      reqBody.reasoning = think ? reasoningConfig() : { effort: "none" };
 
       try {
         const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
