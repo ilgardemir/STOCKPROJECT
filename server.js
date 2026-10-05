@@ -6,6 +6,13 @@ const path = require("path");
 const crypto = require("crypto");
 const { replayPolicy, parseReplayDecision, replayMessages, simulateReplay } = require("./replay-engine");
 const { researchNews, applyNewsDigest, newsSearchStatus, DEFAULT_EXCLUDE_DOMAINS } = require("./news-research");
+const { loadConfig: loadAccountsConfig, createAccounts } = require("./auth-sync");
+
+// Accounts (optional Google sign-in + sync). The pg pool is only created when the server
+// actually starts (see startAccounts), so requiring this file in tests never opens a
+// connection; until ensureSchema succeeds, /api/me answers {enabled:false}.
+const ACCOUNTS_CONFIG = loadAccountsConfig();
+let accounts = createAccounts({ config: ACCOUNTS_CONFIG, db: null });
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const API_KEY     = process.env.OPENROUTER_API_KEY || "YOUR_OPENROUTER_KEY_HERE";
@@ -2843,6 +2850,9 @@ const handleRequest = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.end(); return; }
 
+  // Accounts own /auth/* and /api/*; nothing else on the site lives under those prefixes.
+  if (await accounts.handle(req, res, clientKey(req))) return;
+
   // Health. Deliberately unchanged and deliberately dumb: it is Railway's healthcheck
   // target, it is public, and publishing remaining budget here would tell an attacker
   // exactly how much headroom is left to burn. Spend lives behind /stats instead.
@@ -3735,6 +3745,26 @@ const handleRequest = async (req, res) => {
 
 };
 
+/**
+ * Connect accounts to Postgres. A database that is down at boot must not take the site
+ * with it, so a failed schema check leaves accounts off and retries every minute.
+ */
+function startAccounts() {
+  if (!ACCOUNTS_CONFIG.enabled) return;
+  let Pool;
+  try { ({ Pool } = require("pg")); }
+  catch (e) { console.warn(`AUTH|disabled|pg not installed: ${e.message}`); return; }
+  const pool = new Pool({ connectionString: ACCOUNTS_CONFIG.databaseUrl, max: 5,
+                          connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000 });
+  // An idle client losing its connection emits here; unhandled, it would crash the process.
+  pool.on("error", e => console.warn(`AUTH|pool_error|${e.message}`));
+  accounts = createAccounts({ config: ACCOUNTS_CONFIG, db: pool });
+  const attempt = () => accounts.ensureSchema()
+    .then(() => console.log("AUTH|ready"))
+    .catch(e => { console.warn(`AUTH|schema_failed|${e.message} (retrying in 60s)`); setTimeout(attempt, 60000).unref(); });
+  attempt();
+}
+
 if (require.main === module) {
   loadLimitState();
   // .unref() on both so neither timer keeps the process alive on its own.
@@ -3771,6 +3801,8 @@ if (require.main === module) {
     flushLimitState(true);
   });
 
+  startAccounts();
+
   appServer.listen(PORT, "0.0.0.0", () => {
     console.log(`\n✅ Squall server running → http://0.0.0.0:${PORT}`);
     console.log(`   Model    : ${AI_MODEL}`);
@@ -3779,7 +3811,8 @@ if (require.main === module) {
     console.log(`   Finnhub  : ${process.env.FINNHUB_API_KEY ? "set ✓" : "not set (Yahoo fallback only)"}`);
     console.log(`   FMP key  : ${process.env.FMP_API_KEY ? "set ✓" : "not set (optional)"}`);
     console.log(`   Limits   : ${LIM.IP_DAILY}/day per client · ${LIM.GLOBAL_AI_DAILY} AI credits/day · ${LIM.GLOBAL_SCRAPE_DAILY} scrapes/day · ${LIM.MAX_PY} concurrent`);
-    console.log(`   Stats    : ${process.env.SQUALL_STATS_KEY ? "/stats?key=… enabled" : "disabled (set SQUALL_STATS_KEY)"}\n`);
+    console.log(`   Stats    : ${process.env.SQUALL_STATS_KEY ? "/stats?key=… enabled" : "disabled (set SQUALL_STATS_KEY)"}`);
+    console.log(`   Accounts : ${ACCOUNTS_CONFIG.enabled ? "configured (" + ACCOUNTS_CONFIG.publicUrl + ")" : "off (" + ACCOUNTS_CONFIG.reason + ")"}\n`);
   });
 }
 

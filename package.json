@@ -10,5 +10,7 @@
     "test:py": "python3 -m unittest discover -s tests/python -p 'test_*.py'",
     "test:contracts": "python3 scripts/check_concept_vocabulary.py && python3 scripts/audit_sec_pressure.py && python3 scripts/check_sse_contract.py"
   },
-  "dependencies": {}
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
 }
