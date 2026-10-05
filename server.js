@@ -1867,7 +1867,7 @@ async function simulateTradeReviewed(decision, bars, reviewer, maxReviews) {
 const PUBLIC_DIR = __dirname;
 // Only intentionally published files are addressable. Never serve the repository.
 const PUBLIC_FILES = new Set([
-  "/index.html", "/screener.html", "/portfolio.html", "/ilgar.html", "/404.html",
+  "/index.html", "/screener.html", "/portfolio.html", "/ilgar.html", "/404.html", "/privacy.html",
   "/app.js", "/backtester.js", "/sp500.js", "/market-universes.js", "/styles.css",
   ...["favicon.ico", "favicon-16x16.png", "favicon-32x32.png", "apple-touch-icon.png",
     "icon-192.png", "icon-512.png"].map(name => "/assets/" + name)

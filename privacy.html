@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="noir" data-mode="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Privacy Policy | Squall</title>
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<script>
+/* Standalone like 404.html (no app.js, no partials), so the stored theme is applied inline
+   before first paint. The id→mode map mirrors THEMES in app.js and 404.html. */
+(function () {
+  var MODE = { dark:"dark", light:"light", noir:"dark", paper:"light", lagoon:"dark", matrix:"dark" };
+  var id;
+  try {
+    id = localStorage.getItem("squall-theme-v2");
+  } catch (e) {}
+  if (!id || !MODE[id]) id = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "paper" : "noir";
+  document.documentElement.dataset.theme = id;
+  document.documentElement.dataset.mode = MODE[id];
+})();
+</script>
+</head>
+<body data-page="privacy">
+
+<header>
+  <a class="wordmark" href="/" aria-label="Squall — back to home">
+    <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
+    <span class="wm-title">Squall</span><small>Quant + AI equity analysis</small>
+  </a>
+</header>
+
+<main class="nf">
+  <div class="nf-shell prose">
+    <div class="nf-kicker">Last updated October 5, 2026</div>
+    <h1 class="nf-title">Privacy Policy</h1>
+
+    <p>Squall is an equity analysis tool. This page explains what information it collects,
+      why, and what you can do about it. Squall does not sell your data, show ads or use
+      tracking cookies.</p>
+
+    <h2>Using Squall without an account</h2>
+    <p>You can use Squall without signing in. Your saved analyses, screens, watchlist,
+      portfolio, MySquall profile and theme are stored in your browser's local storage on
+      your own device. They are not sent to our server for storage. Clearing your browser
+      data removes them.</p>
+
+    <h2>Signing in with Google</h2>
+    <p>Signing in is optional. If you sign in with Google, we receive your Google account ID,
+      email address, name and profile picture. We use them only to identify your account and
+      show you who you are signed in as. We do not get your Google password or access to
+      anything else in your Google account.</p>
+    <p>While you are signed in, we store your saved analyses, screens, settings, MySquall
+      profile and theme on our server, so they are available on any device where you sign in.
+      Squall uses a cookie to keep you signed in. It is needed for login to work and is not
+      used for tracking.</p>
+
+    <h2>Information processed when you use Squall</h2>
+    <ul>
+      <li><strong>Requests you make.</strong> The tickers you analyze, your screener queries
+        and your chat messages are sent to our server to produce results.</li>
+      <li><strong>AI providers.</strong> To write analyses and answer chat messages, we send
+        market data, your question and your MySquall profile text to AI models through
+        OpenRouter. Web news searches for a ticker also run through OpenRouter. We do not
+        send your name, email or IP address to these providers.</li>
+      <li><strong>Market data providers.</strong> Our server looks up tickers with SEC EDGAR,
+        Finnhub, Yahoo Finance and Financial Modeling Prep. These requests come from our server,
+        not your browser, and do not include your personal information.</li>
+      <li><strong>IP address.</strong> We use your IP address to apply usage limits and prevent
+        abuse. Usage counts are kept for up to a day and are not linked to your account.</li>
+      <li><strong>Fonts.</strong> Pages load fonts from Google Fonts, which means your browser
+        connects to Google when a page loads.</li>
+    </ul>
+
+    <h2>Where data is stored</h2>
+    <p>Squall runs on Railway, and account data is stored in a Railway-hosted database. We keep
+      your account data until you delete your account.</p>
+
+    <h2>Deleting your data</h2>
+    <p>You can sign out at any time. Deleting your account permanently removes your account
+      and everything saved to it from our server. Data stored only in your browser can be
+      removed by clearing your browser's site data for Squall.</p>
+
+    <h2>Not financial advice</h2>
+    <p>Squall's analyses are for information only and are not financial advice.</p>
+
+    <h2>Changes</h2>
+    <p>If this policy changes, we will update this page and the date at the top.</p>
+
+    <p><a href="/">Back to Squall</a></p>
+  </div>
+</main>
+
+</body>
+</html>
