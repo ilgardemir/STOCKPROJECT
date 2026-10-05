@@ -231,7 +231,7 @@ body.hero-up .util-rail { margin-left: auto; }
 .util-rail > button[hidden], .rail-div[hidden] { display: none; }
 /* :first-of-type is positional and still resolves to #savedBtn while it is hidden, so the
    rail's left cap has to be handed over explicitly rather than inferred. */
-#savedBtn[aria-expanded="true"], #watchBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
+#savedBtn[aria-expanded="true"], #watchBtn[aria-expanded="true"], #accountBtn[aria-expanded="true"] { color: var(--ink-bright); background: var(--chrome-hi); }
 #screenerNav:hover svg { transform: translateX(2px); }
 #themeBtn { width: 38px; padding: 0; }
 #themeBtn svg { width: 16px; height: 16px; }
@@ -472,7 +472,7 @@ body.has-analysis #searchForm { max-width: 280px; }
    are the analysis. Same collapse the rail already does at 720px, keyed to has-analysis so
    the landing page keeps its labels. */
 @media (max-width: 1400px) {
-  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #portfolioNav span, body.has-analysis #savedBtn span, body.has-analysis #watchBtn span { display: none; }
+  body.has-analysis #profileBtn span, body.has-analysis #screenerNav span, body.has-analysis #portfolioNav span, body.has-analysis #savedBtn span, body.has-analysis #watchBtn span, body.has-analysis #accountBtn span { display: none; }
   body.has-analysis .util-rail > button { width: 38px; padding: 0; }
   body.has-analysis #savedBtn { width: auto; padding: 0 9px; }
   /* The watchlist gave the ticker bar's badges ~80px less room here. Its count is the
@@ -542,6 +542,28 @@ body.has-analysis #searchForm { max-width: 280px; }
 .watch-empty { margin: 0; padding: 4px 8px 10px; font-size: var(--t-data); line-height: var(--lh-tight); color: var(--ink-dim); }
 .watch-note { margin: 0; padding: 0 8px; font-family: var(--mono); font-size: var(--t-micro); color: var(--warn); }
 .watch-note:not(:empty) { padding: 6px 8px 4px; }
+/* Account (optional sign-in). Same housing as #savedMenu. Signed in, the user's initial
+   replaces the glyph, in the same badge the Saved and Watch counts use, so the button stays
+   38px wide wherever the rail collapses to icons. */
+#accountInitial { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--radius-xs); padding: 1px 5px; }
+#accountInitial[hidden] { display: none; }
+#accountBtn.signed-in svg { display: none; }
+#accountBtn.sync-warn span { color: var(--warn); }
+#accountMenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 70; display: none;
+  width: min(280px, calc(100vw - 24px));
+  background: var(--chrome-1); border: 1px solid var(--rule); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 6px; }
+#accountMenu.open { display: block; animation: sugIn .14s var(--ease-out); }
+.acct-line { margin: 0; padding: 0 8px 4px; font-family: var(--mono); font-size: var(--t-data); color: var(--ink-bright); overflow-wrap: anywhere; }
+.acct-note { margin: 0; padding: 0 8px 8px; font-family: var(--mono); font-size: var(--t-micro); line-height: var(--lh-tight); color: var(--ink-dim); }
+.acct-note:empty { display: none; }
+.acct-note.warn { color: var(--warn); }
+.acct-actions { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; border-top: 1px solid var(--rule); }
+.acct-actions[hidden] { display: none; }
+.acct-actions .acct-note { padding-top: 4px; }
+.acct-actions button { appearance: none; border: 0; background: none; cursor: pointer; text-align: left;
+  padding: 7px 8px; border-radius: var(--radius-xs); font-family: var(--mono); font-size: var(--t-data); color: var(--ink); }
+.acct-actions button:hover, .acct-actions button:focus-visible { color: var(--ink-bright); background: var(--chrome-hi); }
 /* The ticker bar's star. Direction colors are reserved, so "watched" is the accent. */
 #sWatch { flex-shrink: 0; appearance: none; border: 0; background: none; cursor: pointer; padding: 0 2px; margin-left: -4px;
   font-size: var(--t-lead); line-height: 1; color: var(--ink-dim); }
@@ -987,7 +1009,7 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
 @media (max-width: 900px) { #analyzeBtn { width: 30px; padding: 0; justify-content: center; } #analyzeBtn .btn-label { display: none; } }
 @media (max-width: 720px) {
   /* Rail collapses to icons — the labels go, the controls stay. */
-  #profileBtn span, #screenerNav span, #portfolioNav span, #savedBtn span, #watchBtn span { display: none; }
+  #profileBtn span, #screenerNav span, #portfolioNav span, #savedBtn span, #watchBtn span, #accountBtn span { display: none; }
   .util-rail > button { width: 38px; padding: 0; }
   /* The search box sits far right in a crowded header, so a dropdown anchored to it
      overhangs the left edge of the screen. Anchor to the viewport instead. */
@@ -1058,8 +1080,8 @@ body.resizing .pane *, body.resizing-y #chatDock * { transition: none !important
   body[data-page="notfound"] > header .wordmark .wm-title { display: inline; font-size: 16px; }
 
   #tickerSuggest { top: calc(var(--header-h) + 6px); right: 10px; width: calc(100vw - 20px); }
-  #savedMenu, #themeMenu, #watchMenu { position: fixed; top: calc(var(--header-h) + 6px); right: 10px; max-width: calc(100vw - 20px); }
-  body.hero-up #savedMenu, body.hero-up #themeMenu, body.hero-up #watchMenu { top: 58px; }
+  #savedMenu, #themeMenu, #watchMenu, #accountMenu { position: fixed; top: calc(var(--header-h) + 6px); right: 10px; max-width: calc(100vw - 20px); }
+  body.hero-up #savedMenu, body.hero-up #themeMenu, body.hero-up #watchMenu, body.hero-up #accountMenu { top: 58px; }
 
   #progressWrap.show { height: 42px; }
   #progressInner { gap: 9px; padding: 0 12px; }

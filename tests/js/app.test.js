@@ -953,3 +953,165 @@ test("portfolio totals count only priced holdings and P&L only holdings with a c
   assert.match(sum, /1 of 3 with cost/);
   assert.match(app(`document.getElementById("pfTable").innerHTML`), /Add an average cost/);
 });
+
+/* ── Account sync ─────────────────────────────────────────────────────────────
+   mergeSyncStore is pure; syncLoad and syncFlush are driven against a fake /api/sync in
+   the same vm realm, through the real localStorage hooks. */
+
+test("sync merge: analyses and screens union by id, the newer updatedAt winning a clash", () => {
+  const merge = APP.mergeSyncStore;
+  const out = merge("analyses", { A: { updatedAt: 5, v: "local" }, B: { updatedAt: 1, v: "local" } },
+                                { B: { updatedAt: 2, v: "server" }, C: { updatedAt: 1, v: "server" } });
+  assert.deepEqual(Object.keys(out).sort(), ["A", "B", "C"]);
+  assert.equal(out.B.v, "server");
+  assert.equal(merge("screens", { S: { updatedAt: 9, v: "l" } }, { S: { updatedAt: 3, v: "s" } }).S.v, "l");
+  // A tie goes to the account.
+  assert.equal(merge("screens", { S: { updatedAt: 3, v: "l" } }, { S: { updatedAt: 3, v: "s" } }).S.v, "s");
+});
+
+test("sync merge: watchlist and portfolio union by ticker, account rows first, capped", () => {
+  const merge = APP.mergeSyncStore;
+  const w = merge("watchlist", { _: [{ t: "X" }, { t: "Y" }] }, { _: [{ t: "Y" }, { t: "Z" }] })._;
+  assert.deepEqual(Array.from(w, r => r.t), ["Y", "Z", "X"]);
+  const many = Array.from({ length: 30 }, (_, i) => ({ t: "T" + i }));
+  assert.equal(merge("watchlist", { _: many }, { _: [{ t: "A" }] })._.length, 25);
+  const p = merge("portfolio", { _: [{ t: "AAA", shares: 1 }] }, { _: [{ t: "AAA", shares: 9 }, { t: "BBB", shares: 2 }] })._;
+  assert.deepEqual(Array.from(p, r => [r.t, r.shares]), [["AAA", 9], ["BBB", 2]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(merge("watchlist", { _: [{ t: "X" }] }, {})._)), [{ t: "X" }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(merge("watchlist", {}, { _: [{ t: "Y" }] })._)), [{ t: "Y" }]);
+});
+
+test("sync merge: profile and theme go to the side changed last, the account winning a tie", () => {
+  const merge = APP.mergeSyncStore;
+  assert.equal(merge("profile", { _: { risk: 1 } }, { _: { risk: 5 } }, { _: 20 }, { _: 10 })._.risk, 1);
+  assert.equal(merge("profile", { _: { risk: 1 } }, { _: { risk: 5 } }, { _: 10 }, { _: 20 })._.risk, 5);
+  assert.equal(merge("profile", { _: { risk: 1 } }, { _: { risk: 5 } }, {}, { _: 0 })._.risk, 5);
+  assert.equal(merge("theme", { _: "matrix" }, { _: "paper" }, {}, { _: 5 })._, "paper");
+  assert.equal(merge("theme", {}, { _: "paper" })._, "paper");
+});
+
+test("sync: canonical form ignores the key order Postgres JSONB hands back", () => {
+  assert.equal(APP.syncCanon({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: null } }),
+               APP.syncCanon({ a: { c: null, d: [1, { x: 1, y: 2 }] }, b: 1 }));
+  assert.notEqual(APP.syncCanon({ a: 1 }), APP.syncCanon({ a: 2 }));
+});
+
+async function syncWorld({ local = {}, server = [], meta = null } = {}) {
+  const app = loadApp();
+  // Let the page's own syncBoot (accounts off in this harness) finish before taking over.
+  for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+  for (const [k, v] of Object.entries(local))
+    app(`localStorage.setItem(${JSON.stringify(k)}, ${JSON.stringify(typeof v === "string" ? v : JSON.stringify(v))})`);
+  if (meta) app(`localStorage.setItem("squall-sync-meta-v1", ${JSON.stringify(JSON.stringify(meta))})`);
+  app(`SYNC.meta = syncLoadMeta(); SYNC.booted = true; SYNC.enabled = true; SYNC.user = { id: "7", email: "a@b.c" };`);
+  const calls = [];
+  app("globalThis").fetch = async (url, opts = {}) => {
+    calls.push({ url, method: opts.method || "GET", body: opts.body && JSON.parse(opts.body) });
+    const json = url === "/api/sync" && !opts.method ? { items: server } : { ok: true };
+    return { ok: true, status: 200, json: async () => json };
+  };
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r => setTimeout(r, 0));
+      if (!app("SYNC.flushing") && !app("SYNC.meta.pending.length")) return;
+    }
+  };
+  const get = k => JSON.parse(app(`localStorage.getItem(${JSON.stringify(k)})`));
+  return { app, calls, settle, get, puts: () => calls.filter(c => c.method === "PUT").map(c => c.url) };
+}
+const syncSess = (t, updatedAt) => ({ data: { ticker: t }, history: [], updatedAt, createdAt: updatedAt });
+
+test("sync load: first sign-in merges both sides and uploads only what the account lacks", async () => {
+  const w = await syncWorld({
+    local: { "squall-saved-analyses-v1": { AAA: syncSess("AAA", 5) }, "squall-watchlist-v1": [{ t: "X", at: 1 }] },
+    server: [
+      { store: "analyses", id: "BBB", data: syncSess("BBB", 3), modifiedAt: 3 },
+      { store: "watchlist", id: "_", data: [{ t: "Y", at: 1 }], modifiedAt: 3 },
+      { store: "theme", id: "_", data: "paper", modifiedAt: 3 }
+    ]
+  });
+  await w.app("syncLoad(true)");
+  await w.settle();
+  assert.deepEqual(Object.keys(w.get("squall-saved-analyses-v1")).sort(), ["AAA", "BBB"]);
+  assert.deepEqual(w.get("squall-watchlist-v1").map(r => r.t), ["Y", "X"]);
+  assert.equal(w.app(`localStorage.getItem("squall-theme-v2")`), "paper");
+  assert.deepEqual(w.puts().sort(), ["/api/sync/analyses/AAA", "/api/sync/watchlist/_"]);
+  assert.ok(w.app('Object.keys(sessions).includes("BBB")'));   // in-memory tabs refreshed too
+  assert.equal(w.app("SYNC.meta.userId"), "7");
+  assert.equal(w.app("SYNC.meta.pending.length"), 0);
+});
+
+test("sync load: on a linked browser the account wins, except for changes still queued here", async () => {
+  const w = await syncWorld({
+    local: { "squall-saved-analyses-v1": { AAA: syncSess("AAA", 5), CCC: syncSess("CCC", 9) }, "squall-watchlist-v1": [{ t: "Q", at: 1 }] },
+    meta: { userId: "7", local: { analyses: { CCC: 9 } }, pending: [{ store: "analyses", id: "CCC" }], dirty: [] },
+    server: [
+      { store: "analyses", id: "BBB", data: syncSess("BBB", 3), modifiedAt: 3 },
+      { store: "watchlist", id: "_", data: [{ t: "Y", at: 1 }], modifiedAt: 3 }
+    ]
+  });
+  await w.app("syncLoad(false)");
+  await w.settle();
+  // AAA was deleted on another device; CCC was queued here and survives; BBB arrives.
+  assert.deepEqual(Object.keys(w.get("squall-saved-analyses-v1")).sort(), ["BBB", "CCC"]);
+  assert.deepEqual(w.get("squall-watchlist-v1").map(r => r.t), ["Y"]);
+  assert.deepEqual(w.puts(), ["/api/sync/analyses/CCC"]);
+});
+
+test("sync load: a store changed while offline is merged, not overwritten", async () => {
+  const w = await syncWorld({
+    local: { "squall-watchlist-v1": [{ t: "Q", at: 1 }] },
+    meta: { userId: "7", local: {}, pending: [], dirty: ["watchlist"] },
+    server: [{ store: "watchlist", id: "_", data: [{ t: "Y", at: 1 }], modifiedAt: 3 }]
+  });
+  await w.app("syncLoad(false)");
+  await w.settle();
+  assert.deepEqual(w.get("squall-watchlist-v1").map(r => r.t), ["Y", "Q"]);
+});
+
+test("sync load: a different account replaces this browser's synced data instead of merging", async () => {
+  const w = await syncWorld({
+    local: { "squall-saved-analyses-v1": { AAA: syncSess("AAA", 5) }, "squall-theme-v2": "matrix" },
+    meta: { userId: "99", local: {}, pending: [{ store: "analyses", id: "AAA" }], dirty: ["analyses"] },
+    server: [{ store: "analyses", id: "BBB", data: syncSess("BBB", 3), modifiedAt: 3 }]
+  });
+  await w.app("syncLoad(true)");
+  await w.settle();
+  assert.deepEqual(Object.keys(w.get("squall-saved-analyses-v1")), ["BBB"]);
+  assert.equal(w.app(`localStorage.getItem("squall-theme-v2")`), null);
+  assert.deepEqual(w.puts(), []);
+  assert.equal(w.app("SYNC.meta.userId"), "7");
+});
+
+test("sync: hooks upload changes, explicit deletes go up, eviction never deletes", async () => {
+  const w = await syncWorld({ server: [] });
+  await w.app("syncLoad(false)");
+  await w.settle();
+  w.app(`sessions.AAA = { data: { ticker: "AAA" }, history: [], createdAt: 1, updatedAt: 1 }; persistSessions();`);
+  await w.app("syncFlush()");
+  assert.deepEqual(w.puts(), ["/api/sync/analyses/AAA"]);
+  // Gone from local storage without an explicit delete (what eviction looks like): no DELETE.
+  w.app(`localStorage.setItem(SESSION_STORAGE_KEY, "{}"); syncNoteChange("analyses", {});`);
+  await w.app("syncFlush()");
+  assert.equal(w.calls.filter(c => c.method === "DELETE").length, 0);
+  // An explicit delete does go up.
+  w.app(`sessions.AAA = { data: { ticker: "AAA" }, history: [], createdAt: 1, updatedAt: 1 }; deleteSession("AAA");`);
+  await w.app("syncFlush()");
+  assert.deepEqual(w.calls.filter(c => c.method === "DELETE").map(c => c.url), ["/api/sync/analyses/AAA"]);
+  // A theme pick syncs; an OS-derived default never does.
+  w.app(`applyTheme("lagoon", false, true)`);
+  await w.app("syncFlush()");
+  assert.ok(w.puts().includes("/api/sync/theme/_"));
+  assert.equal(w.calls.find(c => c.url === "/api/sync/theme/_").body.data, "lagoon");
+});
+
+test("sync: signed out, the hooks are inert and nothing is sent", async () => {
+  const app = loadApp();
+  const calls = [];
+  app("globalThis").fetch = async url => { calls.push(url); return { ok: true, status: 200, json: async () => ({}) }; };
+  app(`sessions.AAA = { data: { ticker: "AAA" }, history: [], createdAt: 1, updatedAt: 1 }; persistSessions();
+       applyTheme("lagoon", false, true);`);
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(calls, []);
+  assert.equal(app(`localStorage.getItem("squall-sync-meta-v1")`), null);
+});

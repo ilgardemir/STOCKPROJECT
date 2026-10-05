@@ -21,6 +21,10 @@ function on(id, ev, fn, opts) {
 /* ════════════════ STATE: per-ticker sessions (declared first — theme init reads `active`) ════════════════ */
 const sessions = {};   // { TICKER: { data, context, history, range } }
 let active = null;     // active ticker for the chat/AI/data panes
+/* Account sync runtime (see ACCOUNT SYNC). Up here because the persistence hooks that read
+   it (persistSessions, commitTheme, …) are hoisted and reachable long before that section. */
+const SYNC = { booted: false, enabled: false, user: null, loaded: false, status: "", known: {},
+               pending: [], flushTimer: null, flushing: false, backoff: 0 };
 const chartOpts = { ma20: false, ma50: true, ma200: true, bb: false, fib: false, sr: true, pct: false, vol: true, instWindow: false };
 
 /* Chart ranges are timeframe descriptors, not bar counts. They used to be
@@ -232,20 +236,24 @@ function hydrateSavedSessions() {
   try { saved = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "{}"); } catch (_) { saved = {}; }
   if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
   Object.entries(saved).forEach(([ticker, raw]) => {
-    if (!raw || typeof raw !== "object" || !raw.data || raw.data.ticker !== ticker) return;
-    sessions[ticker] = {
-      data: raw.data,
-      context: String(raw.context || raw.data.ai_prompt || ""),
-      history: cleanHistory(raw.history),
-      range: normalizeRange(raw.range),   // migrates the pre-timeframe bar counts
-      profile: raw.profile || null,
-      profileKey: String(raw.profileKey || "none"),
-      createdAt: Number(raw.createdAt) || Date.now(),
-      updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || Date.now(),
-      fibAnchors: raw.fibAnchors || null
-    };
+    const sess = sessionFromSaved(ticker, raw);
+    if (sess) sessions[ticker] = sess;
   });
   active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
+}
+function sessionFromSaved(ticker, raw) {
+  if (!raw || typeof raw !== "object" || !raw.data || raw.data.ticker !== ticker) return null;
+  return {
+    data: raw.data,
+    context: String(raw.context || raw.data.ai_prompt || ""),
+    history: cleanHistory(raw.history),
+    range: normalizeRange(raw.range),   // migrates the pre-timeframe bar counts
+    profile: raw.profile || null,
+    profileKey: String(raw.profileKey || "none"),
+    createdAt: Number(raw.createdAt) || Date.now(),
+    updatedAt: Number(raw.updatedAt) || Number(raw.createdAt) || Date.now(),
+    fibAnchors: raw.fibAnchors || null
+  };
 }
 /* A saved session is dominated by data.price_history — 1260 daily OHLCV bars — and it used
    to carry two free copies alongside it. safe_float in the scraper does no rounding, so a
@@ -310,7 +318,7 @@ function persistSessions() {
   if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }   // an immediate write satisfies any pending one
   const map = {};
   Object.keys(sessions).forEach(t => { map[t] = persistableSession(sessions[t]); });
-  if (writeSessionMap(map)) return true;
+  if (writeSessionMap(map)) { syncNoteChange("analyses", map); return true; }
 
   const evictable = Object.keys(sessions)
     .filter(t => t !== active)
@@ -320,6 +328,9 @@ function persistSessions() {
     delete map[victim];
     evicted.push(victim);
     if (writeSessionMap(map)) {
+      // Eviction frees this browser's storage only; the account keeps its copies, because
+      // sync never infers a delete for analyses (see syncDiffStore).
+      syncNoteChange("analyses", map);
       evicted.forEach(t => { delete sessions[t]; });
       const n = evicted.length;
       showStorageNotice(`Browser storage is full — removed ${n} older saved ${n === 1 ? "analysis" : "analyses"} (${evicted.join(", ")}) to make room for this one.`);
@@ -367,7 +378,7 @@ function hydrateSavedScreeners() {
 function persistScreeners() {
   const saved = {};
   Object.entries(screeners).forEach(([id, s]) => { saved[id] = { ...s, loading: false }; });
-  try { localStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(saved)); return true; }
+  try { localStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(saved)); syncNoteChange("screens", saved); return true; }
   catch (_) {
     // Screens are small, but they share the origin budget with the analyses that aren't, so
     // this fails for the same reason and used to fail just as invisibly. No eviction here:
@@ -465,7 +476,7 @@ function commitTheme(def, persist) {
     b.setAttribute("aria-checked", String(b.dataset.theme === def.id)));
   // Persist only an explicit pick — writing the resolved default here is what made the
   // pre-v2 key unable to distinguish a choice from a default.
-  if (persist) try { localStorage.setItem(THEME_STORAGE_KEY, def.id); } catch (e) {}
+  if (persist) try { localStorage.setItem(THEME_STORAGE_KEY, def.id); syncNoteChange("theme"); } catch (e) {}
   // Anything that samples resolved colors (hero wind field, the cssVar cache, future
   // canvases) listens here rather than on the button — the button click only opens the menu.
   document.dispatchEvent(new CustomEvent("squall:theme", { detail: def }));
@@ -666,6 +677,7 @@ function saveMySquall() {
   mySquallProfile = readMySquallForm();
   try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(mySquallProfile)); }
   catch (_) { document.getElementById("profileSaveStatus").textContent = "Could not save in this browser"; return; }
+  syncNoteChange("profile");
   syncProfileButton();
   document.getElementById("profileSaveStatus").textContent = "Saved locally ✓";
   setTimeout(closeMySquall, 450);
@@ -673,6 +685,7 @@ function saveMySquall() {
 function resetMySquall() {
   mySquallProfile = null;
   try { localStorage.removeItem(PROFILE_STORAGE_KEY); } catch (_) {}
+  syncNoteChange("profile");
   fillMySquallForm(PROFILE_DEFAULTS); syncProfileButton();
   document.getElementById("profileSaveStatus").textContent = "Profile cleared";
 }
@@ -1455,6 +1468,7 @@ function applyScreenProgressEvent(data, fallback) {
 function deleteScreener(id) {
   if (!screeners[id]) return;
   delete screeners[id];
+  syncDeleteItem("screens", id);
   if (activeScreen === id) {
     activeScreen = null;
     const next = Object.keys(screeners).sort((a, b) => screeners[b].updatedAt - screeners[a].updatedAt)[0];
@@ -1808,7 +1822,7 @@ function loadWatchlist() {
     .slice(0, WATCH_MAX).map(r => ({ t: r.t, at: Number(r.at) || Date.now() }));
 }
 function persistWatchlist() {
-  try { localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchlist)); return true; }
+  try { localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchlist)); syncNoteChange("watchlist"); return true; }
   catch (_) { showStorageNotice("Browser storage is full — the watchlist change could not be saved."); return false; }
 }
 const isWatched = t => watchlist.some(r => r.t === t);
@@ -2036,7 +2050,7 @@ function loadPortfolio() {
     .filter(r => r.shares && r.shares <= PF_MAX_SHARES).slice(0, PF_MAX);
 }
 function persistPortfolio() {
-  try { localStorage.setItem(PF_STORAGE_KEY, JSON.stringify(portfolio)); return true; }
+  try { localStorage.setItem(PF_STORAGE_KEY, JSON.stringify(portfolio)); syncNoteChange("portfolio"); return true; }
   catch (_) { showStorageNotice("Browser storage is full — the portfolio change could not be saved."); return false; }
 }
 
@@ -2282,6 +2296,7 @@ function deleteSession(t) {
   if (sess._chatAbort) { try { sess._chatAbort.abort(); } catch (_) {} }
   const keys = Object.keys(sessions), idx = keys.indexOf(t);
   delete sessions[t];
+  syncDeleteItem("analyses", t);
   if (t === compareTicker) setCompareTicker(null, false);   // nothing left to compare against
   if (active === t) active = keys[idx + 1] && sessions[keys[idx + 1]] ? keys[idx + 1] : keys[idx - 1] && sessions[keys[idx - 1]] ? keys[idx - 1] : Object.keys(sessions)[0] || null;
   persistSessions(); renderTickerPills();
@@ -4170,6 +4185,404 @@ on("ticker", "keydown", e => { if (e.key === "Enter") { e.preventDefault(); runA
 renderTickerPills();
 if (IS_SCREENER_PAGE) document.getElementById("screenerNav")?.setAttribute("aria-current", "page");
 if (IS_PORTFOLIO_PAGE) document.getElementById("portfolioNav")?.setAttribute("aria-current", "page");
+
+/* ════════════════ ACCOUNT SYNC ════════════════
+   Optional Google sign-in (spec: docs/superpowers/specs/2026-10-05-accounts-sync-design.md).
+   localStorage stays the working copy and this mirrors it to the account one item at a time:
+   saved analyses and screens are a row per id, every other store a single row ("_").
+   Signed out, none of this does anything and the app behaves exactly as it always has. */
+const SYNC_STORES = ["analyses", "screens", "profile", "theme", "watchlist", "portfolio"];   // = auth-sync.js
+const SYNC_MULTI = new Set(["analyses", "screens"]);
+const SYNC_KEYS = { analyses: SESSION_STORAGE_KEY, screens: SCREENER_STORAGE_KEY, profile: PROFILE_STORAGE_KEY,
+                    theme: THEME_STORAGE_KEY, watchlist: WATCH_STORAGE_KEY, portfolio: PF_STORAGE_KEY };
+const SYNC_META_KEY = "squall-sync-meta-v1";
+const SYNC_FLUSH_MS = 1500;
+const SYNC_BACKOFF_MS = [5000, 30000, 120000];
+const SYNC_KEEPALIVE_MAX = 60000;   // keepalive bodies share a 64 KB cap per page
+
+/* Postgres JSONB reorders object keys, so "unchanged" has to be judged on a canonical form
+   or every load would re-upload everything the server sent back. */
+function syncCanon(v) {
+  if (Array.isArray(v)) return "[" + v.map(x => x === undefined || typeof x === "function" ? "null" : syncCanon(x)).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).filter(k => v[k] !== undefined && typeof v[k] !== "function")
+    .sort().map(k => JSON.stringify(k) + ":" + syncCanon(v[k])).join(",") + "}";
+  return JSON.stringify(v === undefined ? null : v);
+}
+function syncSameItems(a, b) {
+  const ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length && ka.every(k => k in b && syncCanon(a[k]) === syncCanon(b[k]));
+}
+
+/** This browser's copy of one store as {id: data}. A missing key is an empty store. */
+function syncReadLocal(store) {
+  let raw;
+  try { raw = localStorage.getItem(SYNC_KEYS[store]); } catch (_) { return {}; }
+  if (raw == null) return {};
+  // Only an explicit pick is a theme worth syncing; the OS-derived default is never stored.
+  if (store === "theme") return THEMES.some(t => t.id === raw) ? { _: raw } : {};
+  let v;
+  try { v = JSON.parse(raw); } catch (_) { return {}; }
+  if (SYNC_MULTI.has(store)) return v && typeof v === "object" && !Array.isArray(v) ? { ...v } : {};
+  if (store === "profile") return v && typeof v === "object" && !Array.isArray(v) ? { _: v } : {};
+  return Array.isArray(v) ? { _: v } : {};
+}
+function syncWriteLocal(store, items) {
+  const key = SYNC_KEYS[store];
+  try {
+    if (SYNC_MULTI.has(store)) localStorage.setItem(key, JSON.stringify(items));
+    else if (items._ === undefined) localStorage.removeItem(key);
+    else localStorage.setItem(key, typeof items._ === "string" ? items._ : JSON.stringify(items._));
+    return true;
+  } catch (_) { return false; }
+}
+
+/* First sign-in on a browser, or a store changed while sync couldn't reach the server: combine
+   the two copies so nothing is lost. Analyses and screens union by id (newer updatedAt wins a
+   clash), the watchlist and portfolio union by ticker with the account's rows first, and the
+   profile and theme go to whichever side changed last, the account winning a tie. */
+function mergeSyncStore(store, local, server, localMod = {}, serverMod = {}) {
+  const out = { ...server };
+  if (SYNC_MULTI.has(store)) {
+    for (const id in local) {
+      const l = local[id], s = server[id];
+      if (s === undefined || Number(l && l.updatedAt) > Number(s && s.updatedAt)) out[id] = l;
+    }
+    return out;
+  }
+  const l = local._, s = server._;
+  if (l === undefined) return out;
+  if (s === undefined) return { _: l };
+  if (store === "watchlist" || store === "portfolio") {
+    const have = new Set(s.map(r => r && r.t));
+    const cap = store === "watchlist" ? WATCH_MAX : PF_MAX;
+    return { _: [...s, ...l.filter(r => r && !have.has(r.t))].slice(0, cap) };
+  }
+  return { _: Number(localMod._) > Number(serverMod._) ? l : s };
+}
+
+function syncLoadMeta() {
+  let m;
+  try { m = JSON.parse(localStorage.getItem(SYNC_META_KEY) || "null"); } catch (_) { m = null; }
+  if (!m || typeof m !== "object") m = {};
+  return {
+    userId: typeof m.userId === "string" ? m.userId : null,
+    local: m.local && typeof m.local === "object" ? m.local : {},
+    pending: Array.isArray(m.pending) ? m.pending.filter(p => p && SYNC_STORES.includes(p.store) && typeof p.id === "string") : [],
+    dirty: Array.isArray(m.dirty) ? m.dirty.filter(s => SYNC_STORES.includes(s)) : []
+  };
+}
+function syncSaveMeta() { try { localStorage.setItem(SYNC_META_KEY, JSON.stringify(SYNC.meta)); } catch (_) {} }
+function syncQueue(store, id, at) {
+  const m = SYNC.meta;
+  (m.local[store] = m.local[store] || {})[id] = at;
+  if (!m.pending.some(p => p.store === store && p.id === id)) m.pending.push({ store, id });
+}
+
+/** Queue every item that differs from what the account last held. */
+function syncDiffStore(store, items) {
+  const local = items && SYNC_MULTI.has(store) ? items : syncReadLocal(store);
+  const known = SYNC.known[store] || {};
+  const now = Date.now();
+  let changed = false;
+  for (const id in local) if (syncCanon(local[id]) !== known[id]) { syncQueue(store, id, now); changed = true; }
+  // Analyses and screens are only ever deleted explicitly (syncDeleteItem): an id missing
+  // here may just have been evicted to free browser storage, and that must not delete it
+  // from every other device too.
+  if (!SYNC_MULTI.has(store)) for (const id in known) if (!(id in local)) { syncQueue(store, id, now); changed = true; }
+  if (changed) syncSaveMeta();
+}
+
+/* The persistence hooks. Called after every successful local write of a synced store. */
+function syncNoteChange(store, items) {
+  if (!SYNC.booted || !SYNC.meta) return;
+  if (SYNC.user && SYNC.loaded) { syncDiffStore(store, items); syncScheduleFlush(); return; }
+  // Linked to an account but not talking to it (offline, expired, still loading): remember
+  // the store changed so the next load merges it instead of letting the account overwrite it.
+  if (SYNC.meta.userId && !SYNC.meta.dirty.includes(store)) { SYNC.meta.dirty.push(store); syncSaveMeta(); }
+}
+function syncDeleteItem(store, id) {
+  if (!SYNC.booted || !SYNC.meta || !SYNC.meta.userId) return;
+  syncQueue(store, id, Date.now());
+  syncSaveMeta();
+  if (SYNC.user && SYNC.loaded) syncScheduleFlush();
+}
+
+function syncFetch(method, path, body, keepalive) {
+  return fetch(path, {
+    method, credentials: "same-origin", keepalive: Boolean(keepalive),
+    headers: body ? { "X-Squall-Sync": "1", "Content-Type": "application/json" } : { "X-Squall-Sync": "1" },
+    body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body)
+  });
+}
+const syncItemPath = op => `/api/sync/${encodeURIComponent(op.store)}/${encodeURIComponent(op.id)}`;
+const syncItemBody = (op, item) => JSON.stringify({ data: item, modifiedAt: (SYNC.meta.local[op.store] || {})[op.id] || Date.now() });
+
+function syncScheduleFlush(delay = SYNC_FLUSH_MS) {
+  clearTimeout(SYNC.flushTimer);
+  SYNC.flushTimer = setTimeout(syncFlush, delay);
+}
+async function syncFlush() {
+  clearTimeout(SYNC.flushTimer); SYNC.flushTimer = null;
+  if (SYNC.flushing || !SYNC.user || !SYNC.loaded) return;
+  SYNC.flushing = true;
+  syncSetStatus("pending");
+  try {
+    while (SYNC.meta.pending.length) {
+      const op = SYNC.meta.pending[0];
+      const item = syncReadLocal(op.store)[op.id];
+      const sent = item === undefined ? null : syncCanon(item);
+      let res = null;
+      try { res = item === undefined ? await syncFetch("DELETE", syncItemPath(op)) : await syncFetch("PUT", syncItemPath(op), syncItemBody(op, item)); }
+      catch (_) {}
+      if (res && res.status === 401) { syncSignedOut(); return; }
+      if (res && res.status === 413) {
+        const body = await res.json().catch(() => ({}));
+        showStorageNotice(body.code === "quota"
+          ? "Your account's sync storage is full. New changes are saved in this browser only."
+          : `${op.id === "_" ? "This change" : op.id} is too large to sync. It is saved in this browser only.`);
+      } else if (!res || !res.ok) {
+        // Rate limit, server error or network: keep the op and come back later, backing off.
+        SYNC.backoff = Math.min(SYNC.backoff + 1, SYNC_BACKOFF_MS.length);
+        syncSetStatus("retry");
+        syncScheduleFlush(SYNC_BACKOFF_MS[SYNC.backoff - 1]);
+        return;
+      }
+      if (res.ok) {
+        const known = SYNC.known[op.store] = SYNC.known[op.store] || {};
+        if (sent === null) delete known[op.id]; else known[op.id] = sent;
+      }
+      // Changed again while the request was in flight: leave it queued so the newer copy goes up.
+      const now = syncReadLocal(op.store)[op.id];
+      if ((now === undefined ? null : syncCanon(now)) !== sent && res.ok) continue;
+      SYNC.meta.pending.shift();
+      syncSaveMeta();
+    }
+    SYNC.backoff = 0;
+    syncSetStatus("ok");
+  } finally { SYNC.flushing = false; }
+}
+/* A closing page can't wait for the debounce. Whatever fits in keepalive's budget goes now;
+   everything stays queued regardless, and the next load re-sends it (writes are idempotent). */
+function syncFlushOnHide() {
+  if (!SYNC.user || !SYNC.loaded || !SYNC.meta.pending.length) return;
+  let budget = SYNC_KEEPALIVE_MAX;
+  for (const op of SYNC.meta.pending) {
+    const item = syncReadLocal(op.store)[op.id];
+    const body = item === undefined ? null : syncItemBody(op, item);
+    if (body && body.length > budget) continue;
+    if (body) budget -= body.length;
+    try { syncFetch(body ? "PUT" : "DELETE", syncItemPath(op), body, true).catch(() => {}); } catch (_) {}
+  }
+}
+addEventListener("pagehide", syncFlushOnHide);
+addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") syncFlushOnHide(); });
+
+/** Pull the account's copy and reconcile it with this browser's. */
+async function syncLoad(signedInNow) {
+  let res = null;
+  try { res = await fetch("/api/sync", { credentials: "same-origin" }); } catch (_) {}
+  if (res && res.status === 401) return syncSignedOut();
+  if (!res || !res.ok) { syncSetStatus("retry"); setTimeout(() => syncLoad(signedInNow), SYNC_BACKOFF_MS[1]); return; }
+  const body = await res.json().catch(() => ({}));
+  const server = {}, serverMod = {};
+  SYNC_STORES.forEach(s => { server[s] = {}; serverMod[s] = {}; });
+  for (const it of Array.isArray(body.items) ? body.items : [])
+    if (it && server[it.store]) { server[it.store][it.id] = it.data; serverMod[it.store][it.id] = it.modifiedAt; }
+
+  // The in-memory session may be ahead of storage by one debounce; settle that first.
+  flushSessionSave();
+  const m = SYNC.meta, uid = String(SYNC.user.id);
+  // Another account was linked here: its data must never be merged into this one.
+  const otherUser = Boolean(m.userId && m.userId !== uid);
+  if (otherUser) { m.pending = []; m.dirty = []; m.local = {}; }
+  const mergeAll = !otherUser && (!m.userId || signedInNow);
+  const changed = [];
+  let unfit = false;
+  for (const store of SYNC_STORES) {
+    const local = syncReadLocal(store);
+    const target = otherUser ? { ...server[store] }
+      : mergeAll || m.dirty.includes(store) ? mergeSyncStore(store, local, server[store], m.local[store], serverMod[store])
+      : { ...server[store] };
+    // Changes still queued from this browser beat the account's copy.
+    if (!otherUser) for (const p of m.pending) if (p.store === store) {
+      if (p.id in local) target[p.id] = local[p.id]; else delete target[p.id];
+    }
+    if (!syncSameItems(local, target)) {
+      if (syncWriteLocal(store, target)) changed.push(store); else unfit = true;
+    }
+    SYNC.known[store] = {};
+    for (const id in server[store]) SYNC.known[store][id] = syncCanon(server[store][id]);
+  }
+  m.userId = uid; m.dirty = [];
+  syncSaveMeta();
+  SYNC.loaded = true;
+  if (unfit) showStorageNotice("Some of your synced work doesn't fit in this browser's storage. It is still saved in your account.");
+  if (changed.length) syncRefreshUi(changed);
+  SYNC_STORES.forEach(s => syncDiffStore(s));
+  if (m.pending.length) syncFlush(); else syncSetStatus("ok");
+}
+
+/* Bring in-memory state and the screen in line with what was just written to storage. */
+function syncRefreshUi(stores) {
+  const has = s => stores.includes(s);
+  if (has("theme")) applyTheme(syncReadLocal("theme")._ || systemTheme(), true, false);
+  if (has("profile")) { mySquallProfile = loadMySquall(); syncProfileButton(); }
+  if (has("watchlist")) { loadWatchlist(); renderWatchlist(); syncWatchToggle(); }
+  if (has("portfolio") && IS_PORTFOLIO_PAGE) { loadPortfolio(); renderPortfolio(); refreshPortfolioQuotes(true); }
+  if (has("screens") && !_screenES) {
+    Object.keys(screeners).forEach(id => { delete screeners[id]; });
+    hydrateSavedScreeners();
+    if (activeScreen && !screeners[activeScreen]) activeScreen = null;
+  }
+  if (has("analyses")) syncRefreshSessions();
+  if (has("screens") || has("analyses")) renderTickerPills();
+}
+function syncRefreshSessions() {
+  const saved = syncReadLocal("analyses");
+  // A tab that is streaming an analysis or a chat reply keeps its in-memory copy.
+  const busy = t => Boolean(sessions[t] && (sessions[t]._chatBusy || (t === active && _es)));
+  for (const t of Object.keys(sessions)) if (!(t in saved) && !busy(t)) {
+    delete sessions[t];
+    if (t === compareTicker) setCompareTicker(null, false);
+  }
+  for (const t in saved) {
+    if (busy(t)) continue;
+    const sess = sessionFromSaved(t, saved[t]);
+    if (sess) sessions[t] = sess;
+  }
+  if (active && !sessions[active]) active = Object.keys(sessions).sort((a, b) => sessions[b].updatedAt - sessions[a].updatedAt)[0] || null;
+  if (!IS_ANALYZER_PAGE) return;
+  const ws = document.getElementById("workspace"), hero = document.getElementById("hero");
+  if (!ws || !ws.classList.contains("show")) return;   // hero still up: nothing on screen to redraw
+  if (active && sessions[active]) { renderAll(sessions[active].data); syncChatSendMode(); }
+  else { clearTickerBar(); ws.classList.remove("show", "leaving"); if (hero) hero.style.display = ""; }
+}
+
+function syncSignedOut() {
+  SYNC.user = null; SYNC.loaded = false;
+  syncSetStatus("expired");
+  closeAccountMenu(false);
+  renderAccount();
+}
+const SYNC_STATUS_TEXT = {
+  ok: "Synced to your account", pending: "Syncing…", retry: "Not synced yet. Will retry.",
+  expired: "Signed out. Sign in again to sync."
+};
+function syncSetStatus(s) {
+  SYNC.status = s;
+  const el = document.getElementById("accountStatus");
+  if (el) { el.textContent = SYNC_STATUS_TEXT[s] || ""; el.classList.toggle("warn", s === "retry"); }
+  document.getElementById("accountBtn")?.classList.toggle("sync-warn", s === "retry" || s === "expired");
+}
+
+/* ── Header control ── */
+function renderAccount() {
+  const btn = document.getElementById("accountBtn");
+  if (!btn) return;
+  btn.hidden = !SYNC.enabled;
+  const div = document.getElementById("accountDiv");
+  if (div) div.hidden = !SYNC.enabled;
+  const u = SYNC.user;
+  const label = btn.querySelector("span"), initial = document.getElementById("accountInitial");
+  if (label) label.textContent = u ? "Account" : "Sign in";
+  if (initial) { initial.textContent = u ? String(u.name || u.email || "?").trim().charAt(0).toUpperCase() : ""; initial.hidden = !u; }
+  btn.classList.toggle("signed-in", Boolean(u));
+  if (u) btn.setAttribute("aria-haspopup", "menu"); else btn.removeAttribute("aria-haspopup");
+  btn.title = u ? `Signed in as ${u.email}` : SYNC.status === "expired"
+    ? "Signed out. Sign in again to keep syncing."
+    : "Sign in with Google to keep your work in sync across devices";
+  const email = document.getElementById("accountEmail");
+  if (email) email.textContent = u ? u.email : "";
+}
+const accountMenuOpen = () => document.getElementById("accountMenu")?.classList.contains("open") || false;
+function showAccountConfirm(show) {
+  const a = document.getElementById("accountActions"), c = document.getElementById("accountConfirm");
+  if (a) a.hidden = show;
+  if (c) c.hidden = !show;
+}
+function openAccountMenu() {
+  const menu = document.getElementById("accountMenu");
+  if (!menu) return;
+  showAccountConfirm(false);
+  menu.classList.add("open");
+  document.getElementById("accountBtn")?.setAttribute("aria-expanded", "true");
+  document.getElementById("accountSignOut")?.focus();
+}
+function closeAccountMenu(refocus) {
+  if (!accountMenuOpen()) return;
+  document.getElementById("accountMenu").classList.remove("open");
+  const btn = document.getElementById("accountBtn");
+  btn?.setAttribute("aria-expanded", "false");
+  if (refocus) btn?.focus();
+}
+/* Signing out or deleting leaves nothing of the account in this browser. The pending session
+   save is cancelled first, or the pagehide flush would write the sessions straight back. */
+function syncClearLocalAndReload() {
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+  SYNC.user = null;
+  [...Object.values(SYNC_KEYS), SYNC_META_KEY].forEach(k => { try { localStorage.removeItem(k); } catch (_) {} });
+  location.reload();
+}
+function accountNote(text, warn) {
+  const el = document.getElementById("accountStatus");
+  if (el) { el.textContent = text; el.classList.toggle("warn", Boolean(warn)); }
+}
+async function accountSignOut() {
+  accountNote("Signing out…");
+  flushSessionSave();
+  await syncFlush();   // push anything queued before it is wiped from this browser
+  let res = null;
+  try { res = await syncFetch("POST", "/auth/logout"); } catch (_) {}
+  if (!res || (!res.ok && res.status !== 401)) { accountNote("Couldn't reach Squall to sign out. Try again.", true); return; }
+  syncClearLocalAndReload();
+}
+async function accountDelete() {
+  accountNote("Deleting your account…");
+  let res = null;
+  try { res = await syncFetch("DELETE", "/api/account"); } catch (_) {}
+  if (!res || !res.ok) { showAccountConfirm(false); accountNote("Couldn't delete the account. Try again.", true); return; }
+  syncClearLocalAndReload();
+}
+on("accountBtn", "click", () => {
+  if (!SYNC.user) {
+    flushSessionSave();
+    location.href = "/auth/google?return=" + encodeURIComponent(location.pathname + location.search);
+    return;
+  }
+  accountMenuOpen() ? closeAccountMenu(false) : openAccountMenu();
+});
+on("accountSignOut", "click", accountSignOut);
+on("accountDelete", "click", () => showAccountConfirm(true));
+on("accountDeleteNo", "click", () => { showAccountConfirm(false); document.getElementById("accountDelete")?.focus(); });
+on("accountDeleteYes", "click", accountDelete);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && accountMenuOpen()) { e.stopPropagation(); closeAccountMenu(true); } }, true);
+document.addEventListener("pointerdown", e => {
+  const menu = document.getElementById("accountMenu"), btn = document.getElementById("accountBtn");
+  if (accountMenuOpen() && !menu.contains(e.target) && !btn.contains(e.target)) closeAccountMenu(false);
+});
+
+async function syncBoot() {
+  SYNC.meta = syncLoadMeta();
+  SYNC.booted = true;
+  const hash = location.hash;
+  if (/^#(signed-in|signin-error|signin-limited)$/.test(hash)) {
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (_) {}
+    if (hash === "#signin-error") showStorageNotice("Sign-in didn't complete. Please try again.");
+    if (hash === "#signin-limited") showStorageNotice("Too many sign-in attempts from this network. Try again in an hour.");
+  }
+  if (typeof fetch !== "function") return;
+  let me = null;
+  try {
+    const r = await fetch("/api/me", { credentials: "same-origin" });
+    if (r.ok) me = await r.json();
+  } catch (_) {}
+  SYNC.enabled = Boolean(me && me.enabled);
+  SYNC.user = SYNC.enabled && me.user && me.user.id ? me.user : null;
+  if (!SYNC.user && SYNC.enabled && SYNC.meta.userId) syncSetStatus("expired");
+  renderAccount();
+  if (SYNC.user) { syncSetStatus("pending"); await syncLoad(hash === "#signed-in"); }
+}
+syncBoot().catch(() => {});
 
 /* ════════════════ DEEP LINKS ════════════════
    /?t=TICKER opens an analysis, /screener?id=<screen> opens a saved screen. This is the

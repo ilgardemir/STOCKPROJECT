@@ -102,6 +102,28 @@
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6c0 4-2 5-2 5h16s-2-1-2-5a6 6 0 0 0-6-6Z"/><path d="M9 19h6M12 3V1"/></svg>
       <span>MySquall</span><i id="profileDot" aria-hidden="true"></i>
     </button>
+    <!-- Account (optional Google sign-in + sync). Hidden until /api/me says accounts are on.
+         Sits before #themeBtn so the theme button keeps the rail's :last-of-type cap.
+         Signed out it is a link to Google; signed in it opens #accountMenu. -->
+    <span class="rail-div" id="accountDiv" aria-hidden="true" hidden></span>
+    <button id="accountBtn" type="button" aria-expanded="false" aria-controls="accountMenu" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+      <span>Sign in</span><b id="accountInitial" aria-hidden="true" hidden></b>
+    </button>
+    <div id="accountMenu" role="menu" aria-label="Account">
+      <div class="menu-head">Account</div>
+      <p id="accountEmail" class="acct-line"></p>
+      <p id="accountStatus" class="acct-note" role="status" aria-live="polite"></p>
+      <div id="accountActions" class="acct-actions">
+        <button id="accountSignOut" type="button" role="menuitem">Sign out</button>
+        <button id="accountDelete" type="button" role="menuitem">Delete account…</button>
+      </div>
+      <div id="accountConfirm" class="acct-actions" hidden>
+        <p class="acct-note warn">Delete your account and everything synced to it? Work saved only in this browser is removed too. This can't be undone.</p>
+        <button id="accountDeleteYes" type="button" role="menuitem">Delete account</button>
+        <button id="accountDeleteNo" type="button" role="menuitem">Cancel</button>
+      </div>
+    </div>
     <span class="rail-div" aria-hidden="true"></span>
     <button id="themeBtn" type="button" aria-label="Appearance" aria-haspopup="menu" aria-expanded="false" aria-controls="themeMenu">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

@@ -1,6 +1,6 @@
 # Accounts and sync (Google sign-in)
 
-Date: 2026-10-05 · Status: approved design, not yet implemented
+Date: 2026-10-05 · Status: implemented (see auth-sync.js and the ACCOUNT SYNC section of app.js)
 
 ## Goal
 
@@ -52,7 +52,7 @@ user_items (user_id BIGINT REFERENCES users ON DELETE CASCADE, store TEXT, item_
             PRIMARY KEY (user_id, store, item_id))
 ```
 
-`item_id` is `''` for single-row stores. `modified_at` is the client's modification time
+`item_id` is `"_"` for single-row stores. `modified_at` is the client's modification time
 (ms), used for merge decisions. Expired sessions are deleted opportunistically on sign-in.
 
 Routes:
@@ -119,10 +119,10 @@ Limits (env-tunable, defaults below):
 | `SQUALL_SYNC_USER_MAX_BYTES` | 26214400 | Sum of a user's `bytes` |
 
 Over a size cap → 413 `{error, code:"too_large"|"quota"}`; over the write rate → 429.
-Request bodies are read with the existing `readBody` and the item cap.
+Request bodies are read with a byte-capped reader in auth-sync.js at the item cap.
 
 Store names are validated against a fixed list (`SYNC_STORES`); item ids against
-`^[A-Za-z0-9_-]{1,80}$`. `data` must be JSON of the store's expected kind (object for
+`^[A-Za-z0-9._^=-]{1,80}$` (analyses are keyed by ticker, e.g. `BRK.B`, `^GSPC`). `data` must be JSON of the store's expected kind (object for
 `analyses`/`screens`/`profile`, string for `theme`, array for `watchlist`/`portfolio`).
 
 ## 3. Client sync (app.js)
@@ -140,9 +140,13 @@ Meta key `squall-sync-meta-v1`: `{userId, server: {store: {id: modifiedAt}},
 local: {store: {id: modifiedAt}}, pending: [{store, id, op}]}`.
 
 Change detection: `syncNoteChange(store)` reads the store from localStorage, splits it into
-items, and compares each item's serialized JSON with a hash cached from the last sync. Changed
-items get `local[store][id] = Date.now()` and a pending `put`; vanished items get a pending
-`delete`. Pending ops flush after 1.5s of quiet, one request per op, sequentially. On
+items, and compares each item's canonical JSON (`syncCanon`, sorted keys, because JSONB
+reorders them) with the copy last seen on the server. Changed items get
+`local[store][id] = Date.now()` and a pending op. A vanished single-row item gets a pending
+delete; a vanished analysis or screen does **not**, because it may only have been evicted for
+space. Those are deleted only through `syncDeleteItem`, called from `deleteSession` and
+`deleteScreener`. While linked but not loaded (offline, expired), a change marks its store
+`dirty`, and the next load merges dirty stores instead of letting the account overwrite them. Pending ops flush after 1.5s of quiet, one request per op, sequentially. On
 `pagehide`/`visibilitychange:hidden`, ops whose body is under 60 KB flush with
 `fetch(..., {keepalive:true})`; the rest stay in `pending` for the next load.
 
@@ -160,7 +164,10 @@ Merge (pure function `mergeSyncState(local, server)`, unit-tested):
 - `analyses`, `screens`: union by id; on clash, higher `updatedAt` wins.
 - `watchlist`: server entries first, then local tickers not already present, capped at
   `WATCH_MAX`.
-- `portfolio`, `profile`: whichever side has the higher `modified_at` (local side uses
+- `portfolio`: like the watchlist, server holdings first, then local tickers not present,
+  capped at `PF_MAX` (changed during implementation: newest-wins could silently drop a
+  device's holdings).
+- `profile`: whichever side has the higher `modified_at` (local side uses
   `meta.local` or 0 if never tracked, so the account wins ties).
 - `theme`: local counts only if explicitly picked (`squall-theme-v2` present); otherwise
   server wins.

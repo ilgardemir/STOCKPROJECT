@@ -1,8 +1,8 @@
 # CLAUDE.md
 
 **Squall**: an equity analysis tool (repo name STOCKPROJECT, product name "Squall"). Vanilla
-everything: no frameworks, no build step, **zero npm dependencies**. Adding a dependency is a
-real decision.
+everything: no frameworks, no build step, and **one npm dependency** (`pg`, for accounts). Adding
+a dependency is a real decision.
 
 > **Rationale, measurements and history live in [`docs/engineering-notes.md`](docs/engineering-notes.md).**
 > This file keeps the rules. Before changing anything listed here, read the matching section
@@ -65,6 +65,7 @@ The screener adds an LLM step that turns the query into a recipe before `screene
 | `screener.py` | Multi-index screener. Job JSON on stdin, deterministic scoring, `PROGRESS\|pct\|label` on stderr |
 | `backtester.py` | Hidden point-in-time engine for `/ilgar`. `snapshot` and `outcomes` are kept separate; `ai_prompt` is built from `snapshot` only |
 | `replay-engine.js` | `/ilgar` research replay v2 policy (see below) |
+| `auth-sync.js` | Optional Google sign-in, sessions and per-item sync (`/auth/*`, `/api/*`). Takes `db.query` and `fetch` by injection |
 | `news-research.js` | Two parallel web searches (`NEWS_QUERIES`), merged into a digest that replaces the Finnhub records in `ai_prompt` §14 (live analyzer only) |
 | `event_calendar.py` | `event_risk` (next results window). No dependencies; backtester re-exports it |
 | `financial_rules.py` | Business-model applicability, bid/ask validation |
@@ -121,6 +122,17 @@ checks for drift.
   cache, a site-wide upstream window and a per-IP cap.
 - `GET /health`: dumb on purpose; must never leak budget. `GET /stats?key=`: 404s unless
   `SQUALL_STATS_KEY` matches.
+- **Accounts** (`auth-sync.js`, spec `docs/superpowers/specs/2026-10-05-accounts-sync-design.md`):
+  `/auth/google`, `/auth/google/callback`, `POST /auth/logout`, `GET /api/me`, `GET /api/sync`,
+  `PUT|DELETE /api/sync/:store/:id`, `DELETE /api/account`. Routed before everything else, never
+  `admit()`-gated, never `spendAi()`. Optional by construction: off unless `DATABASE_URL`,
+  `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `SQUALL_SESSION_SECRET` are all set and the schema
+  check passed; then `/api/me` says `{enabled:false}` and no other route notices. The pg pool is
+  only created in `startAccounts()` (never on `require`). Every mutating route needs
+  `Origin` = `SQUALL_PUBLIC_URL`'s origin **and** `X-Squall-Sync: 1`; these routes strip the
+  wildcard CORS header. Cookie holds a random token, the DB only its SHA-256. The redirect URI
+  comes from `SQUALL_PUBLIC_URL`, **never** from `Host`. `SYNC_STORES` is duplicated in app.js
+  (`node scripts/check_sync_stores.js` checks drift). Never log tokens, codes or secrets.
 - Everything else goes through `serveStatic`: an **explicit allowlist**, extensionless → `.html`, include
   expansion, ETag/Cache-Control. Strip the query string before testing for `/`. `sendNotFound`
   serves `404.html` only for `Accept: text/html` and page-shaped misses, and always with a real 404.
@@ -216,6 +228,13 @@ which hides it but does not protect it.
   sessions (never `active`) and call `showStorageNotice()`. Debounce UI churn with
   `scheduleSessionSave`, persist state transitions immediately, and flush on
   `pagehide`/`visibilitychange`. Screens never evict. Profiles and tabs stay in localStorage only.
+- **Account sync** (`ACCOUNT SYNC` section): localStorage stays the working copy. Every write of a
+  synced store (analyses, screens, MySquall, an explicit theme pick, watchlist, portfolio) calls
+  `syncNoteChange(store)` after it succeeds; a new synced store needs that hook, a `SYNC_KEYS`
+  entry and a server-side `SYNC_STORES` entry. Analyses and screens are **only deleted through
+  `syncDeleteItem`**, never inferred from a missing id, because eviction must not delete from the
+  account. Compare items with `syncCanon` (JSONB reorders keys). Signed out, the hooks are inert.
+  The `SYNC` runtime object sits at the top of app.js for the TDZ reason above.
 - **Chart:**
   - Ranges are timeframe descriptors. `seriesFor(d, tf)` is the only resolver, and `aggregateBars`
     anchors to the newest bar. `sess.range` is an id string, and `normalizeRange` migrates legacy
@@ -332,6 +351,11 @@ retuned from the Railway dashboard without a deploy.
 | `SEC_USER_AGENT` | built-in | EDGAR requires a real UA |
 | `PORT`, `PYTHON_BIN` | 3000, `python3` | |
 | `SQUALL_STATS_KEY` | unset | Unset means `/stats` 404s |
+| `SQUALL_ACCOUNTS` | on | `off` = accounts hidden and routes off (instant revert) |
+| `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SQUALL_SESSION_SECRET` | — | All four required for accounts. `DATABASE_URL` is a Railway reference to the Postgres service |
+| `SQUALL_PUBLIC_URL` | `https://squall.up.railway.app` deployed, `http://localhost:PORT` locally | Builds the OAuth redirect URI and the allowed `Origin` |
+| `SQUALL_AUTH_IP_HOURLY` / `SQUALL_SYNC_WRITES_PER_MIN` | 20 / 120 | Sign-in starts per IP; sync writes per user |
+| `SQUALL_SYNC_ITEM_MAX_BYTES` / `_USER_MAX_BYTES` | 2097152 / 26214400 | Per item / per account (413 `too_large` / `quota`) |
 | `SQUALL_GLOBAL_AI_DAILY` | 1500 | ≈150 analyses/day. **This is the real spend bound** |
 | `SQUALL_GLOBAL_SCRAPE_DAILY` / `_SCREEN_DAILY` | 600 / 200 | |
 | `SQUALL_IP_HOURLY` / `_DAILY` / `_ANALYZE_DAILY` | 45 / 120 / 60 | The anti-abuse dial. Lower these first |
