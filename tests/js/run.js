@@ -9,6 +9,7 @@ require("./backtester.test");
 require("./app.test");
 require("./replay.test");
 require("./news.test");
+require("./auth-sync.test");
 
 /*
  * The loop AWAITS fn(). It used to call it bare, which meant an async test could only
