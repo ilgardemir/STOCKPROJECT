@@ -136,6 +136,11 @@ test("accounts: config needs all four secrets, honours the off switch, and never
   assert.equal(loadConfig({ ...local, PORT: "3271" }).publicUrl, "http://localhost:3271");
   assert.equal(loadConfig({ ...local, RAILWAY_ENVIRONMENT_NAME: "production" }).publicUrl, "https://squall.up.railway.app");
   assert.equal(loadConfig({ ...ENV, SQUALL_SYNC_ITEM_MAX_BYTES: "nonsense" }).limits.itemMaxBytes, 2097152);
+  // A pasted value with a trailing newline must not reach Google ("OAuth client was not found").
+  const pasted = loadConfig({ ...ENV, GOOGLE_CLIENT_ID: "cid.apps.googleusercontent.com\n", SQUALL_PUBLIC_URL: " https://squall.test/ " });
+  assert.equal(pasted.clientId, "cid.apps.googleusercontent.com");
+  assert.equal(pasted.redirectUri, "https://squall.test/auth/google/callback");
+  assert.equal(loadConfig({ ...ENV, GOOGLE_CLIENT_SECRET: "  " }).enabled, false);
 });
 
 test("accounts: signed cookies verify, and tampering or age breaks them", () => {

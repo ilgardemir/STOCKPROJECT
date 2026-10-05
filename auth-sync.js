@@ -42,7 +42,11 @@ function intEnv(env, name, def) {
  * The redirect URI is built from SQUALL_PUBLIC_URL and never from the request's Host
  * header, so a forged Host cannot steer Google's code to another origin.
  */
-function loadConfig(env = process.env) {
+function loadConfig(rawEnv = process.env) {
+  // Values pasted into a dashboard often carry a trailing newline or space, and Google
+  // rejects a client id with one as "OAuth client was not found". Trim everything we read.
+  const env = {};
+  for (const k of Object.keys(rawEnv)) env[k] = typeof rawEnv[k] === "string" ? rawEnv[k].trim() : rawEnv[k];
   const deployed = env.NODE_ENV === "production" || Boolean(env.RAILWAY_ENVIRONMENT
     || env.RAILWAY_ENVIRONMENT_NAME || env.RAILWAY_PROJECT_ID);
   const publicUrl = String(env.SQUALL_PUBLIC_URL
