@@ -10,7 +10,7 @@ from financial_rules import business_model, quote_evidence
 from event_calendar import live_event_risk, describe_event_risk
 from quant_utils import (return_windows, first_number, positive_ratio, percent_fraction, wilder_rsi,
                          annual_cagr, adjusted_close, risk_statistics)
-import requests, json, re, sys, os, math, time, tempfile, traceback
+import requests, json, re, sys, os, math, time, tempfile, traceback, copy
 from html import unescape
 from html.parser import HTMLParser
 import pandas as pd
@@ -83,6 +83,17 @@ SEC_MIN_INTERVAL  = 1.0 / SEC_RATE_PER_PROC if SEC_RATE_PER_PROC > 0 else 0.0
 # unaffected and only pathological ones are trimmed; when it binds it is recorded in
 # SEC_DIAGNOSTICS rather than silently changing the insider counts.
 SEC_MAX_FILING_FETCHES = int(os.getenv("SQUALL_SEC_MAX_FILING_FETCHES", "40"))
+
+# How many sec.gov documents may be in flight at once. This sets LATENCY, not rate:
+# _sec_throttle still hands out one start slot per SEC_MIN_INTERVAL across all of them.
+# A filing document takes ~0.8s to arrive, so a single lane never got near the 3/s it
+# was allowed; three lanes let the throttle, not the round trip, be what binds.
+# 1 = one document at a time (companyfacts still overlaps the submissions call).
+SEC_WORKERS = max(1, int(os.getenv("SQUALL_SEC_WORKERS", "3")))
+
+# Concurrent Yahoo/Finnhub/FMP calls inside one run. Same total requests as a serial
+# run (fewer, with the quoteSummary batch); this only overlaps their round trips.
+MARKET_WORKERS = max(1, int(os.getenv("SQUALL_MARKET_WORKERS", "4")))
 
 # The 8-K / Form 4 / 13D lookback. Used both to select filings and to filter them,
 # and surfaced in the UI as "SEC Filing Activity (90 Days)" — so it lives in one
@@ -292,6 +303,42 @@ class YQData:
         self._cache[name] = result
         return result
 
+    # quoteSummary module name → the attribute name it is cached under.
+    PREFETCH_MODULES = {"price": "price", "assetProfile": "asset_profile",
+                        "financialData": "financial_data", "defaultKeyStatistics": "key_stats",
+                        "summaryDetail": "summary_detail", "calendarEvents": "calendar_events",
+                        "earningsTrend": "earnings_trend", "earningsHistory": "_earnings_history"}
+
+    def prefetch_modules(self) -> None:
+        """Every quoteSummary module this run reads, in ONE request instead of eight.
+
+        Each property used to be its own round trip to the same endpoint. yahooquery
+        applies the same date conversion either way; only the nesting differs (one
+        module comes back unwrapped, several come back keyed by module name). A failed
+        batch caches nothing, so each property falls back to its own request as before.
+        """
+        try:
+            raw = self._yq.get_modules(list(self.PREFETCH_MODULES))
+            data = raw.get(self.sym) or raw.get(self.sym.upper()) if isinstance(raw, dict) else None
+            if not isinstance(data, dict):
+                return
+            for module, attr in self.PREFETCH_MODULES.items():
+                val = data.get(module)
+                self._cache[attr] = val if isinstance(val, dict) else {}
+        except Exception:
+            return
+
+    def sibling(self, symbol: str) -> "YQData":
+        """Another symbol on this session: skips the ~0.5s cookie + crumb setup a new Ticker does."""
+        try:
+            twin = object.__new__(YQData)
+            twin.sym, twin._cache = symbol, {}
+            twin._yq = copy.copy(self._yq)
+            twin._yq.symbols = symbol
+            return twin
+        except Exception:
+            return YQData(symbol)
+
     @property
     def price_mod(self)      -> dict: return self._mod("price")
     @property
@@ -366,7 +413,15 @@ class YQData:
     # ── earnings history ──────────────────────────────────────────────────────
     def earnings_hist(self) -> pd.DataFrame:
         try:
-            raw = self._yq.earning_history
+            prefetched = self._cache.get("_earnings_history")
+            if prefetched is not None:
+                # Same frame yahooquery's earning_history builds from this module.
+                rows = prefetched.get("history")
+                if not isinstance(rows, list) or not rows:
+                    return pd.DataFrame()
+                raw = pd.concat([pd.DataFrame(rows)], keys=[self.sym], names=["symbol", "row"])
+            else:
+                raw = self._yq.earning_history
             if not isinstance(raw, pd.DataFrame) or raw.empty:
                 return pd.DataFrame()
             if hasattr(raw.index, "names") and "symbol" in raw.index.names:
@@ -479,6 +534,11 @@ def _sec_diag(step, url, ok, status=None, error=None):
 
 _sec_last_request = 0.0
 _sec_request_count = 0
+_sec_lock = threading.Lock()
+
+# Raw bytes of documents fetched with keep=True, for this run only. The 10-K is read
+# once for MD&A and again for the filing attachment; this makes the second read free.
+_SEC_DOC_CACHE: dict = {}
 
 def _sec_throttle():
     """
@@ -487,21 +547,25 @@ def _sec_throttle():
     through here — including the raw requests.get calls in the filing parsers, which
     historically bypassed _sec_get and were the densest part of a run.
 
-    Safe without a lock: all SEC access in this script is sequential on the main
-    thread. The worker threads (the market-data fetch and Finnhub's pool) never
-    touch sec.gov; keep it that way or add a lock here.
+    Thread-safe: up to SEC_WORKERS threads call this at once. Each caller reserves the
+    next free start slot under the lock and then sleeps outside it, so the spacing
+    between request STARTS holds at SEC_MIN_INTERVAL however many threads are waiting.
     """
     global _sec_last_request, _sec_request_count
-    _sec_request_count += 1
-    if SEC_MIN_INTERVAL <= 0:
-        return
-    wait = _sec_last_request + SEC_MIN_INTERVAL - time.monotonic()
+    with _sec_lock:
+        _sec_request_count += 1
+        if SEC_MIN_INTERVAL <= 0:
+            return
+        slot = max(time.monotonic(), _sec_last_request + SEC_MIN_INTERVAL)
+        _sec_last_request = slot
+    wait = slot - time.monotonic()
     if wait > 0:
         time.sleep(wait)
-    _sec_last_request = time.monotonic()
 
-def _sec_get(url, step, timeout=15, as_json=False):
-    """GET an SEC resource with bounded retries for transient failures only."""
+def _sec_get(url, step, timeout=15, as_json=False, keep=False):
+    """GET an SEC resource with bounded retries for transient failures only.
+
+    keep=True also stores the raw bytes in _SEC_DOC_CACHE for a later reader."""
     for attempt in range(3):
         try:
             _sec_throttle()
@@ -512,6 +576,8 @@ def _sec_get(url, step, timeout=15, as_json=False):
                     continue
             r.raise_for_status()
             result = r.json() if as_json else r.text
+            if keep:
+                _SEC_DOC_CACHE[url] = r.content
             _sec_diag(step, url, True, r.status_code)
             return result
         except (requests.RequestException, ValueError) as exc:
@@ -793,7 +859,8 @@ def extract_mda_text(cik, accession_number, primary_document=None):
         r"(?:the\s+following\s+is|introduction\b)", re.IGNORECASE)
 
     for url, step in urls:
-        raw = _sec_get(url, step, timeout=25)
+        # The primary document is the same file download_latest_filing attaches.
+        raw = _sec_get(url, step, timeout=25, keep=(step == "mda_primary_document"))
         if not raw: continue
         if "<" in raw and ">" in raw:
             parser = _VisibleTextParser()
@@ -919,18 +986,22 @@ def download_latest_filing(cik, filings, ticker, out_dir="/mnt/user-data/outputs
         acc_nodash = target["accession_number"].replace("-", "")
         url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
                f"{acc_nodash}/{target['primary_document']}")
-        _sec_throttle()
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
-        r.raise_for_status()
+        # Usually already fetched for MD&A (same URL), which saves a 1-10 MB download.
+        content = _SEC_DOC_CACHE.pop(url, None)
+        if content is None:
+            _sec_throttle()
+            r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+            r.raise_for_status()
+            content = r.content
         ext = target["primary_document"].split(".")[-1] if "." in target["primary_document"] else "htm"
         safe_form = target["form"].replace(" ", "").replace("/", "-")
         filename  = f"{ticker}_{safe_form}_{target['filing_date']}.{ext}"
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, filename)
-        with open(out_path, "wb") as fh: fh.write(r.content)
+        with open(out_path, "wb") as fh: fh.write(content)
         return {"form": target["form"], "filing_date": target["filing_date"],
                 "accession_number": target["accession_number"], "source_url": url,
-                "local_path": out_path, "filename": filename, "size_bytes": len(r.content)}
+                "local_path": out_path, "filename": filename, "size_bytes": len(content)}
     except Exception as e:
         return {"form": target["form"], "filing_date": target["filing_date"], "error": str(e)}
 
@@ -1587,15 +1658,36 @@ def fetch_intraday_data(yqdata: YQData) -> dict:
     was being spent every run for nothing; the net upstream cost of using it is one extra
     call, not two.
     """
-    out = {}
-    for interval, period, _ in INTRADAY_TIERS:
+    def tier(interval, period):
         try:
             h = yqdata.history(period=period, interval=interval)
             if isinstance(h, pd.DataFrame) and not h.empty:
                 h.attrs["interval"] = interval; h.attrs["period"] = period
-                out[interval] = h
-        except: continue
-    return out
+                return h
+        except Exception:
+            pass
+        return None
+
+    # The tiers are independent requests, so their round trips overlap.
+    with ThreadPoolExecutor(max_workers=len(INTRADAY_TIERS)) as pool:
+        jobs = {iv: pool.submit(tier, iv, period) for iv, period, _ in INTRADAY_TIERS}
+    return {iv: job.result() for iv, job in jobs.items() if job.result() is not None}
+
+
+def pick_current_price(fh_quote: dict, pm: dict, hist: pd.DataFrame, history_source: str):
+    """(price, source): Finnhub quote, then Yahoo's price module, then the last daily close.
+
+    Shared by the market worker (which needs a price to pick option strikes) and the
+    main thread, so the two can never disagree about which price the run used.
+    """
+    price = safe_float((fh_quote or {}).get("c"))
+    source = "Finnhub" if price is not None and price > 0 else "Yahoo"
+    if price is None or price <= 0:
+        price = safe_float(pm.get("regularMarketPrice"))
+    if price is None and hist is not None and not hist.empty:
+        price = safe_float(hist["Close"].iloc[-1])
+        source = history_source
+    return price, source
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1603,6 +1695,7 @@ def fetch_intraday_data(yqdata: YQData) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_analysis_payload(query: str) -> dict:
     SEC_DIAGNOSTICS.clear()
+    _SEC_DOC_CACHE.clear()
 
     def stage(k: int, label: str):
         print(f"STAGE|{k}|7|{label}", file=sys.stderr, flush=True)
@@ -1613,30 +1706,48 @@ def generate_analysis_payload(query: str) -> dict:
     if resolve_err:
         return {"error": resolve_err, "invalid_ticker": True, "ticker": query}
 
-    # ── STAGE 3 (started early): Finnhub + Yahoo on a worker thread ─────────
-    # Needs only the ticker, so it runs beside stages 1–2 instead of after them.
-    # All SEC access stays on the main thread: _sec_throttle has no lock and the SEC
-    # side is one lane by design, so this changes when Yahoo/Finnhub are asked,
-    # never how fast sec.gov is. Joined at stage 3; exceptions re-raise there.
+    # ── STAGE 3 (started early): Finnhub, Yahoo and FMP on a worker thread ──
+    # None of it needs SEC data, so it runs beside stages 1–2 instead of after them,
+    # and inside the worker the independent calls overlap (MARKET_WORKERS). The SEC
+    # side has its own pool and throttle; nothing here touches sec.gov.
+    # Joined at stage 3; exceptions re-raise there. A None in the second-wave keys
+    # means "not fetched", and the main thread fetches it itself after the gate.
     def fetch_market_data():
-        finnhub = fetch_finnhub_bundle(ticker)
-        yqd = YQData(ticker)
-        hist = yqd.history(period="5y", interval="1d")
-        history_source = "Yahoo"
-        if hist is None or hist.empty:
-            hist = fetch_finnhub_candles(ticker, years=5)
-            history_source = "Finnhub" if hist is not None and not hist.empty else "Unavailable"
-        spy_hist = YQData("SPY").history(period="5y", interval="1d")
-        # With no price history the run may end at the validation gate, so skip the
-        # rest rather than spend Yahoo requests on a ticker that is about to be rejected.
-        # The main thread fetches them after the gate if the run continues.
-        if hist is None or hist.empty:
-            return finnhub, yqd, hist, history_source, spy_hist, None, None
-        inc_df = yqd.income_stmt()
-        cf_df  = yqd.cashflow_stmt()
-        # Touch each module so YQData caches it here; the main thread reads the cache.
-        yqd.financial_data; yqd.key_stats; yqd.summary_detail; yqd.asset_profile; yqd.price_mod
-        return finnhub, yqd, hist, history_source, spy_hist, inc_df, cf_df
+        out = {"fmp": None, "inc": None, "cf": None, "intraday": None,
+               "options": None, "irx": None}
+        daily = dict(period="5y", interval="1d")
+        with ThreadPoolExecutor(max_workers=MARKET_WORKERS) as pool:
+            finnhub_job = pool.submit(fetch_finnhub_bundle, ticker)
+            yqd = YQData(ticker)   # cookie + crumb setup, shared by every Yahoo call below
+            hist_job    = pool.submit(yqd.history, **daily)
+            spy_job     = pool.submit(lambda: yqd.sibling("SPY").history(**daily))
+            modules_job = pool.submit(yqd.prefetch_modules)
+            hist = hist_job.result()
+            history_source = "Yahoo"
+            if hist is None or hist.empty:
+                hist = fetch_finnhub_candles(ticker, years=5)
+                history_source = "Finnhub" if hist is not None and not hist.empty else "Unavailable"
+            # With no price history the run may end at the validation gate, so skip the
+            # second wave rather than spend requests on a ticker about to be rejected.
+            if hist is not None and not hist.empty:
+                jobs = {"fmp": pool.submit(fetch_fmp_data, ticker),
+                        "inc": pool.submit(yqd.income_stmt),
+                        "cf": pool.submit(yqd.cashflow_stmt),
+                        "intraday": pool.submit(fetch_intraday_data, yqd),
+                        "irx": pool.submit(lambda: yqd.sibling("^IRX").history(**daily))}
+                # Option strikes are chosen around the live price, which needs the quote.
+                modules_job.result()
+                price, _ = pick_current_price(finnhub_job.result().get("quote", {}),
+                                              yqd.price_mod, hist, history_source)
+                if price:
+                    jobs["options"] = pool.submit(yqd.option_data, price)
+                else:
+                    out["options"] = {"available_expirations": [], "chains": [], "iv_summary": {}}
+                out.update({k: job.result() for k, job in jobs.items()})
+            modules_job.result()
+            out.update(finnhub=finnhub_job.result(), yqd=yqd, hist=hist,
+                       history_source=history_source, spy_hist=spy_job.result())
+        return out
 
     market_pool = ThreadPoolExecutor(max_workers=1)
     market_job = market_pool.submit(fetch_market_data)
@@ -1652,57 +1763,47 @@ def generate_analysis_payload(query: str) -> dict:
     filing_signals = {"8k_events": [], "insider_buys": 0, "insider_sells": 0, "activist_13d": False}
     company_name = ticker
 
+    # Tells the server which company this is so its news search runs beside the slow
+    # stages rather than after them. The server uses the first line only, so this is
+    # sent the moment companyfacts names the company. stderr only: stdout is sacred.
+    announced = False
+    def announce(name):
+        nonlocal announced
+        if announced:
+            return
+        announced = True
+        resolved_name = re.sub(r"[\r\n|]+", " ", str(name or ticker)).strip()[:120]
+        print(f"RESOLVED|{ticker}|{resolved_name}", file=sys.stderr, flush=True)
+
     if sec_available:
-        facts   = get_company_facts(cik)
-        # High-insider-activity issuers can file 50+ Form 4s between annual
-        # reports (AAPL's latest 10-K is currently row 51). Keep enough of the
-        # SEC's in-memory recent history to reliably reach the annual report.
-        filings = get_recent_filings(cik)
-        company_name = (facts or {}).get("entityName", ticker)
-        # Degrades to absent: too little filing history to establish a cadence is normal.
-        try:
-            upcoming_report = live_event_risk(facts, TODAY.date(), filings) if facts else None
-        except Exception as exc:
-            _sec_diag("event_risk", f"CIK{cik}", False, error=exc)
-            upcoming_report = None
+        # Every sec.gov request still passes _sec_throttle, so the pool raises how many
+        # documents are in flight, never the request rate (SEC_WORKERS).
+        with ThreadPoolExecutor(max_workers=SEC_WORKERS) as sec_pool:
+            facts_job = sec_pool.submit(get_company_facts, cik)
+            # High-insider-activity issuers can file 50+ Form 4s between annual
+            # reports (AAPL's latest 10-K is currently row 51). Keep enough of the
+            # SEC's in-memory recent history to reliably reach the annual report.
+            filings = get_recent_filings(cik)
 
-        def sec_val(ns, concept):
-            return safe_extract_sec(facts, ns, concept, with_dates=True) if facts else (None, [])
+            latest_10k = next((f for f in filings if f["form"] in ("10-K", "10-K/A")), None)
+            mda_job = (sec_pool.submit(extract_mda_text, cik, latest_10k["accession_number"],
+                                       latest_10k.get("primary_document"))
+                       if latest_10k else None)
 
-        sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
-        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
-        if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "SalesRevenueNet")
-        sec_ni_val,     _  = sec_val("us-gaap", "NetIncomeLoss")
-        sec_assets_val, _  = sec_val("us-gaap", "Assets")
-        sec_liab_val,   _  = sec_val("us-gaap", "Liabilities")
-        sec_equity_val, _  = sec_val("us-gaap", "StockholdersEquity")
-        if sec_equity_val is None:
-            sec_equity_val, _ = sec_val("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
-        sec_ocf_val,    _  = sec_val("us-gaap", "NetCashProvidedByUsedInOperatingActivities")
-
-        sec_rev_cagr = annual_cagr(sec_rev_hist, 3)
-
-        latest_10k = next((f for f in filings if f["form"] in ("10-K", "10-K/A")), None)
-        if latest_10k:
-            mda_text = extract_mda_text(cik, latest_10k["accession_number"],
-                                        latest_10k.get("primary_document"))
-
-        # A CIK alone does not mean the 10-K pipeline is available (funds such
-        # as SPY have a CIK but no companyfacts/10-K). Keep the dashboard alive,
-        # but label SEC fundamentals unavailable instead of presenting N/A as a
-        # successful "Latest 10-K" read.
-        sec_available = bool(facts) and latest_10k is not None
-
-        # Each 8-K and Form 4 in the window costs one SEC document fetch, so an issuer
-        # with heavy insider activity can make this loop alone the bulk of the run's
-        # SEC traffic. `filings` is newest-first, so the cap keeps the most recent
-        # activity — the part that carries signal — and drops the long tail.
-        cutoff = TODAY - timedelta(days=SIGNAL_WINDOW_DAYS)
-        detail_fetches = 0
-        truncated = False
-        for f in filings:
-            try:
-                if datetime.strptime(f["filing_date"], "%Y-%m-%d") < cutoff:
+            # Each 8-K and Form 4 in the window costs one SEC document fetch, so an issuer
+            # with heavy insider activity can make this loop alone the bulk of the run's
+            # SEC traffic. `filings` is newest-first, so the cap keeps the most recent
+            # activity — the part that carries signal — and drops the long tail.
+            # The scan itself is local; only the selected documents are fetched, in the pool.
+            cutoff = TODAY - timedelta(days=SIGNAL_WINDOW_DAYS)
+            detail_jobs = []
+            detail_fetches = 0
+            truncated = False
+            for f in filings:
+                try:
+                    if datetime.strptime(f["filing_date"], "%Y-%m-%d") < cutoff:
+                        continue
+                except (KeyError, TypeError, ValueError):
                     continue
                 # 13D needs no fetch — the form's presence in the list IS the signal.
                 if f["form"] in ["SC 13D", "SC 13D/A"]:
@@ -1714,14 +1815,59 @@ def generate_analysis_payload(query: str) -> dict:
                     truncated = True
                     continue   # keep scanning: a later 13D still costs nothing
                 detail_fetches += 1
+                acc = f["accession_number"]
                 if f["form"] == "8-K":
-                    filing_signals["8k_events"].extend(parse_8k_items(cik, f["accession_number"]))
+                    job = sec_pool.submit(lambda acc=acc: parse_8k_items(cik, acc))
                 else:
-                    tx = analyze_form4(cik, f["accession_number"])
-                    filing_signals["insider_buys"]  += tx["buys"]
-                    filing_signals["insider_sells"] += tx["sells"]
-            except: continue
-        filing_signals["8k_events"] = list(set(filing_signals["8k_events"]))
+                    job = sec_pool.submit(lambda acc=acc: analyze_form4(cik, acc))
+                detail_jobs.append((f["form"], job))
+
+            facts = facts_job.result()
+            company_name = (facts or {}).get("entityName", ticker)
+            announce(company_name)
+            # Degrades to absent: too little filing history to establish a cadence is normal.
+            try:
+                upcoming_report = live_event_risk(facts, TODAY.date(), filings) if facts else None
+            except Exception as exc:
+                _sec_diag("event_risk", f"CIK{cik}", False, error=exc)
+                upcoming_report = None
+
+            def sec_val(ns, concept):
+                return safe_extract_sec(facts, ns, concept, with_dates=True) if facts else (None, [])
+
+            sec_rev_val, sec_rev_hist = sec_val("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax")
+            if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "Revenues")
+            if sec_rev_val is None: sec_rev_val, sec_rev_hist = sec_val("us-gaap", "SalesRevenueNet")
+            sec_ni_val,     _  = sec_val("us-gaap", "NetIncomeLoss")
+            sec_assets_val, _  = sec_val("us-gaap", "Assets")
+            sec_liab_val,   _  = sec_val("us-gaap", "Liabilities")
+            sec_equity_val, _  = sec_val("us-gaap", "StockholdersEquity")
+            if sec_equity_val is None:
+                sec_equity_val, _ = sec_val("us-gaap", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
+            sec_ocf_val,    _  = sec_val("us-gaap", "NetCashProvidedByUsedInOperatingActivities")
+
+            sec_rev_cagr = annual_cagr(sec_rev_hist, 3)
+
+            if mda_job:
+                mda_text = mda_job.result()
+
+            # A CIK alone does not mean the 10-K pipeline is available (funds such
+            # as SPY have a CIK but no companyfacts/10-K). Keep the dashboard alive,
+            # but label SEC fundamentals unavailable instead of presenting N/A as a
+            # successful "Latest 10-K" read.
+            sec_available = bool(facts) and latest_10k is not None
+
+            for form, job in detail_jobs:
+                try:
+                    if form == "8-K":
+                        filing_signals["8k_events"].extend(job.result())
+                    else:
+                        tx = job.result()
+                        filing_signals["insider_buys"]  += tx["buys"]
+                        filing_signals["insider_sells"] += tx["sells"]
+                except Exception:
+                    continue
+        filing_signals["8k_events"] = sorted(set(filing_signals["8k_events"]))
         # Surfaced rather than silent: the insider counts below are a floor, not a total,
         # whenever this binds.
         filing_signals["detail_fetches"] = detail_fetches
@@ -1733,10 +1879,7 @@ def generate_analysis_payload(query: str) -> dict:
             _sec_diag("filing_scan", f"CIK{cik}", True, status="truncated",
                       error=f"stopped after {SEC_MAX_FILING_FETCHES} document fetches")
 
-    # Tells the server which company this is while the slow stages are still ahead, so
-    # its news search runs beside them rather than after. stderr only: stdout is sacred.
-    resolved_name = re.sub(r"[\r\n|]+", " ", str(company_name or ticker)).strip()[:120]
-    print(f"RESOLVED|{ticker}|{resolved_name}", file=sys.stderr, flush=True)
+    announce(company_name)   # no SEC filer: still before the market join and stage 2
 
     # ── STAGE 2: Download latest filing ──────────────────────────────────────
     sec_filing_attachment = None
@@ -1746,7 +1889,10 @@ def generate_analysis_payload(query: str) -> dict:
 
     # ── STAGE 3: Finnhub primary quote/news + Yahoo history/fundamentals ───────
     stage(3, "Fetching Finnhub quote/news & market history")
-    finnhub, yqd, hist, history_source, spy_hist, inc_df, cf_df = market_job.result()
+    market = market_job.result()
+    finnhub, yqd, hist = market["finnhub"], market["yqd"], market["hist"]
+    history_source, spy_hist = market["history_source"], market["spy_hist"]
+    inc_df, cf_df = market["inc"], market["cf"]
     fh_quote = finnhub.get("quote", {})
     fh_profile = finnhub.get("profile", {})
     fh_metrics = finnhub.get("metrics", {})
@@ -1773,17 +1919,11 @@ def generate_analysis_payload(query: str) -> dict:
     pm  = yqd.price_mod          # live price, bid/ask, market state
 
     # ── Current price ─────────────────────────────────────────────────────────
-    current_price = safe_float(fh_quote.get("c"))
-    quote_source = "Finnhub" if current_price is not None and current_price > 0 else "Yahoo"
-    if current_price is None or current_price <= 0:
-        current_price = safe_float(pm.get("regularMarketPrice"))
-    if current_price is None and not hist.empty:
-        current_price = safe_float(hist["Close"].iloc[-1])
-        quote_source = history_source
+    current_price, quote_source = pick_current_price(fh_quote, pm, hist, history_source)
 
     # ── STAGE 4: FMP cross-check ──────────────────────────────────────────────
     stage(4, "Fetching FMP verification data")
-    fmp      = fetch_fmp_data(ticker)
+    fmp      = market["fmp"] if market["fmp"] is not None else fetch_fmp_data(ticker)
     fmp_m    = fmp["metrics"]  if fmp else {}
     fmp_inc  = fmp["income"]   if fmp else {}
     fmp_cf   = fmp["cashflow"] if fmp else {}
@@ -1816,7 +1956,7 @@ def generate_analysis_payload(query: str) -> dict:
 
     # Two intraday tiers feed the chart's 1D/1W/1M ranges; 1W's 30-minute bars are rolled
     # up in the browser from the 5-minute series rather than fetched separately.
-    intraday_frames  = fetch_intraday_data(yqd)
+    intraday_frames  = market["intraday"] if market["intraday"] is not None else fetch_intraday_data(yqd)
     intraday_history = {}
     intraday_meta    = {}
     for _iv, _period, _cap in INTRADAY_TIERS:
@@ -1826,7 +1966,9 @@ def generate_analysis_payload(query: str) -> dict:
             intraday_meta[_iv] = {"interval": _iv, "period": _period, "bars": len(bars),
                                   "first": bars[0]["date"], "last": bars[-1]["date"]}
 
-    options_data  = yqd.option_data(current_price or 0) if current_price else {"available_expirations":[],"chains":[],"iv_summary":{}}
+    options_data  = market["options"]
+    if options_data is None:
+        options_data = yqd.option_data(current_price or 0) if current_price else {"available_expirations":[],"chains":[],"iv_summary":{}}
     price_history = get_price_history_series(hist, days=1260)   # 5Y for multi-timeframe charts
 
     # ── STAGE 6: Technicals & pattern detection ────────────────────────────────
@@ -1855,7 +1997,10 @@ def generate_analysis_payload(query: str) -> dict:
 
     # Risk uses adjusted closes, not the live quote or price-only chart series.
     risk_prices, risk_spy = adjusted_close(hist), adjusted_close(spy_hist)
-    bill_hist = YQData("^IRX").history(period="5y", interval="1d") if not risk_prices.empty else pd.DataFrame()
+    if risk_prices.empty:
+        bill_hist = pd.DataFrame()
+    else:
+        bill_hist = market["irx"] if market["irx"] is not None else yqd.sibling("^IRX").history(period="5y", interval="1d")
     bill_yields = bill_hist["Close"] / 100 if not bill_hist.empty and "Close" in bill_hist else None
     risk = risk_statistics(risk_prices, risk_spy, bill_yields)
     cagr, annual_vol, sharpe, max_drawdown, beta = (risk[k] for k in

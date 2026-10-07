@@ -43,6 +43,8 @@ class YahooFixture:
     def cashflow_stmt(self): return statement(OperatingCashFlow=90e9)
     def earnings_hist(self): return pd.DataFrame([dict(quarter='2025-12-31',epsEstimate=0,epsActual=1)])
     def option_data(self, _price): return dict(chains=[],available_expirations=[],iv_summary={})
+    def prefetch_modules(self): pass
+    def sibling(self, symbol): return YahooFixture(symbol)
 
 
 class PipelineRegressionTests(unittest.TestCase):
@@ -185,7 +187,7 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertTrue(any('GOLDEN CROSS' in p for p in patterns))
 
     def test_earnings_adapter_uses_yahooquery_property_and_sorts_quarters(self):
-        obj=object.__new__(scraper.YQData);obj.sym='AAA'
+        obj=object.__new__(scraper.YQData);obj.sym='AAA';obj._cache={}
         class Provider:
             earning_history=pd.DataFrame(dict(quarter=['2024-09-30','2025-03-31'],epsActual=[1,2]))
         obj._yq=Provider()

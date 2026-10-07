@@ -79,8 +79,11 @@ The screener adds an LLM step that turns the query into a recipe before `screene
   stderr (`STAGE|n|7|label`, `PROGRESS|`, `WARN|`). Serialize the whole payload to a string
   before writing, and always use `allow_nan=False`.
 - **The scraper has 7 stages**, also hard-coded as `STAGE_TOTAL` in server.js. Change both together.
-- After stage 1 the scraper prints `RESOLVED|TICKER|Company` on stderr; the server starts the news
-  search from it so the search overlaps the scrape. Without it the search starts after the scrape.
+- As soon as companyfacts names the company, the scraper prints `RESOLVED|TICKER|Company` on stderr; the server starts
+  the news search from the first one, so the search overlaps the scrape. Without it the search starts after the scrape.
+- Fetches run concurrently: SEC through a `SEC_WORKERS` pool, and ticker-only Yahoo/Finnhub/FMP calls on the market
+  worker. quoteSummary modules come from one `prefetch_modules()` batch; use `yqd.sibling(sym)` rather than `YQData(sym)`
+  for extra symbols (it reuses the session).
 - **Guard NaN before `int()`.** `int(x or 0)` does not guard, because NaN is truthy. Use `safe_int`
   (scraper) or `finite()` (screener).
 - Everything degrades to `N/A` rather than crashing (`YQData`, `safe_*`, `_sec_get`).
@@ -175,7 +178,7 @@ checks for drift.
 - Never retry harder into a failure. Every retry path needs a failure-signature gate, a stop on
   `_throttled`, and a budget (`SCREENER_RETRY_BUDGET`).
 - `MAX_PY` sets the request rate. If you raise it, lower `SQUALL_SEC_RATE_PER_PROC` in the same change.
-- All sec.gov calls go through `_sec_throttle`. Per-filing fetch loops are capped by `SEC_MAX_FILING_FETCHES`.
+- All sec.gov calls go through `_sec_throttle` (thread-safe; it caps the rate however many `SEC_WORKERS` lanes run). Per-filing fetch loops are capped by `SEC_MAX_FILING_FETCHES`.
 - Caches are load-shedding. The screener cache tracks tickers confirmed by non-empty upstream responses, not only rows produced; an empty provider response must never count as fresh coverage.
 - Every subprocess has a wall-clock timeout. Watch `providers.*.rate_limited` in `/stats`.
 
@@ -363,6 +366,7 @@ retuned from the Railway dashboard without a deploy.
 | `SQUALL_SCRAPER_TIMEOUT_MS` / `SQUALL_SCREENER_TIMEOUT_MS` | 180000 / 240000 | |
 | `SQUALL_QUOTE_TTL_MS` / `_UPSTREAM_PER_MIN` / `_IP_PER_MIN` / `_MAX_SYMBOLS` | 60000 / 30 / 6 / 25 | `/quotes` |
 | `SQUALL_SEC_RATE_PER_PROC` / `SQUALL_SEC_MAX_FILING_FETCHES` | 3.0 / 40 | Provider standing |
+| `SQUALL_SEC_WORKERS` / `SQUALL_MARKET_WORKERS` | 3 / 4 | SEC documents in flight (latency, not rate) / concurrent market calls per scrape |
 | `SQUALL_SEC_TICKERS_CACHE` / `_TTL` | 7 days | |
 | `SCREENER_RETRY_BUDGET` / `SCREENER_THROTTLE_BACKOFF` | 60 / 5s | |
 | `SQUALL_ANALYSIS_CACHE_TTL_MS` / `_MAX` | 300000 / 60 | |
