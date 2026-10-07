@@ -728,7 +728,9 @@ function fUsd(v) { if (!isNum(v)) return "N/A"; const a = Math.abs(v);
   return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 const fInt = v => isNum(v) ? Math.round(v).toLocaleString("en-US") : "N/A";
 const signCls = (v, inv = false) => (!isNum(v) || v === 0) ? "" : ((inv ? v < 0 : v > 0) ? "green" : "red");
-const esc = t => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Quotes too: esc() is used inside double-quoted attributes (title, data-key), where a
+// company name or a synced ticker key containing " would otherwise end the attribute.
+const esc = t => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const escAttr = t => esc(t).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 // Event enum from news-research.js. Finnhub's own categories ("company") aren't listed,
 // so fallback records simply render untagged.

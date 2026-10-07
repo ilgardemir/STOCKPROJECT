@@ -1,5 +1,5 @@
 const http = require("http");
-const { exec, spawn } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs   = require("fs");
 const os   = require("os");
 const path = require("path");
@@ -2848,6 +2848,13 @@ const appServer = http.createServer((req, res) => {
 const handleRequest = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // No page on the site is meant to be framed, and with accounts a framed page could be
+  // clickjacked into a sign-out or an account delete. nosniff stops a JSON or text body
+  // from being sniffed into script; the referrer policy keeps ?t= and ?id= on-site.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   if (req.method === "OPTIONS") { res.end(); return; }
 
   // Accounts own /auth/* and /api/*; nothing else on the site lives under those prefixes.
@@ -3530,10 +3537,10 @@ const handleRequest = async (req, res) => {
           return;
         }
 
-        // Quoted so a multi-word name stays one argument; sanitizeQuery already stripped
-        // shell-unsafe characters (no quotes/backticks/$), so this cannot break out.
-        const child = exec(
-          `${PYTHON} "${SCRAPER_PATH}" "${s.query}"`,
+        // execFile with an args array runs without a shell, like the streaming route's spawn,
+        // so the query is one argv entry whatever sanitizeQuery lets through.
+        const child = execFile(
+          PYTHON, [SCRAPER_PATH, s.query],
           { timeout: 150000, maxBuffer: 1024 * 1024 * 10 },
           async (err, stdout, stderr) => {
             slot();
@@ -3554,7 +3561,7 @@ const handleRequest = async (req, res) => {
               res.writeHead(500, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ error: payload.error })); return;
             }
-            // No early RESOLVED hook on exec(), so the search runs after the scrape here.
+            // No early RESOLVED hook on execFile(), so the search runs after the scrape here.
             // This is the fallback route; the latency only matters on /analyze-stream.
             const newsResult = await getNewsDigest(payload.ticker, payload.company_name);
             payload = { ...applyNewsDigest(payload, newsResult), news_search: newsSearchStatus(newsResult) };
