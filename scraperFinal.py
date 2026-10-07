@@ -2320,7 +2320,7 @@ Section 14 contains dated company-news records: either a web-search digest whose
 Write these sections with markdown ## headers. Aim for depth and specificity over length — roughly 900–1300 words total. No preamble, no restating the prompt.
 
 ## Verdict
-Lead with one rating from this exact scale: **Strong Buy**, **Buy**, **Hold**, **Sell**, or **Strong Sell** — bold it. This is the TL;DR; make it earn that role. Follow with the core reason in one or two sentences, a defined risk/reward, and the single price level or event that would invalidate the call.
+Lead with one rating from this exact scale: **Strong Buy**, **Buy**, **Weak Buy**, **Hold**, **Weak Sell**, **Sell**, or **Strong Sell** — bold it. This is the TL;DR; make it earn that role. Calibrate it to the net weight of the evidence: Strong = the pieces corroborate and nothing material contradicts; plain Buy/Sell = a clear edge with risks you can name and accept; Weak = the evidence leans one way but real objections remain. Hold is only for evidence that genuinely nets to zero — never a default for mixed, uncertain or incomplete data, which is normal and is what Weak Buy/Weak Sell are for. If you can say which way it leans, rate that way. Follow with the core reason in one or two sentences, a defined risk/reward, and the single price level or event that would invalidate the call.
 
 ## Valuation & Quality
 Is the current multiple justified by growth, margins, and returns on capital? Weigh P/E and PEG against the growth rate, FCF yield against the balance sheet, and EV/EBITDA against the sector. Where SEC, Finnhub, FMP, and Yahoo disagree on a number, say which you trust and why a discrepancy matters.

@@ -3934,10 +3934,13 @@ function renderMarkdown(text) {
    column of prose — the verdict, which is the thing being looked for, indistinguishable
    from the paragraph after it. This promotes the verdict and makes the rest navigable.
    Not one word is dropped: the prompt is untouched and every section still renders. */
-const VERDICT_RATINGS = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"];
+// The prompt's scale (scraperFinal.py Verdict section). Change both together. The match
+// requires ** directly before the label, so "Buy" can never claim "**Weak Buy**".
+const VERDICT_RATINGS = ["Strong Buy", "Weak Buy", "Buy", "Hold", "Weak Sell", "Sell", "Strong Sell"];
 // Green and red are direction. Hold is neither, so it is neutral ink — NOT --warn, which
 // is a distinct role and would read as a caution the model did not express.
-const RATING_TONE = { "strong buy": "up", "buy": "up", "hold": "flat", "sell": "down", "strong sell": "down" };
+const RATING_TONE = { "strong buy": "up", "buy": "up", "weak buy": "up", "hold": "flat",
+  "weak sell": "down", "sell": "down", "strong sell": "down" };
 // Opened by default: the two sections that carry the reasoning behind the call. The rest
 // are one click away rather than one scroll.
 const AI_OPEN_SECTIONS = /valuation|price action/i;

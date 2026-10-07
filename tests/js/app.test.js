@@ -663,10 +663,17 @@ test("every rating maps to a direction, and hold is neutral", () => {
   };
   assert.equal(tone("Strong Buy"), "up");
   assert.equal(tone("Buy"), "up");
+  assert.equal(tone("Weak Buy"), "up");
+  assert.equal(tone("Weak Sell"), "down");
   assert.equal(tone("Sell"), "down");
   assert.equal(tone("Strong Sell"), "down");
   // Green and red are direction. Hold is neither, and must not borrow --warn.
   assert.equal(tone("Hold"), "flat");
+});
+
+test("a weak rating keeps its qualifier rather than matching the bare rating", () => {
+  const out = APP.renderAnalysisBody("## Verdict\n**Weak Sell** — leaning lower.\n\n## A\nx\n\n## B\ny");
+  assert.match(out, /class="verdict-rating" data-tone="down">Weak Sell</);
 });
 
 test("text before the first header is kept, not swallowed", () => {
