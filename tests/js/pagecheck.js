@@ -238,7 +238,10 @@ function run(page, units, poisonId, dropIds) {
     history: { replaceState(){}, pushState(){} },
     navigator: { userAgent: "node", maxTouchPoints: 0, clipboard: { writeText: () => Promise.resolve() } },
     console: { log(){}, warn(){}, error(){}, info(){} },
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    // Intervals (e.g. the portfolio quote refresh) never end; unref them so they can't keep
+    // the checker alive. One-shot timeouts stay ref'd so deferred code still runs and can fail.
+    setTimeout, clearTimeout,
+    setInterval: (...a) => setInterval(...a).unref(), clearInterval,
     requestAnimationFrame: () => 1, cancelAnimationFrame(){},
     matchMedia: () => ({ matches: false, addEventListener(){}, addListener(){} }),
     getComputedStyle: () => ({ getPropertyValue: () => "#000", fontSize: "13px", display: "block" }),
