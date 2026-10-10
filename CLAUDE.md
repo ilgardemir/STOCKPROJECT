@@ -13,8 +13,9 @@ a dependency is a real decision.
 - **Commit and push each completed change automatically.** `git add` + commit (descriptive
   message + Co-Authored-By trailer) + `git push`. Committing directly to `main` is fine; a
   collaborator shares the repo, and Railway auto-deploys from `main`.
-- **Live at https://squall.up.railway.app.** It is the only environment with Python deps and
-  API keys, so verify scraper/screener behaviour there. Locally, `node server.js` serves the UI,
+- **Live at https://squallstocks.com** (the official domain; https://squall.up.railway.app is the
+  underlying Railway domain). It is the only environment with Python deps and API keys, so verify
+  scraper/screener behaviour there. Locally, `node server.js` serves the UI,
   but analyses fail with "Script produced no output" unless you use the stub (see Testing).
 - Locally on Windows, `python3` is a Store stub, so use `python`.
 - **A front-end change is not verified until both pages run** (`npm test` includes pagecheck).
@@ -356,7 +357,7 @@ retuned from the Railway dashboard without a deploy.
 | `SQUALL_STATS_KEY` | unset | Unset means `/stats` 404s |
 | `SQUALL_ACCOUNTS` | on | `off` = accounts hidden and routes off (instant revert) |
 | `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SQUALL_SESSION_SECRET` | — | All four required for accounts. `DATABASE_URL` is a Railway reference to the Postgres service |
-| `SQUALL_PUBLIC_URL` | `https://squall.up.railway.app` deployed, `http://localhost:PORT` locally | Builds the OAuth redirect URI and the allowed `Origin` |
+| `SQUALL_PUBLIC_URL` | `https://squall.up.railway.app` deployed, `http://localhost:PORT` locally | Builds the OAuth redirect URI and the allowed `Origin`. Production should set it to `https://squallstocks.com` (and register that callback in Google), or sign-in and sync writes fail on the official domain |
 | `SQUALL_AUTH_IP_HOURLY` / `SQUALL_SYNC_WRITES_PER_MIN` | 20 / 120 | Sign-in starts per IP; sync writes per user |
 | `SQUALL_SYNC_ITEM_MAX_BYTES` / `_USER_MAX_BYTES` | 2097152 / 26214400 | Per item / per account (413 `too_large` / `quota`) |
 | `SQUALL_GLOBAL_AI_DAILY` | 1500 | ≈150 analyses/day. **This is the real spend bound** |
