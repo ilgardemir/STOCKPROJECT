@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-<title>Squall — Stock Research</title>
+<title>Squall - Stock Research</title>
 <meta name="description" content="Analyze any US-listed stock from SEC filings, live market data and price history, with an AI write-up layered on top of the numbers. Charts, filing activity, options positioning and regime detection in one dashboard." />
 <link rel="canonical" href="https://squall.up.railway.app/" />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://squall.up.railway.app/" />
 <meta property="og:site_name" content="Squall" />
-<meta property="og:title" content="Squall — Stock Research" />
+<meta property="og:title" content="Squall - Stock Research" />
 <meta property="og:description" content="Analyze any US-listed stock from SEC filings, live market data and price history, with an AI write-up layered on top of the numbers." />
 <meta name="twitter:card" content="summary" />
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
@@ -36,8 +36,8 @@
 <div id="hero">
   <svg class="wind" viewBox="0 0 30 26" aria-hidden="true"><path d="M2 7 H17 a4 4 0 1 0 -4 -5"/><path d="M2 13 H24 a4 4 0 1 1 -4 5"/><path d="M2 19 H13 a3.2 3.2 0 1 1 -3.2 4"/></svg>
   <h1>Squall</h1>
-  <p>Research a public company from one place — SEC filings, market data, options activity and technical context, explained in clear language.</p>
-  <p class="hero-fine">SEC EDGAR · Finnhub · Yahoo Finance — AI-assisted research, not financial advice</p>
+  <p>Research a public company from one place: SEC filings, market data, options activity and technical context, explained in clear language.</p>
+  <p class="hero-fine">SEC EDGAR · Finnhub · Yahoo Finance · AI-assisted research, not financial advice</p>
   <!-- Searching is the one thing the landing page asks for, so it is the one thing at full
        size. Same instrument as the header's field (shares .ticker-wrap's rules), scaled up;
        the header's copy hides while the hero is up so only one field is ever live. -->
@@ -96,19 +96,19 @@
       <div class="pane-body" id="dataBody"></div>
     </section>
     <div id="resizer" title="Drag to resize · double-click to reset" tabindex="0" role="separator" aria-orientation="vertical"
-         aria-label="Resize panes — arrow keys to adjust, double-click or Enter to reset"><span class="rz-badge" id="rzBadge"></span></div>
+         aria-label="Resize panes. Arrow keys to adjust, double-click or Enter to reset"><span class="rz-badge" id="rzBadge"></span></div>
     <section class="pane" id="aiPane">
       <div class="pane-body">
         <div id="aiScroll"><div class="ai-modelbar"><span class="tag" id="aiModelTag">AI</span></div><div id="aiSummary" class="prose"></div></div>
         <div id="chatDock">
-          <div id="chatGrip" title="Drag to resize chat" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Resize chat panel — arrow keys to adjust"></div>
+          <div id="chatGrip" title="Drag to resize chat" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Resize chat panel. Arrow keys to adjust"></div>
           <div id="chatMessages"></div>
           <div id="chatRow">
             <button id="chatThinkBtn" type="button" class="chat-think-btn" title="Toggle model reasoning (off by default)" onclick="toggleChatThink()">
               <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/></svg>
               <span>Think</span>
             </button>
-            <input id="chatInput" type="text" placeholder="Ask a follow-up — risks, peers, options ideas…" />
+            <input id="chatInput" type="text" placeholder="Ask a follow-up: risks, peers, options ideas…" />
             <button id="chatSend" onclick="onChatSend()" aria-label="Send">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>
             </button>

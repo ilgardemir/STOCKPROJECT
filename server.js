@@ -2834,7 +2834,7 @@ function failRequest(req, res, error) {
       if (sse) res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       else res.writeHead(500, { "Content-Type": "application/json" });
     }
-    if (sse) res.write(`event: ${sse[1]}\ndata: ${JSON.stringify({ error: "Squall hit an unexpected error handling this request. Nothing further will arrive on this stream — try again." })}\n\n`);
+    if (sse) res.write(`event: ${sse[1]}\ndata: ${JSON.stringify({ error: "Squall hit an unexpected error handling this request. Nothing further will arrive on this stream. Try again." })}\n\n`);
     else res.write(JSON.stringify({ error: "Squall hit an unexpected error handling this request." }));
   } catch (_) { /* the socket is already gone; ending below is all that is left */ }
   try { res.end(); } catch (_) {}
@@ -2898,7 +2898,7 @@ const handleRequest = async (req, res) => {
     const gate = admitQuotes(req);
     if (!gate.ok) {
       res.writeHead(429, { ...headers, "Retry-After": String(gate.retryAfter) });
-      res.end(JSON.stringify({ error: "Refreshing too often — try again in a moment.", limited: true, retry_after: gate.retryAfter }));
+      res.end(JSON.stringify({ error: "Refreshing too often. Try again in a moment.", limited: true, retry_after: gate.retryAfter }));
       return;
     }
     const quotes = await resolveQuotes(symbols);
@@ -2973,7 +2973,7 @@ const handleRequest = async (req, res) => {
       if (slot === "aborted") return res.end();   // they navigated away while queued
       send("screen_error", {
         error: slot === "full"
-          ? "Squall is running at capacity right now — try again in a minute."
+          ? "Squall is running at capacity right now. Try again in a minute."
           : "Timed out waiting for a free data slot — try again in a minute.",
         limited: true, rule: "capacity", retry_after_s: 30
       });
@@ -3062,7 +3062,7 @@ const handleRequest = async (req, res) => {
     if (typeof slot !== "function") {
       if (slot === "aborted") return res.end();
       send("backtest_error", {
-        error:slot === "full" ? "Squall is running at capacity right now — try again in a minute."
+        error:slot === "full" ? "Squall is running at capacity right now. Try again in a minute."
           : "Timed out waiting for a free data slot — try again in a minute.",
         limited:true, rule:"capacity", retry_after_s:30
       });
@@ -3261,7 +3261,7 @@ const handleRequest = async (req, res) => {
       const aiBudget = spendAi(COST.analyze.ai);
       if (!aiBudget.ok) {
         send("ai_error", {
-          error: "AI capacity reached for today — the dashboard above is fully live. Written analysis resets at 00:00 UTC.",
+          error: "AI capacity reached for today. The dashboard above is fully live. Written analysis resets at 00:00 UTC.",
           limited: true, resets_at: aiBudget.resetsAt
         });
         return res.end();
@@ -3357,7 +3357,7 @@ const handleRequest = async (req, res) => {
         // SQUALL_REASON_EFFORT, which frees the share of it that thinking is taking)
         // rather than asking the same question twice.
         send("ai_error", {
-          error: "The write-up ran past its length limit and stopped early — everything above it is complete. Retry to regenerate it.",
+          error: "The write-up ran past its length limit and stopped early. Everything above it is complete. Retry to regenerate it.",
           truncated: true
         });
       } else if (lastErr) {
@@ -3400,7 +3400,7 @@ const handleRequest = async (req, res) => {
       if (slot === "aborted") return res.end();
       send("error", {
         error: slot === "full"
-          ? "Squall is running at capacity right now — try again in a minute."
+          ? "Squall is running at capacity right now. Try again in a minute."
           : "Timed out waiting for a free data slot — try again in a minute.",
         limited: true, rule: "capacity", retry_after_s: 30
       });
@@ -3455,7 +3455,7 @@ const handleRequest = async (req, res) => {
       if (timedOut) {
         // Checked before the empty-stdout branch: a killed process leaves stdout empty,
         // and "Script produced no output" would misdescribe a timeout as a crash.
-        send("error", { error: `The data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. A data provider is probably slow right now — try again shortly.`,
+        send("error", { error: `The data pipeline took longer than ${Math.round(LIM.SCRAPER_TIMEOUT_MS / 1000)}s and was stopped. A data provider is probably slow right now. Try again shortly.`,
                         limited: true, rule: "engine_timeout", retry_after_s: 30 });
         return res.end();
       }
@@ -3532,7 +3532,7 @@ const handleRequest = async (req, res) => {
         if (typeof slot !== "function") {
           if (slot === "aborted") return;
           res.writeHead(503, {"Content-Type":"application/json", "Retry-After":"30"});
-          res.end(JSON.stringify({ error: "Squall is running at capacity right now — try again in a minute.",
+          res.end(JSON.stringify({ error: "Squall is running at capacity right now. Try again in a minute.",
                                    limited: true, rule: "capacity", retry_after_s: 30 }));
           return;
         }
@@ -3571,7 +3571,7 @@ const handleRequest = async (req, res) => {
             if (!aiBudget.ok) {
               res.writeHead(200, {"Content-Type":"application/json"});
               res.end(JSON.stringify({ ...payload, aiSummary: "", aiReasoning: "", model: AI_MODEL,
-                aiError: "AI capacity reached for today — the data below is fully live. Written analysis resets at 00:00 UTC.",
+                aiError: "AI capacity reached for today. The data below is fully live. Written analysis resets at 00:00 UTC.",
                 aiLimited: true, aiResetsAt: aiBudget.resetsAt }));
               return;
             }
@@ -3634,7 +3634,7 @@ const handleRequest = async (req, res) => {
     const chatBudget = spendAi(COST.chat.ai);
     if (!chatBudget.ok) {
       sendDenial(res, { rule: "global_ai", retryAfter: chatBudget.retryAfter, resetsAt: chatBudget.resetsAt,
-                        message: "Squall has reached its AI capacity for today. Chat resumes at 00:00 UTC — the dashboard and your saved tabs still work." }, 503);
+                        message: "Squall has reached its AI capacity for today. Chat resumes at 00:00 UTC. The dashboard and your saved tabs still work." }, 503);
       return;
     }
     const rawBody = await readBody(req, res, LIM.MAX_CHAT_BODY);
@@ -3735,7 +3735,7 @@ const handleRequest = async (req, res) => {
           send("done", { reply, reasoning, truncated: true });
           return res.end();
         }
-        if (!reply.trim()) { send("error", { error: "The model returned an empty response — please try again." }); return res.end(); }
+        if (!reply.trim()) { send("error", { error: "The model returned an empty response. Please try again." }); return res.end(); }
         send("done", { reply, reasoning });
         res.end();
       } catch (e) {

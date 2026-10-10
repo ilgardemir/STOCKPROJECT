@@ -333,7 +333,7 @@ function persistSessions() {
       syncNoteChange("analyses", map);
       evicted.forEach(t => { delete sessions[t]; });
       const n = evicted.length;
-      showStorageNotice(`Browser storage is full — removed ${n} older saved ${n === 1 ? "analysis" : "analyses"} (${evicted.join(", ")}) to make room for this one.`);
+      showStorageNotice(`Browser storage is full. Removed ${n} older saved ${n === 1 ? "analysis" : "analyses"} (${evicted.join(", ")}) to make room for this one.`);
       renderTickerPills();
       return true;
     }
@@ -384,7 +384,7 @@ function persistScreeners() {
     // this fails for the same reason and used to fail just as invisibly. No eviction here:
     // a screen is cheap to re-run, and silently deleting one to save another isn't a trade
     // worth making on the user's behalf.
-    showStorageNotice("Browser storage is full — this screen could not be saved. Close a saved tab, then try again.");
+    showStorageNotice("Browser storage is full, so this screen could not be saved. Close a saved tab, then try again.");
     return false;
   }
 }
@@ -469,7 +469,7 @@ function commitTheme(def, persist) {
      for any reason — a stale cached page against fresh script, an include that did not
      expand, a blocked element — must cost its own affordance and nothing else. */
   if (themeBtn) {
-    themeBtn.setAttribute("aria-label", `Appearance — ${def.label} theme`);
+    themeBtn.setAttribute("aria-label", `Appearance: ${def.label} theme`);
     setTip(themeBtn, `Appearance · ${def.label}`);
   }
   if (themeMenu) themeMenu.querySelectorAll(".theme-opt").forEach(b =>
@@ -624,7 +624,7 @@ function mySquallKey(profile) { return profile ? JSON.stringify(profile) : "none
 function syncProfileButton() {
   const btn = document.getElementById("profileBtn");
   btn?.classList.toggle("configured", Boolean(mySquallProfile));
-  setTip(btn, mySquallProfile ? "MySquall profile saved — click to edit" : "Personalize analysis with MySquall");
+  setTip(btn, mySquallProfile ? "MySquall profile saved. Click to edit" : "Personalize analysis with MySquall");
 }
 function updateProfileLabels() {
   ["Risk", "Horizon", "Experience", "Depth"].forEach(name => {
@@ -1041,7 +1041,7 @@ function runAnalysis() {
   // bypassed, and it doesn't fire at all for company-name queries.
   const wait = /^[A-Z.\-]{1,10}$/.test(direct) ? analysisRunWait(direct) : 0;
   if (wait) {
-    showProgress(0, 7, `You've run ${RUN_LIMIT} ${direct} analyses recently — reopen its saved tab, or try again in about ${wait} min.`, true);
+    showProgress(0, 7, `You've run ${RUN_LIMIT} ${direct} analyses recently. Reopen its saved tab, or try again in about ${wait} min.`, true);
     hideProgress(4200); return;
   }
 
@@ -1086,7 +1086,7 @@ function runAnalysis() {
       // Neutral, not a hue: a limit is informational, not directional, and --warn falls
       // to 3.7:1 on Daylight's surface. --ink holds >=5.18:1 in all six themes.
       document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--ink);font-family:var(--mono);font-size:12px">${esc(d.error)}</span></div>`;
-      ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Written analysis paused — saved tabs still open instantly.</span></div>`;
+      ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Written analysis paused. Saved tabs still open instantly.</span></div>`;
       setAnalyzeBusy(false); es.close(); if (_es === es) _es = null; hideProgress(6000);
       return;
     }
@@ -1095,7 +1095,7 @@ function runAnalysis() {
     showProgress(0, 7, "Error: " + msg, true);
     document.getElementById("dataBody").innerHTML = `<div class="placeholder"><span style="color:var(--down);font-family:var(--mono);font-size:12px">${esc(msg)}</span>
       <button class="retry-btn" onclick="retryAnalysis('${jsAttr(query)}')">${RETRY_SVG}<span>Retry</span></button></div>`;
-    ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable — fix the error above and run again.</span></div>`;
+    ai.className = "prose"; ai.innerHTML = `<div class="placeholder"><span>Analysis unavailable. Fix the error above and run again.</span></div>`;
     setAnalyzeBusy(false); es.close(); if (_es === es) _es = null; hideProgress(3000);
   });
 
@@ -1205,13 +1205,13 @@ function aiWarnHtml(d) {
   // still can't produce a write-up until the budget resets, and the message already
   // says the dashboard is live, so the usual suffix would be redundant.
   if (d.aiLimited) return `<div class="ai-warn">${esc(d.aiError)}</div>`;
-  return `<div class="ai-warn">${esc(d.aiError)} — the data dashboard is still fully available.
+  return `<div class="ai-warn">${esc(d.aiError)} The data dashboard is still fully available.
     <button class="retry-btn" onclick="retryAnalysis('${jsAttr(d.ticker)}')">${RETRY_SVG}<span>Retry analysis</span></button></div>`;
 }
 // Rendered under every completed analysis — trust/compliance footer.
 function aiDisclaimerHtml(d) {
   if (!d || !d.aiSummary) return "";
-  return `<div class="ai-disclaimer">AI-generated analysis for informational purposes only — not financial advice. Verify figures against the source filings before acting.</div>`;
+  return `<div class="ai-disclaimer">AI-generated analysis for informational purposes only, not financial advice. Verify figures against the source filings before acting.</div>`;
 }
 function showAiThinking(modelId) {
   const ai = document.getElementById("aiSummary");
@@ -1502,7 +1502,7 @@ function renderScreenRecipe(spec) {
   const themeChip = theme
     ? `<div class="recipe-chip theme-chip"><b>Theme · ${esc(theme.label || "Theme")}</b><span>${esc(theme.keywords.slice(0, 8).join(", "))} · minimum evidence ${esc(theme.min_score || 24)}/100${theme.exclude_keywords?.length ? ` · excludes ${esc(theme.exclude_keywords.join(", "))}` : ""}</span></div>` : "";
   const themeNote = theme
-    ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations — it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
+    ? `<div class="recipe-adjust theme-note">Theme matching reads each company's business description, which reflects its established operations, so it may miss very recent developments such as new products, pivots, or last week's news.</div>` : "";
   return `<div class="recipe"><div class="recipe-top"><div><h2>${esc(spec.title || "Screening criteria")}</h2><p>${esc(spec.summary || "Your request translated into measurable rules.")}</p></div><span class="recipe-source">${esc(screenSourceLabel(spec.interpretation_source))}</span></div><div class="recipe-chips">${themeChip}${concepts}${filters}</div>${adjustments}${definition}${momentumWindow}${themeNote}<div class="recipe-definitions">${definitions}</div><div class="recipe-adjust recipe-scorenote">The <b>match score</b> shows how closely a company fits these criteria. It is not a recommendation or a price forecast.</div></div>`;
 }
 // Per-result breakdown of the components behind the match score: the theme
@@ -1825,7 +1825,7 @@ function loadWatchlist() {
 }
 function persistWatchlist() {
   try { localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchlist)); syncNoteChange("watchlist"); return true; }
-  catch (_) { showStorageNotice("Browser storage is full — the watchlist change could not be saved."); return false; }
+  catch (_) { showStorageNotice("Browser storage is full, so the watchlist change could not be saved."); return false; }
 }
 const isWatched = t => watchlist.some(r => r.t === t);
 function normalizeWatchTicker(raw) { return String(raw || "").trim().toUpperCase().replace(/^\$/, ""); }
@@ -1834,7 +1834,7 @@ function addToWatchlist(raw) {
   const t = normalizeWatchTicker(raw);
   if (!WATCH_TICKER_RE.test(t)) return { ok: false, message: `"${String(raw).trim().slice(0, 12)}" isn't a ticker symbol.` };
   if (isWatched(t)) return { ok: false, message: `${t} is already on the watchlist.` };
-  if (watchlist.length >= WATCH_MAX) return { ok: false, message: `The watchlist holds up to ${WATCH_MAX} tickers — remove one first.` };
+  if (watchlist.length >= WATCH_MAX) return { ok: false, message: `The watchlist holds up to ${WATCH_MAX} tickers. Remove one first.` };
   watchlist.push({ t, at: Date.now() });
   persistWatchlist();
   return { ok: true, t };
@@ -1926,17 +1926,17 @@ async function refreshWatchQuotes(force) {
   try {
     const res = await fetch(`/quotes?symbols=${encodeURIComponent(watchlist.map(r => r.t).join(","))}`, { cache: "no-store" });
     const body = await res.json().catch(() => ({}));
-    if (res.status === 429) watchNotice = body.error || "Refreshing too often — try again in a moment.";
+    if (res.status === 429) watchNotice = body.error || "Refreshing too often. Try again in a moment.";
     else if (!res.ok) watchNotice = body.error || "Prices could not be loaded right now.";
     else if (body.available === false) watchNotice = body.message || "Live quotes are unavailable.";
     else {
       Object.assign(watchQuotes, body.quotes || {});
       watchFetchedAt = Date.now();
       const missing = Object.values(body.quotes || {}).filter(q => q.status === "deferred" || q.status === "error").length;
-      watchNotice = missing ? `${missing} price${missing === 1 ? "" : "s"} unavailable right now — the next refresh will try again.` : "";
+      watchNotice = missing ? `${missing} price${missing === 1 ? "" : "s"} unavailable right now. The next refresh will try again.` : "";
     }
   } catch (_) {
-    watchNotice = "Prices could not be loaded — check your connection.";
+    watchNotice = "Prices could not be loaded. Check your connection.";
   } finally {
     watchInflight = false;
     renderWatchlist();
@@ -2053,7 +2053,7 @@ function loadPortfolio() {
 }
 function persistPortfolio() {
   try { localStorage.setItem(PF_STORAGE_KEY, JSON.stringify(portfolio)); syncNoteChange("portfolio"); return true; }
-  catch (_) { showStorageNotice("Browser storage is full — the portfolio change could not be saved."); return false; }
+  catch (_) { showStorageNotice("Browser storage is full, so the portfolio change could not be saved."); return false; }
 }
 
 /* Add a lot, or (replace) overwrite a holding. Adding to a ticker already held merges the
@@ -2076,9 +2076,9 @@ function upsertHolding(rawT, rawShares, rawCost, replace = false) {
     held.cost = both ? (held.shares * held.cost + shares * cost) / total : null;
     held.shares = total;
     return { ok: true, t, message: both ? `Added to ${t}; average cost is now ${fUsd(held.cost)}.`
-      : `Added to ${t}. The average cost was cleared because one lot had none — edit it to set one.` };
+      : `Added to ${t}. The average cost was cleared because one lot had none. Edit it to set one.` };
   }
-  if (portfolio.length >= PF_MAX) return { ok: false, message: `The portfolio holds up to ${PF_MAX} tickers — remove one first.` };
+  if (portfolio.length >= PF_MAX) return { ok: false, message: `The portfolio holds up to ${PF_MAX} tickers. Remove one first.` };
   portfolio.push({ t, shares, cost });
   return { ok: true, t, message: `Added ${t}.` };
 }
@@ -2199,18 +2199,18 @@ async function refreshPortfolioQuotes(force) {
   try {
     const res = await fetch(`/quotes?symbols=${encodeURIComponent(portfolio.map(r => r.t).join(","))}`, { cache: "no-store" });
     const body = await res.json().catch(() => ({}));
-    if (res.status === 429) setPfNotice(body.error || "Refreshing too often — try again in a moment.");
+    if (res.status === 429) setPfNotice(body.error || "Refreshing too often. Try again in a moment.");
     else if (!res.ok) setPfNotice(body.error || "Prices could not be loaded right now.");
     else if (body.available === false) setPfNotice(body.message || "Live quotes are unavailable.");
     else {
       Object.assign(pfQuotes, body.quotes || {});
       pfFetchedAt = Date.now();
       const missing = Object.values(body.quotes || {}).filter(q => q.status === "deferred" || q.status === "error").length;
-      if (missing) setPfNotice(`${missing} price${missing === 1 ? "" : "s"} unavailable right now — the next refresh will try again.`);
+      if (missing) setPfNotice(`${missing} price${missing === 1 ? "" : "s"} unavailable right now. The next refresh will try again.`);
       else if (!pfNoticeOk) setPfNotice("");
     }
   } catch (_) {
-    setPfNotice("Prices could not be loaded — check your connection.");
+    setPfNotice("Prices could not be loaded. Check your connection.");
   } finally {
     pfInflight = false;
     renderPortfolio();
@@ -2260,7 +2260,7 @@ on("pfRefresh", "click", () => refreshPortfolioQuotes(true));
 on("pfImportBtn", "click", () => {
   const box = document.getElementById("pfImportText");
   const { added, failed } = importPortfolioText(box?.value);
-  const failNote = failed.length ? ` Skipped line${failed.length === 1 ? "" : "s"} ${failed.slice(0, 8).join(", ")}${failed.length > 8 ? "…" : ""} — expected "ticker, shares, cost".` : "";
+  const failNote = failed.length ? ` Skipped line${failed.length === 1 ? "" : "s"} ${failed.slice(0, 8).join(", ")}${failed.length > 8 ? "…" : ""}. Expected "ticker, shares, cost".` : "";
   setPfNotice(added ? `Imported ${added} holding${added === 1 ? "" : "s"}.${failNote}` : `Nothing imported.${failNote}`, !!added && !failed.length);
   if (added && box) { box.value = ""; document.getElementById("pfImport")?.removeAttribute("open"); }
   renderPortfolio();
@@ -2394,6 +2394,19 @@ function staleNoticeHtml(d, where) {
     <button type="button" class="chip" onclick="retryAnalysis('${jsAttr(d.ticker)}')" title="Re-run the analysis with current data">${RETRY_SVG}<span>Refresh</span></button></div>`;
 }
 
+/* The bar sheds whole labels, least glanceable first, until it fits. Ellipsing them left
+   "Techn…" / "TREN…" / "Results i…" at every width, which carries nothing; an absent label
+   at least doesn't pretend to. The company name goes whenever it would be cut at all. */
+function fitTickerBar() {
+  const bar = document.getElementById("tickerBar");
+  if (!bar || !bar.classList.contains("show")) return;
+  const company = document.getElementById("sCompany");
+  const shed = [".sector-badge", ".regime-badge:not(.event-badge)", ".event-badge"].map(s => bar.querySelector(s)).filter(Boolean);
+  [company, ...shed].forEach(el => { if (el) el.hidden = false; });
+  if (company && company.scrollWidth > company.clientWidth + 1) company.hidden = true;
+  for (const el of shed) { if (bar.scrollWidth <= bar.clientWidth) break; el.hidden = true; }
+}
+
 function renderStrip(d) {
   const q = d.live_quote || {}, t = (d.raw_data || {}).technicals || {};
   const company = d.company_profile || {}, regime = d.market_regime || {};
@@ -2417,6 +2430,7 @@ function renderStrip(d) {
   syncWatchToggle();
   strip.classList.add("show");
   document.body.classList.add("has-analysis");   // the wordmark's tagline yields its width
+  fitTickerBar();
 
   // price ticks up into place
   const pe = document.getElementById("sPrice");
@@ -2641,7 +2655,7 @@ FOCUS_MQ.addEventListener("change", () => {
 function promptCard(d) {
   if (!d.ai_prompt) return "";
   return card("prompt", "Exact Data Sent to the AI",
-    `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received — every figure above is here, so what you see is what the AI reads.</p>
+    `<p style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">The verbatim prompt the model received. Every figure above is here, so what you see is what the AI reads.</p>
      <button class="copy-btn" onclick="copyPrompt(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy prompt</button>
      <pre class="raw">${esc(d.ai_prompt)}</pre>`, { open: false });
 }
@@ -2887,7 +2901,7 @@ function renderAll(d) {
   if (d.sec_filing && d.sec_filing.source_url)
     secBody += `<p style="margin-top:10px;font-size:12px;color:var(--ink-dim)">Source filing: <a href="${esc(d.sec_filing.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(d.sec_filing.form)} · filed ${esc(d.sec_filing.filing_date)}</a></p>`;
   if (d.sec_available === false)
-    secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker — figures rely on the market-data provider only.</div>` + secBody;
+    secBody = `<div class="signal amber"><b>NOTE:</b>&nbsp;SEC EDGAR data unavailable for this ticker, so figures rely on the market-data provider only.</div>` + secBody;
   add("fundamentals", card("sec", "SEC-Verified Fundamentals (Latest 10-K)", secBody, { source: secSrc(d) }));
 
   /* Technicals */
@@ -2957,7 +2971,7 @@ function renderAll(d) {
     let body = `<div class="mgrid">
       ${metric(`Insider Buys <small>(${win}D)</small>`, String(fa.insider_buys ?? 0), fa.insider_buys > 0 ? "green" : "")}
       ${metric(`Insider Sells <small>(${win}D)</small>`, String(fa.insider_sells ?? 0), fa.insider_sells >= 5 ? "red" : "")}
-      ${metric("Recent 13D / 13D-A filing", fa.activist_13d ? "Present — inspect purpose and ownership changes" : "None found")}</div>`;
+      ${metric("Recent 13D / 13D-A filing", fa.activist_13d ? "Present. Inspect purpose and ownership changes" : "None found")}</div>`;
     body += `<div class="lvl-label">8-K events (last ${win} days)</div><div class="levels">` +
       (ev.length ? ev.map(e => `<span class="lvl" style="color:var(--ink);background:var(--chrome-2)">${esc(e)}</span>`).join("") : `<span style="font-size:12px;color:var(--ink-dim)">None filed.</span>`) + `</div>`;
     // The scraper caps how many filing documents it will fetch per run. When that binds,
@@ -2965,7 +2979,7 @@ function renderAll(d) {
     // having someone reconcile them against EDGAR and conclude the numbers are wrong.
     if (fa.truncated) {
       body += `<div style="font-size:var(--t-micro);color:var(--ink-dim);margin-top:8px">` +
-              `Counts are a floor — this issuer files more frequently than one analysis reads.</div>`;
+              `Counts are a floor: this issuer files more frequently than one analysis reads.</div>`;
     }
     add("filings", card("filings", `SEC Filing Activity (${win} Days)`, body, { source: secSrc(d) }));
   }
@@ -3077,7 +3091,7 @@ function chartCardBody() {
       <div class="menu-head">Scale</div>
       ${tog("pct", "% scale", "var(--accent)", false)}
       ${tog("vol", "Volume", "var(--ink-dim)", false)}
-      <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>—not predictions or automatic buy signals.</p></details>
+      <details class="chart-guide"><summary>How to use Fibonacci</summary><p>Choose <b>Draw Fib</b>, then click the start and end of a price swing. Drag either endpoint to refine it. The 38.2%, 50%, and 61.8% lines are possible reaction <em>zones</em>, not predictions or automatic buy signals.</p></details>
     </div>`;
   const chev = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
   /* Compare carries no id on purpose. expandChart clones this row into the modal's control
@@ -3907,6 +3921,11 @@ function paintChartPane(slot, primarySpec, comparing, shared) {
 /* The modal fires this on open and on close, and open is when expandChart has just cloned
    the control row — so this is where the clone gets its live state written into it. */
 window.chartRedrawCallback = function () { syncChartChrome(); drawChart(); };
+/* The bar is squeezed by its neighbours (the saved count, the watchlist count, the
+   viewport), which change after renderStrip runs, so refit whenever its own box changes.
+   Plex Mono can also arrive after the first render, and it is wider than the fallback. */
+if (window.ResizeObserver && document.getElementById("tickerBar")) new ResizeObserver(fitTickerBar).observe(document.getElementById("tickerBar"));
+if (document.fonts) document.fonts.ready.then(fitTickerBar).catch(() => {});
 window.addEventListener("resize", () => { syncMetricDensity(); clearTimeout(window._rz); window._rz = setTimeout(() => { if (active) drawChart(); }, 120); });
 
 /* ════════════════ MARKDOWN ════════════════ */
@@ -4066,7 +4085,7 @@ function renderChat() {
   syncChatDock();   // an empty thread is an input row, not a 280px band
   if (!sess) { m.innerHTML = ""; return; }
   if (!sess.history.length) {
-    m.innerHTML = `<div class="chat-empty">Ask anything about <b>${esc(active)}</b> — risks, peers, options ideas, or how institutions are positioned. Each ticker keeps its own thread.</div>`;
+    m.innerHTML = `<div class="chat-empty">Ask anything about <b>${esc(active)}</b>: risks, peers, options ideas, or how institutions are positioned. Each ticker keeps its own thread.</div>`;
     return;
   }
   m.innerHTML = sess.history.map((msg, i) => msg.role === "user"
@@ -4170,7 +4189,7 @@ async function streamChatReply(sess) {
       aiMsg.content = "⚠️ " + e.message;
     } else {
       aiMsg.error = true;
-      if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + " — please try again.";
+      if (!aiMsg.content) aiMsg.content = "⚠️ Connection error: " + e.message + ". Please try again.";
     }
   }
 
@@ -4821,7 +4840,7 @@ on("chartModalControls", "change", function (e) {
 
   const BASE_WIND = 0.9;     // ambient rightward drift (px/frame @60fps)
   const R = 70, R2 = R * R; // cursor influence radius
-  const MAX_V = 10;          // per-particle speed cap → keeps gusts tasteful, never flings
+  const MAX_V = 3;           // per-particle speed cap: a nudge, never a fling
 
   let W = 0, H = 0, particles = [];
   // Cursor: position + the movement velocity that becomes the "gust".
@@ -4873,9 +4892,9 @@ on("chartModalControls", "change", function (e) {
         if (d2 < R2) {
           const dist = Math.sqrt(d2) + 0.001;
           const f = 1 - dist / R;                         // 1 at cursor → 0 at edge
-          const push = f * 1.5;                           // radial: part the air around the pointer
-          ax += (dx / dist) * push + cur.vx * 0.18 * f;   // + drag air along the cursor's motion
-          ay += (dy / dist) * push + cur.vy * 0.18 * f;
+          const push = f * f * 0.25;                      // radial: part the air gently, mostly near the pointer
+          ax += (dx / dist) * push + cur.vx * 0.04 * f;   // + a light drag along the cursor's motion
+          ay += (dy / dist) * push + cur.vy * 0.04 * f;
           if (f > p.heat) p.heat = f;                     // light up; lingers via the decay below
         }
       }
@@ -4890,9 +4909,9 @@ on("chartModalControls", "change", function (e) {
       if (sp > MAX_V) { p.vx *= MAX_V / sp; p.vy *= MAX_V / sp; }
 
       const nx = p.x + p.vx, ny = p.y + p.vy;
-      const tail = Math.min(p.len + p.heat * 22, 6 + sp * 7 + p.heat * 22);  // faster/gusted → longer streak
+      const tail = Math.min(p.len + p.heat * 10, 6 + sp * 7 + p.heat * 10);  // faster/gusted → longer streak
       const ang = Math.atan2(p.vy, p.vx);
-      ctx.globalAlpha = Math.min(0.8, p.a + sp * 0.05 + p.heat * 0.4);
+      ctx.globalAlpha = Math.min(0.6, p.a + sp * 0.05 + p.heat * 0.2);
       ctx.beginPath();
       ctx.moveTo(nx - Math.cos(ang) * tail, ny - Math.sin(ang) * tail);
       ctx.lineTo(nx, ny);

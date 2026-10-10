@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="robots" content="noindex,nofollow" />
-<title>Historical Analyzer — Squall</title>
+<title>Historical Analyzer - Squall</title>
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
@@ -48,7 +48,7 @@
       <button id="backtestRun" type="submit">Run research replay</button>
     </form>
     <p class="backtest-caveat">Prices are split-adjusted. Historical news, options flow, analyst estimates, and historical index membership are omitted when they cannot be reconstructed honestly.</p>
-    <details class="backtest-panel" open><summary>Replay v2 — policy and limitations</summary>
+    <details class="backtest-panel" open><summary>Replay v2: policy and limitations</summary>
       <p>25% initial exposure; remaining cash earns zero. Enter at the next session open. An 8% adverse or 16% favorable close triggers an exit at the following open; these are close-based rules, not intraday stop orders. Otherwise exit at the open after the chosen number of held sessions. No trailing stop, tolerated breach, conviction sizing or AI exit review. MySquall does not alter this experiment.</p>
       <p>Assume 10 basis points of cost on each entry/exit and 3% annual borrow on initial short notional. Both benchmarks use the same exposure, costs and observation window. The simulation measures split-adjusted price returns; dividends, cash interest, taxes, margin calls and actual borrow availability are excluded. These are declared scenario assumptions, not calibrated optimal settings.</p>
       <p>A selected historical case is exploratory evidence, not an out-of-sample test. The model may remember later events; current data may contain revisions, and surviving symbols introduce selection bias. Assess predictive skill with a separately frozen, prospective paper-trading study. Failed decisions are reported as unavailable, never replaced with a trade.</p>
